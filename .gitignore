@@ -1,0 +1,11 @@
+# Artefatti di build .NET
+bin/
+obj/
+
+# File utente dell'IDE
+.idea/**/workspace.xml
+.idea/**/usage.statistics.xml
+.idea/**/shelf/
+*.user
+*.suo
+.vs/
