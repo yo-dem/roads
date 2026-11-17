@@ -14,6 +14,7 @@ public static class Program
     ///   --click px,py@secondi     (ripetibile) simula un click sinistro nel punto dello schermo
     ///   --slow                    passo lento (come tenere premuto Shift)
     ///   --mute                    nessun suono
+    ///   --drive sterzo,gas[,finoA] guida con la visuale da dietro (come i tasti WASD)
     /// </summary>
     public static void Main(string[] args)
     {
@@ -57,6 +58,11 @@ public static class Program
                     break;
                 case "--slow":
                     d.Slow = true;
+                    break;
+                case "--drive" when i + 1 < args.Length:
+                    var dv = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
+                    d.Drive = new Vector2(dv[0], dv[1]);
+                    if (dv.Length > 2) d.DriveUntil = dv[2];
                     break;
                 case "--mute":
                     d.Mute = true;

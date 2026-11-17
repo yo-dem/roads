@@ -18,6 +18,8 @@ public sealed class DebugOptions
     public List<(Vector2 Screen, float Time)> Clicks { get; } = new();
     public Vector3? Walk;
     public float WalkUntil = float.MaxValue;
+    public Vector2? Drive;          // guida manuale simulata: X = sterzo, Y = gas
+    public float DriveUntil = float.MaxValue;
     public bool Slow;
     public bool Mute;
 }
@@ -42,6 +44,9 @@ public sealed class Game : IDisposable
     private bool _mouseHeld, _rightHeld;
     private Vector2 _lastMouse;
     private float _markerAge;
+    private bool _chase;          // vista di guida dietro l'auto (tastiera)
+    private float _chaseIdle;
+    private const float ChaseTimeout = 2.5f;
     private int _clickIndex;
 
     private WorldMap _world = null!;
@@ -98,6 +103,7 @@ public sealed class Game : IDisposable
                 }
                 if (button != MouseButton.Left) return;
                 _mouseHeld = true;
+                _chase = false; // il click riporta alla vista dall'alto
                 _mouse = m;
                 if (Pick(m.Position)) _markerAge = 0f;
             };
@@ -182,24 +188,42 @@ public sealed class Game : IDisposable
         if (_keyboard.IsKeyPressed(Key.Q)) _camera.Yaw -= 1.8f * dt;
         if (_keyboard.IsKeyPressed(Key.E)) _camera.Yaw += 1.8f * dt;
 
-        float ix = (Down(Key.D, Key.Right) ? 1f : 0f) - (Down(Key.A, Key.Left) ? 1f : 0f);
-        float iy = (Down(Key.W, Key.Up) ? 1f : 0f) - (Down(Key.S, Key.Down) ? 1f : 0f);
-        Vector3 input = _camera.Right * ix + _camera.Forward * iy;
+        // Tastiera = guida "da gioco di auto": sterzo e gas relativi all'auto, camera alle sue spalle
+        float steerIn = (Down(Key.D, Key.Right) ? 1f : 0f) - (Down(Key.A, Key.Left) ? 1f : 0f);
+        float throttleIn = (Down(Key.W, Key.Up) ? 1f : 0f) - (Down(Key.S, Key.Down) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
+        Vector3 input = Vector3.Zero;
 
         // Tenendo premuto il tasto sinistro il personaggio segue il cursore
         if (_mouseHeld && _mouse != null) Pick(_mouse.Position);
 
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
             input = walk;
+        if (_debug.Drive is { } drive && _time > 0.5f && _time < _debug.DriveUntil)
+            (steerIn, throttleIn) = (drive.X, drive.Y);
         if (_debug.Slow) slow = true;
         while (_clickIndex < _debug.Clicks.Count && _time >= _debug.Clicks[_clickIndex].Time)
         {
+            _chase = false;
             if (Pick(_debug.Clicks[_clickIndex].Screen)) _markerAge = 0f;
             _clickIndex++;
         }
 
-        _player.Update(dt, input, slow, _world, _particles);
+        // Si entra nella vista di guida premendo un tasto; si torna dall'alto con un click,
+        // o dopo qualche secondo da fermi senza toccare i tasti
+        if (steerIn != 0f || throttleIn != 0f)
+        {
+            _chase = true;
+            _chaseIdle = 0f;
+        }
+        else if (_chase)
+        {
+            _chaseIdle += dt;
+            if (_chaseIdle > ChaseTimeout && MathF.Abs(_player.Speed) < 0.3f) _chase = false;
+        }
+        Vector2? manual = _chase ? new Vector2(steerIn, throttleIn) : null;
+
+        _player.Update(dt, input, slow, _world, _particles, manual);
         _markerAge += dt;
         Zone? spawned = _world.Update(dt, _player.Position);
         if (spawned != null)
@@ -213,7 +237,7 @@ public sealed class Game : IDisposable
 
         _particles.Update(dt);
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
-        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f);
+        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f, _chase, _player.Yaw);
         _engine?.Update(dt, MathF.Min(MathF.Abs(_player.Speed) / _player.MaxSpeed, 1f), _player.Throttle);
 
         _titleTimer += deltaTime;
@@ -275,7 +299,8 @@ public sealed class Game : IDisposable
         CollectScene();
 
         // --- 1. Shadow map dal punto di vista del sole, centrata sulla camera ---
-        Vector3 center = _camera.Target;
+        // In vista di guida si vede lontano davanti: l'area delle ombre si sposta in avanti
+        Vector3 center = _camera.Target + _camera.Forward * (12f * _camera.Chase);
         Matrix4x4 lightView = Matrix4x4.CreateLookAt(center - LightDir * 50f, center, Vector3.UnitY);
         Matrix4x4 lightSpace = lightView * Matrix4x4.CreateOrthographic(56f, 56f, 1f, 110f);
 
@@ -322,8 +347,8 @@ public sealed class Game : IDisposable
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", _player.Position + new Vector3(0, 0.45f, 0));
 
-        _lit.SetFloat("uFogNear", _camera.Distance + 14f);
-        _lit.SetFloat("uFogFar", _camera.Distance + 55f);
+        _lit.SetFloat("uFogNear", _camera.EffectiveDistance + 14f);
+        _lit.SetFloat("uFogFar", _camera.EffectiveDistance + 55f);
         _lit.SetFloat("uTime", _time);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, _shadow.Texture);

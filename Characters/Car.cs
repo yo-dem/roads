@@ -19,10 +19,15 @@ public sealed class Car : IDisposable
     private const float ReverseSpeed = 2.4f;
     private const float Accel = 5f;           // unità/s²
     private const float Brake = 11f;
+    private const float Coast = 3f;            // rallentamento senza gas (guida manuale)
     private const float Scale = 1.1f;
     private const float WheelBase = 1.0f * Scale; // distanza tra gli assi (ruote a z = ±0.5)
     private const float MaxSteer = 0.6f;          // rad: raggio minimo ≈ WheelBase / tan(MaxSteer) ≈ 1.6
     private const float SteerRate = 3.5f;         // rad/s: velocità con cui si girano le ruote
+    // Guida da tastiera: i tasti sono tutto-o-niente, quindi lo sterzo va ammorbidito
+    private const float ManualSteerIn = 1.1f;     // rad/s: tenendo premuto, le ruote girano piano
+    private const float ManualSteerOut = 3f;      // rad/s: rilasciando tornano dritte più in fretta
+    private const float ManualSteerAtSpeed = 0.2f; // angolo massimo a piena velocità (da fermi resta MaxSteer)
     private const float HullOffset = 0.46f;       // centri dei due cerchi di collisione, davanti e dietro
     private const float HullRadius = 0.5f;
     private const float PlanRadius = 0.6f;        // margine per la ricerca del percorso
@@ -263,12 +268,17 @@ public sealed class Car : IDisposable
         _blockedTimer = 0f;
     }
 
-    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx)
+    /// <param name="input">Direzione voluta nel mondo (comandi relativi alla camera dall'alto).</param>
+    /// <param name="manual">
+    /// Guida diretta "da gioco di auto": X = sterzo (-1 sinistra, +1 destra), Y = gas (+1) / freno e retro (-1).
+    /// Se presente ha la precedenza su <paramref name="input"/> e sul percorso.
+    /// </param>
+    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Vector2? manual = null)
     {
         _time += dt;
         _sinceManeuver += dt;
         float maxSpeed = slow ? SlowSpeed : FastSpeed;
-        bool keys = input.LengthSquared() > 0.01f;
+        bool keys = manual != null || input.LengthSquared() > 0.01f;
 
         _planCooldown -= dt;
         if (!keys && _request is { } req && _planCooldown <= 0f)
@@ -288,7 +298,8 @@ public sealed class Car : IDisposable
         Vector3? aim = null;
         float remaining = float.MaxValue;
         bool following = false;
-        if (keys)
+        if (manual != null) { }
+        else if (keys)
             aim = Position + Vector3.Normalize(Flat(input)) * 3f;
         else if (Target != null && _waypoints.Count > 0)
         {
@@ -300,7 +311,19 @@ public sealed class Car : IDisposable
 
         // --- Sterzo e velocità desiderati
         float wantSpeed = 0f, wantSteer = 0f, diff = 0f;
-        if (aim is { } goal)
+        bool coasting = false;
+        if (manual is { } drive)
+        {
+            _maneuver = 0f;
+            // Sterzo a destra = rotazione oraria vista dall'alto = yaw che diminuisce
+            // Più si va veloci, meno si sterza: a piena velocità circa 70° al secondo invece di 240°
+            float limit = Noise.Lerp(MaxSteer, ManualSteerAtSpeed, MathF.Min(MathF.Abs(_speed) / FastSpeed, 1f));
+            wantSteer = -Math.Clamp(drive.X, -1f, 1f) * limit;
+            if (drive.Y > 0.1f) wantSpeed = maxSpeed;
+            else if (drive.Y < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
+            else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
+        }
+        else if (aim is { } goal)
         {
             Vector3 to = Flat(goal - Position);
             float dist = MathF.Max(to.Length(), 0.5f);
@@ -343,10 +366,16 @@ public sealed class Car : IDisposable
         }
 
         // --- Dinamica: ruote che sterzano progressivamente, accelerazione e frenata lineari
-        _steer = MoveTowards(_steer, wantSteer, SteerRate * dt);
+        float steerRate = SteerRate;
+        if (manual != null)
+        {
+            bool turningIn = MathF.Abs(wantSteer) > MathF.Abs(_steer) && wantSteer * _steer >= 0f;
+            steerRate = turningIn ? ManualSteerIn : ManualSteerOut;
+        }
+        _steer = MoveTowards(_steer, wantSteer, steerRate * dt);
         bool braking = MathF.Abs(wantSpeed) < MathF.Abs(_speed) - 0.05f || wantSpeed * _speed < 0f;
         float prevSpeed = _speed;
-        _speed = MoveTowards(_speed, wantSpeed, (braking ? Brake : Accel) * dt);
+        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? Brake : Accel) * dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
         Throttle = Noise.Lerp(Throttle, braking || wantSpeed == 0f ? 0f : 1f, Noise.Damp(6f, dt));
 
@@ -384,7 +413,7 @@ public sealed class Car : IDisposable
         Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
 
         // Luci: stop accesi in frenata (e in retro), con un breve strascico per non sfarfallare
-        bool stopLights = (braking && MathF.Abs(_speed) > 0.3f) || _speed < -0.05f;
+        bool stopLights = (braking && !coasting && MathF.Abs(_speed) > 0.3f) || _speed < -0.05f;
         _brakeGlow = stopLights ? 1f : MathF.Max(0f, _brakeGlow - dt * 4f);
 
         // Assetto: segue il terreno (ponti ad arco, pendii) e si inclina in curva e in frenata
