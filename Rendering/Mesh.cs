@@ -1,0 +1,55 @@
+using Silk.NET.OpenGL;
+
+namespace Roads.Rendering;
+
+/// <summary>
+/// Mesh su GPU. Formato vertice: posizione (3) + normale (3) + colore (3).
+/// </summary>
+public sealed class Mesh : IDisposable
+{
+    public const int FloatsPerVertex = 9;
+
+    private readonly GL _gl;
+    private readonly uint _vao, _vbo, _ebo;
+    private readonly uint _indexCount;
+
+    public unsafe Mesh(GL gl, ReadOnlySpan<float> vertices, ReadOnlySpan<uint> indices)
+    {
+        _gl = gl;
+        _indexCount = (uint)indices.Length;
+
+        _vao = _gl.GenVertexArray();
+        _gl.BindVertexArray(_vao);
+
+        _vbo = _gl.GenBuffer();
+        _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vbo);
+        _gl.BufferData(BufferTargetARB.ArrayBuffer, vertices, BufferUsageARB.StaticDraw);
+
+        _ebo = _gl.GenBuffer();
+        _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, _ebo);
+        _gl.BufferData(BufferTargetARB.ElementArrayBuffer, indices, BufferUsageARB.StaticDraw);
+
+        uint stride = FloatsPerVertex * sizeof(float);
+        _gl.EnableVertexAttribArray(0);
+        _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, (void*)0);
+        _gl.EnableVertexAttribArray(1);
+        _gl.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
+        _gl.EnableVertexAttribArray(2);
+        _gl.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+
+        _gl.BindVertexArray(0);
+    }
+
+    public unsafe void Draw()
+    {
+        _gl.BindVertexArray(_vao);
+        _gl.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, (void*)0);
+    }
+
+    public void Dispose()
+    {
+        _gl.DeleteBuffer(_vbo);
+        _gl.DeleteBuffer(_ebo);
+        _gl.DeleteVertexArray(_vao);
+    }
+}
