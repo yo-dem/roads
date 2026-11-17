@@ -169,6 +169,13 @@ public sealed class WorldMap : IDisposable
         return false;
     }
 
+    public bool IsRoad(Vector3 p)
+    {
+        foreach (var c in Connectors)
+            if (c.Bridge.TryGetHeight(p, 0f, out _)) return true;
+        return ZoneAt(p)?.IsRoad(p) ?? false;
+    }
+
     public float GroundHeight(Vector3 p)
     {
         foreach (var c in Connectors)

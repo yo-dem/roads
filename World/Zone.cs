@@ -31,11 +31,13 @@ public sealed class Zone : IDisposable
     public bool[] Exits { get; } = new bool[4];
 
     public Mesh Opaque { get; }
+    /// <summary>Alberi, rocce e oggetti di scena: separati dal terreno per renderli trasparenti quando coprono il giocatore.</summary>
+    public Mesh Scenery { get; }
     public Mesh? Water { get; }
     public List<Bridge> Bridges { get; } = new();
     public List<Vector3> Campfires { get; } = new(); // coordinate locali
 
-    /// <summary>Avanzamento dell'animazione di comparsa (0 â†’ 1).</summary>
+    /// <summary>Avanzamento dell'animazione di comparsa (0 → 1).</summary>
     public float Rise;
     public bool Ready => Rise >= 1f;
     public float YOffset => -22f * (1f - EaseOutBack(Math.Clamp(Rise, 0f, 1f)));
@@ -120,8 +122,12 @@ public sealed class Zone : IDisposable
         BuildPaths(mb, rng);
         foreach (var b in Bridges)
             b.Build(mb, b.Center - Origin);
-        PlaceProps(mb, rng, home);
         Opaque = mb.Build(gl);
+
+        // Stesso Random: la sequenza dei numeri casuali (e quindi il mondo) resta identica
+        var pb = new MeshBuilder { ColorRng = rng, ColorJitter = 0.05f, ComputeEdges = true };
+        PlaceProps(pb, rng, home);
+        Scenery = pb.Build(gl);
 
         var wb = new MeshBuilder();
         if (_hasRiver) BuildWater(wb);
@@ -439,7 +445,10 @@ public sealed class Zone : IDisposable
                     if (!Free(x, z, radius * s, pathMargin)) continue;
                     placed.Add((x, z, radius * s));
                     if (colliderR > 0f) AddCollider(x, z, colliderR * s);
+                    // Solo ciò che ha un ingombro (alberi, rocce, cespugli) può nascondere il giocatore
+                    if (colliderR > 0f) mb.BeginObject();
                     build(At(x, z), s);
+                    if (colliderR > 0f) mb.EndObject();
                     break;
                 }
             }
@@ -449,7 +458,9 @@ public sealed class Zone : IDisposable
         {
             placed.Add((x, z, radius));
             if (colliderR > 0f) AddCollider(x, z, colliderR);
+            mb.BeginObject();
             build(At(x, z));
+            mb.EndObject();
         }
 
         var pineGreen = new Vector3(0.16f, 0.48f, 0.20f);
@@ -553,7 +564,7 @@ public sealed class Zone : IDisposable
         float lim = Half - 0.25f;
         if (MathF.Abs(x) > lim || MathF.Abs(z) > lim)
         {
-            // Oltre il bordo si puÃ² andare solo nel corridoio di un'uscita
+            // Oltre il bordo si può andare solo nel corridoio di un'uscita
             bool corridor = false;
             if (MathF.Abs(x) <= Half + 0.05f && MathF.Abs(z) <= Half + 0.05f)
             {
@@ -598,6 +609,14 @@ public sealed class Zone : IDisposable
                 (_buckets[i, j] ??= new()).Add((x, z, r));
     }
 
+    /// <summary>Il punto è su un sentiero o su un ponte? (le strade sono preferite dalla ricerca del percorso)</summary>
+    public bool IsRoad(Vector3 world)
+    {
+        foreach (var b in Bridges)
+            if (b.TryGetHeight(world, 0f, out _)) return true;
+        return PathDistance(world.X - Origin.X, world.Z - Origin.Z) < PathHalf;
+    }
+
     public float GroundHeight(Vector3 world)
     {
         foreach (var b in Bridges)
@@ -609,6 +628,7 @@ public sealed class Zone : IDisposable
     public void Dispose()
     {
         Opaque.Dispose();
+        Scenery.Dispose();
         Water?.Dispose();
     }
 }

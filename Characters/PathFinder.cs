@@ -7,12 +7,16 @@ namespace Roads.Characters;
 /// Ricerca del percorso A* su una griglia fine centrata sul personaggio, usando
 /// <see cref="WorldMap.IsWalkable"/> come mappa degli ostacoli. Il percorso viene poi
 /// "tirato" (string pulling) per ottenere pochi tratti rettilinei e naturali.
+/// Sentieri e ponti costano meno del prato, quindi il percorso preferisce le strade
+/// quando la deviazione non è eccessiva.
 /// </summary>
 public static class PathFinder
 {
     private const float CellSize = 0.35f;
     private const int MaxExpanded = 20000;
     private const int Margin = 30; // celle oltre il rettangolo partenza-arrivo
+    private const float OffRoadCost = 1.8f; // un metro di prato "vale" 1.8 metri di strada
+    private const float DirectDistance = 6f; // sotto questa distanza si va dritti se possibile
 
     private static readonly (int Di, int Dj, float Cost)[] Neighbours =
     [
@@ -37,7 +41,10 @@ public static class PathFinder
             reached = goal;
         }
 
-        if (LineClear(world, start, goal, radius))
+        // Vicino, o tutto su strada: inutile cercare, si va dritti
+        if (LineClear(world, start, goal, radius)
+            && (Flat(goal - start).Length() < DirectDistance
+                || SegmentCost(world, start, goal) <= Flat(goal - start).Length() * 1.01f))
             return [goal];
 
         var cache = new Dictionary<(int, int), bool>();
@@ -48,6 +55,13 @@ public static class PathFinder
             if (!cache.TryGetValue(c, out bool w))
                 cache[c] = w = world.IsWalkable(Pos(c), radius);
             return w;
+        }
+        var costCache = new Dictionary<(int, int), float>();
+        float CellCost((int I, int J) c)
+        {
+            if (!costCache.TryGetValue(c, out float k))
+                costCache[c] = k = world.IsRoad(Pos(c)) ? 1f : OffRoadCost;
+            return k;
         }
 
         var goalCell = ((int)MathF.Round((goal.X - start.X) / CellSize), (int)MathF.Round((goal.Z - start.Z) / CellSize));
@@ -81,7 +95,7 @@ public static class PathFinder
                 // In diagonale niente "tagli" sugli spigoli degli ostacoli
                 if (di != 0 && dj != 0 && (!Walkable((cur.Item1 + di, cur.Item2)) || !Walkable((cur.Item1, cur.Item2 + dj))))
                     continue;
-                float ng = g[cur] + cost;
+                float ng = g[cur] + cost * 0.5f * (CellCost(cur) + CellCost(n));
                 if (g.TryGetValue(n, out float old) && old <= ng) continue;
                 g[n] = ng;
                 parent[n] = cur;
@@ -102,6 +116,24 @@ public static class PathFinder
             reached = last;
 
         return Smooth(world, start, cells, radius);
+    }
+
+    private static Vector3 Flat(Vector3 v) => new(v.X, 0, v.Z);
+
+    /// <summary>Costo di un tratto rettilineo: lunghezza pesata dal tipo di terreno attraversato.</summary>
+    private static float SegmentCost(WorldMap world, Vector3 a, Vector3 b)
+    {
+        Vector3 d = Flat(b - a);
+        float len = d.Length();
+        if (len < 1e-4f) return 0f;
+        int steps = Math.Max(1, (int)MathF.Ceiling(len / 0.3f));
+        float step = len / steps, total = 0f;
+        for (int i = 0; i < steps; i++)
+        {
+            Vector3 p = a + d * ((i + 0.5f) / steps);
+            total += step * (world.IsRoad(p) ? 1f : OffRoadCost);
+        }
+        return total;
     }
 
     /// <summary>Cerca, ad anelli crescenti, il punto calpestabile più vicino.</summary>
@@ -137,17 +169,30 @@ public static class PathFinder
         return world.IsWalkable(b, radius);
     }
 
+    /// <summary>
+    /// String pulling: da ogni punto salta al più lontano raggiungibile in linea retta, ma solo se
+    /// la scorciatoia non costa più del tratto che sostituisce (così non si abbandona la strada per il prato).
+    /// </summary>
     private static List<Vector3> Smooth(WorldMap world, Vector3 start, List<Vector3> pts, float radius)
     {
+        // Costo cumulato lungo il percorso a celle: cum[i] = costo da start fino a pts[i - 1]
+        var cum = new float[pts.Count + 1];
+        for (int i = 0; i < pts.Count; i++)
+            cum[i + 1] = cum[i] + SegmentCost(world, i == 0 ? start : pts[i - 1], pts[i]);
+
         var result = new List<Vector3>();
         Vector3 anchor = start;
-        int k = 0;
+        int anchorIdx = 0, k = 0;
         while (k < pts.Count)
         {
             int m = k;
-            while (m + 1 < pts.Count && LineClear(world, anchor, pts[m + 1], radius)) m++;
+            while (m + 1 < pts.Count
+                   && LineClear(world, anchor, pts[m + 1], radius)
+                   && SegmentCost(world, anchor, pts[m + 1]) <= (cum[m + 2] - cum[anchorIdx]) * 1.02f + 0.05f)
+                m++;
             result.Add(pts[m]);
             anchor = pts[m];
+            anchorIdx = m + 1;
             k = m + 1;
         }
         return result;

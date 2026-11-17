@@ -21,9 +21,21 @@ public sealed class MeshBuilder
     public float ColorJitter;
     public Random? ColorRng;
 
+    /// <summary>
+    /// Se vero, <see cref="Build"/> calcola gli spigoli "veri" (tra facce non complanari) e li
+    /// codifica con coordinate baricentriche, così lo shader può disegnarli quando l'oggetto è trasparente.
+    /// </summary>
+    public bool ComputeEdges;
+
     public bool IsEmpty => _indices.Count == 0;
 
-    private uint VertexCount => (uint)(_vertices.Count / Mesh.FloatsPerVertex);
+    private const int BaseFloats = 9;   // posizione, normale, colore (come vengono accumulati)
+    private const int ObjectFloats = 5; // centro x/z, raggio, quota minima e massima dell'oggetto
+
+    private readonly List<float> _objects = new();
+    private int _objectStart = -1;
+
+    private uint VertexCount => (uint)(_vertices.Count / BaseFloats);
 
     private Vector3 Jitter(Vector3 c)
     {
@@ -36,6 +48,40 @@ public sealed class MeshBuilder
         _vertices.Add(p.X); _vertices.Add(p.Y); _vertices.Add(p.Z);
         _vertices.Add(n.X); _vertices.Add(n.Y); _vertices.Add(n.Z);
         _vertices.Add(c.X); _vertices.Add(c.Y); _vertices.Add(c.Z);
+        for (int k = 0; k < ObjectFloats; k++) _objects.Add(0f);
+    }
+
+    /// <summary>Inizia un oggetto (albero, roccia...): la geometria aggiunta fino a <see cref="EndObject"/> ne fa parte.</summary>
+    public void BeginObject() => _objectStart = (int)VertexCount;
+
+    /// <summary>
+    /// Chiude l'oggetto e scrive nei suoi vertici il suo ingombro (cilindro verticale), usato dallo shader
+    /// per renderlo trasparente per intero quando copre il giocatore.
+    /// </summary>
+    public void EndObject()
+    {
+        int start = _objectStart, end = (int)VertexCount;
+        _objectStart = -1;
+        if (start < 0 || end <= start) return;
+
+        Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+        for (int v = start; v < end; v++)
+        {
+            var p = new Vector3(_vertices[v * BaseFloats], _vertices[v * BaseFloats + 1], _vertices[v * BaseFloats + 2]);
+            min = Vector3.Min(min, p);
+            max = Vector3.Max(max, p);
+        }
+        float cx = (min.X + max.X) * 0.5f, cz = (min.Z + max.Z) * 0.5f;
+        float radius = MathF.Max(max.X - min.X, max.Z - min.Z) * 0.5f;
+        for (int v = start; v < end; v++)
+        {
+            int o = v * ObjectFloats;
+            _objects[o] = cx;
+            _objects[o + 1] = cz;
+            _objects[o + 2] = radius;
+            _objects[o + 3] = min.Y;
+            _objects[o + 4] = max.Y;
+        }
     }
 
     private static Vector3 FaceNormal(Vector3 a, Vector3 b, Vector3 c)
@@ -216,6 +262,76 @@ public sealed class MeshBuilder
         }
     }
 
-    public Mesh Build(GL gl) =>
-        new(gl, CollectionsMarshal.AsSpan(_vertices), CollectionsMarshal.AsSpan(_indices));
+    public Mesh Build(GL gl)
+    {
+        if (ComputeEdges) return BuildWithEdges(gl);
+
+        int count = (int)VertexCount;
+        var data = new float[count * Mesh.FloatsPerVertex];
+        for (int v = 0; v < count; v++)
+            WriteVertex(data, v, v, Vector3.One); // nessuno spigolo: baricentriche mai a zero
+        return new Mesh(gl, data, CollectionsMarshal.AsSpan(_indices));
+    }
+
+    private void WriteVertex(float[] data, int dst, int src, Vector3 bary)
+    {
+        int o = dst * Mesh.FloatsPerVertex;
+        for (int k = 0; k < BaseFloats; k++) data[o + k] = _vertices[src * BaseFloats + k];
+        data[o + 9] = bary.X;
+        data[o + 10] = bary.Y;
+        data[o + 11] = bary.Z;
+        for (int k = 0; k < ObjectFloats; k++) data[o + 12 + k] = _objects[src * ObjectFloats + k];
+    }
+
+    /// <summary>
+    /// Ogni triangolo riceve vertici propri con coordinate baricentriche (1,0,0), (0,1,0), (0,0,1).
+    /// Il lato opposto al vertice k è dove la componente k vale zero; se quel lato è condiviso con un
+    /// triangolo complanare (es. la diagonale di un quad) la componente viene alzata di 1, così lo
+    /// shader non lo disegna.
+    /// </summary>
+    private Mesh BuildWithEdges(GL gl)
+    {
+        int triCount = _indices.Count / 3;
+        Vector3 Pos(uint v) => new(_vertices[(int)v * BaseFloats], _vertices[(int)v * BaseFloats + 1], _vertices[(int)v * BaseFloats + 2]);
+        Vector3 Nrm(uint v) => new(_vertices[(int)v * BaseFloats + 3], _vertices[(int)v * BaseFloats + 4], _vertices[(int)v * BaseFloats + 5]);
+
+        static (int, int, int) Q(Vector3 p) =>
+            ((int)MathF.Round(p.X * 2000f), (int)MathF.Round(p.Y * 2000f), (int)MathF.Round(p.Z * 2000f));
+        static ((int, int, int), (int, int, int)) Key((int, int, int) a, (int, int, int) b) =>
+            a.CompareTo(b) <= 0 ? (a, b) : (b, a);
+
+        var edges = new Dictionary<((int, int, int), (int, int, int)), List<int>>(); // lato -> triangoli*3 + k
+        for (int t = 0; t < triCount; t++)
+            for (int k = 0; k < 3; k++)
+            {
+                uint a = _indices[t * 3 + (k + 1) % 3], b = _indices[t * 3 + (k + 2) % 3];
+                var key = Key(Q(Pos(a)), Q(Pos(b)));
+                if (!edges.TryGetValue(key, out var list)) edges[key] = list = new List<int>(2);
+                list.Add(t * 3 + k);
+            }
+
+        var hidden = new bool[triCount * 3];
+        foreach (var list in edges.Values)
+        {
+            if (list.Count != 2) continue;
+            int t0 = list[0] / 3, t1 = list[1] / 3;
+            if (Vector3.Dot(Nrm(_indices[t0 * 3]), Nrm(_indices[t1 * 3])) > 0.999f)
+                hidden[list[0]] = hidden[list[1]] = true;
+        }
+
+        var data = new float[triCount * 3 * Mesh.FloatsPerVertex];
+        var indices = new uint[triCount * 3];
+        for (int t = 0; t < triCount; t++)
+        {
+            var hide = new Vector3(hidden[t * 3] ? 1 : 0, hidden[t * 3 + 1] ? 1 : 0, hidden[t * 3 + 2] ? 1 : 0);
+            for (int k = 0; k < 3; k++)
+            {
+                int dst = t * 3 + k;
+                var bary = new Vector3(k == 0 ? 1 : 0, k == 1 ? 1 : 0, k == 2 ? 1 : 0) + hide;
+                WriteVertex(data, dst, (int)_indices[dst], bary);
+                indices[dst] = (uint)dst;
+            }
+        }
+        return new Mesh(gl, data, indices);
+    }
 }

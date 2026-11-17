@@ -1,4 +1,5 @@
 using System.Numerics;
+using Roads.Audio;
 using Roads.Characters;
 using Roads.Rendering;
 using Roads.World;
@@ -18,6 +19,7 @@ public sealed class DebugOptions
     public Vector3? Walk;
     public float WalkUntil = float.MaxValue;
     public bool Slow;
+    public bool Mute;
 }
 
 public sealed class Game : IDisposable
@@ -45,6 +47,7 @@ public sealed class Game : IDisposable
     private WorldMap _world = null!;
     private Car _player = null!; // il personaggio (Villager) è messo da parte
     private Particles _particles = null!;
+    private EngineSound? _engine;
     private readonly IsoCamera _camera = new();
 
     private readonly List<DrawItem> _opaque = new();
@@ -123,6 +126,7 @@ public sealed class Game : IDisposable
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, MathF.PI / 2f);
         _camera.Snap(_player.Position);
+        if (!_debug.Mute) _engine = new EngineSound();
     }
 
     private bool Down(Key a, Key b) => _keyboard.IsKeyPressed(a) || _keyboard.IsKeyPressed(b);
@@ -208,7 +212,9 @@ public sealed class Game : IDisposable
                     _particles.Ember(zone.Origin + c + new Vector3(0, zone.YOffset, 0));
 
         _particles.Update(dt);
-        _camera.Update(dt, _player.Position);
+        // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
+        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f);
+        _engine?.Update(dt, MathF.Min(MathF.Abs(_player.Speed) / _player.MaxSpeed, 1f), _player.Throttle);
 
         _titleTimer += deltaTime;
         if (_titleTimer > 0.25)
@@ -228,6 +234,7 @@ public sealed class Game : IDisposable
         {
             Matrix4x4 m = zone.Model;
             _opaque.Add(new DrawItem(zone.Opaque, m));
+            _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true));
             if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m));
 
             for (int i = 0; i < zone.Campfires.Count; i++)
@@ -313,6 +320,7 @@ public sealed class Game : IDisposable
         _lit.SetMatrix("uLightSpace", lightSpace);
         _lit.SetVector3("uLightDir", LightDir);
         _lit.SetVector3("uCameraPos", _camera.Position);
+        _lit.SetVector3("uFocus", _player.Position + new Vector3(0, 0.45f, 0));
 
         _lit.SetFloat("uFogNear", _camera.Distance + 14f);
         _lit.SetFloat("uFogFar", _camera.Distance + 55f);
@@ -326,10 +334,12 @@ public sealed class Game : IDisposable
         foreach (var item in _opaque)
         {
             _lit.SetMatrix("uModel", item.Model);
+            _lit.SetInt("uSeeThrough", item.SeeThrough ? 1 : 0);
             _lit.SetFloat("uEmissive", item.Emissive);
             item.Mesh.Draw();
         }
 
+        _lit.SetInt("uSeeThrough", 0);
         _lit.SetInt("uCloud", 1);
         foreach (var item in _cloudItems)
         {
@@ -350,10 +360,37 @@ public sealed class Game : IDisposable
             _lit.SetMatrix("uModel", item.Model);
             item.Mesh.Draw();
         }
+        _lit.SetInt("uWater", 0);
+
+        // --- 4. Alberi e rocce che coprono il giocatore: semitrasparenti, con i soli spigoli marcati ---
+        // Prima solo la profondità (così di ogni oggetto resta la superficie più vicina, senza
+        // facce interne sovrapposte), poi il colore in blending su quella superficie.
+        _gl.ColorMask(false, false, false, false);
+        _gl.DepthMask(true);
+        _lit.SetInt("uSeeThrough", 2);
+        DrawSeeThrough();
+        _gl.ColorMask(true, true, true, true);
+        _gl.DepthMask(false);
+        _gl.DepthFunc(DepthFunction.Lequal);
+        DrawSeeThrough();
+        _gl.DepthFunc(DepthFunction.Less);
+        _lit.SetInt("uSeeThrough", 0);
+
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
 
         TakeScreenshotIfDue(size);
+    }
+
+    private void DrawSeeThrough()
+    {
+        foreach (var item in _opaque)
+        {
+            if (!item.SeeThrough) continue;
+            _lit.SetMatrix("uModel", item.Model);
+            _lit.SetFloat("uEmissive", item.Emissive);
+            item.Mesh.Draw();
+        }
     }
 
     private unsafe void TakeScreenshotIfDue(Vector2D<int> size)
@@ -380,6 +417,7 @@ public sealed class Game : IDisposable
 
     public void Dispose()
     {
+        _engine?.Dispose();
         _world?.Dispose();
         _player?.Dispose();
         _particles?.Dispose();

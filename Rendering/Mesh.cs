@@ -3,11 +3,12 @@ using Silk.NET.OpenGL;
 namespace Roads.Rendering;
 
 /// <summary>
-/// Mesh su GPU. Formato vertice: posizione (3) + normale (3) + colore (3).
+/// Mesh su GPU. Formato vertice: posizione (3) + normale (3) + colore (3) + baricentriche per gli spigoli (3)
+/// + ingombro dell'oggetto di appartenenza: centro x/z e raggio (3), quota minima e massima (2).
 /// </summary>
 public sealed class Mesh : IDisposable
 {
-    public const int FloatsPerVertex = 9;
+    public const int FloatsPerVertex = 17;
 
     private readonly GL _gl;
     private readonly uint _vao, _vbo, _ebo;
@@ -36,6 +37,12 @@ public sealed class Mesh : IDisposable
         _gl.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)(3 * sizeof(float)));
         _gl.EnableVertexAttribArray(2);
         _gl.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, stride, (void*)(6 * sizeof(float)));
+        _gl.EnableVertexAttribArray(3);
+        _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, stride, (void*)(9 * sizeof(float)));
+        _gl.EnableVertexAttribArray(4);
+        _gl.VertexAttribPointer(4, 3, VertexAttribPointerType.Float, false, stride, (void*)(12 * sizeof(float)));
+        _gl.EnableVertexAttribArray(5);
+        _gl.VertexAttribPointer(5, 2, VertexAttribPointerType.Float, false, stride, (void*)(15 * sizeof(float)));
 
         _gl.BindVertexArray(0);
     }

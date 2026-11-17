@@ -13,6 +13,7 @@ public static class Program
     ///   --walk x,z[,finoA]        cammina in direzione mondo (x,z) fino al secondo indicato
     ///   --click px,py@secondi     (ripetibile) simula un click sinistro nel punto dello schermo
     ///   --slow                    passo lento (come tenere premuto Shift)
+    ///   --mute                    nessun suono
     /// </summary>
     public static void Main(string[] args)
     {
@@ -56,6 +57,9 @@ public static class Program
                     break;
                 case "--slow":
                     d.Slow = true;
+                    break;
+                case "--mute":
+                    d.Mute = true;
                     break;
             }
         }

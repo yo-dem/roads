@@ -7,6 +7,9 @@ public static class Shaders
         layout(location = 0) in vec3 aPos;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec3 aColor;
+        layout(location = 3) in vec3 aBary;
+        layout(location = 4) in vec3 aObject;   // centro x, centro z, raggio dell'oggetto
+        layout(location = 5) in vec2 aObjectY;  // quota minima e massima dell'oggetto
 
         uniform mat4 uModel;
         uniform mat4 uView;
@@ -14,10 +17,31 @@ public static class Shaders
         uniform mat4 uLightSpace;
         uniform int uWater;
         uniform float uTime;
+        uniform int uSeeThrough;  // 0 = normale, 1 = scenario opaco, 2 = scenario trasparente
+        uniform vec3 uCameraPos;
+        uniform vec3 uFocus;      // punto da tenere sempre visibile (il giocatore)
 
         out vec3 vColor;
         out vec3 vWorld;
         out vec4 vLightPos;
+        out vec3 vBary;
+        flat out float vFade;
+
+        // Quanto l'oggetto (cilindro verticale) copre la linea di vista camera -> giocatore.
+        // Dipende solo da dati comuni a tutti i vertici dell'oggetto, quindi vale per l'oggetto intero.
+        float objectFade()
+        {
+            if (uSeeThrough == 0 || aObject.z <= 0.0) return 0.0;
+            vec3 base = (uModel * vec4(aObject.x, aObjectY.x, aObject.y, 1.0)).xyz;
+            float top = base.y + (aObjectY.y - aObjectY.x);
+            vec2 a = uCameraPos.xz, ab = uFocus.xz - a;
+            float t = clamp(dot(base.xz - a, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
+            float dist = length(a + ab * t - base.xz);         // distanza orizzontale raggio-asse
+            float rayY = mix(uCameraPos.y, uFocus.y, t);       // quota del raggio in quel punto
+            float r = aObject.z;
+            return (1.0 - smoothstep(r * 0.7 + 0.3, r + 1.4, dist))
+                 * (1.0 - smoothstep(top - 0.3, top + 0.8, rayY));
+        }
 
         void main()
         {
@@ -31,6 +55,8 @@ public static class Shaders
             }
             vWorld = w.xyz;
             vColor = aColor;
+            vBary = aBary;
+            vFade = objectFade();
             vLightPos = uLightSpace * w;
             gl_Position = uProj * uView * w;
         }
@@ -53,6 +79,8 @@ public static class Shaders
         in vec3 vColor;
         in vec3 vWorld;
         in vec4 vLightPos;
+        in vec3 vBary;
+        flat in float vFade;
 
         uniform sampler2D uShadowMap;
         uniform vec3 uLightDir;
@@ -63,6 +91,7 @@ public static class Shaders
         uniform float uTime;
         uniform int uWater;
         uniform int uCloud;
+        uniform int uSeeThrough;
 
         out vec4 FragColor;
 
@@ -88,6 +117,14 @@ public static class Shaders
         {
             // Normale di faccia dalle derivate: shading piatto "low poly" garantito
             vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+            // Spigoli: distanza (in pixel) dal lato più vicino, calcolata prima di qualunque discard
+            vec3 edgeAA = smoothstep(vec3(0.0), fwidth(vBary) * 1.4, vBary);
+            float edge = 1.0 - min(min(edgeAA.x, edgeAA.y), edgeAA.z);
+
+            // Pass opaco: gli oggetti che coprono il giocatore li disegna il pass trasparente
+            const float FadeOn = 0.004;
+            if (uSeeThrough == 1 && vFade > FadeOn) discard;
+            if (uSeeThrough == 2 && vFade <= FadeOn) discard;
             vec3 L = -uLightDir;
             float ndl = max(dot(n, L), 0.0);
             float sh = ndl > 0.0 ? shadowFactor(ndl) : 0.0;
@@ -110,6 +147,13 @@ public static class Shaders
                     col += vec3(0.25) * smoothstep(0.55, 0.9, s);
                     alpha = 0.85;
                 }
+            }
+
+            if (uSeeThrough == 2)
+            {
+                // Facce quasi invisibili, spigoli ben marcati (leggermente più scuri del colore)
+                col = mix(col, col * 0.55, edge);
+                alpha = mix(1.0, mix(0.12, 0.95, edge), vFade);
             }
 
             vec3 toFrag = vWorld - uCameraPos;
