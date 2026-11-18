@@ -21,6 +21,12 @@ public sealed unsafe class EngineSound : IDisposable
     private readonly uint _skidSource, _skidBuffer;
     private float _pitch = 0.8f, _gain, _skidGain;
 
+    // Stridio "vivo": raffiche e pause casuali (la gomma che si aggrappa e molla) e un timbro diverso a ogni derapata
+    private readonly Random _rng = new();
+    private bool _skidActive;
+    private float _skidPitchBase = 1f, _pitchWander, _wanderTarget, _wanderTimer;
+    private float _chatter = 1f, _chatterTarget = 1f, _chatterTimer;
+
     public bool Enabled { get; }
 
     public EngineSound()
@@ -89,35 +95,55 @@ public sealed unsafe class EngineSound : IDisposable
     }
 
     /// <summary>
-    /// Stridio: un fischio acuto che "sbanda" di intonazione (gomma che salta sull'asfalto) più un fruscio
-    /// filtrato. Un secondo esatto: tutte le frequenze sono intere, quindi il loop non fa click.
+    /// Stridio delle gomme: tre secondi di "stick-slip", cioè la gomma che si aggrappa e scivola a scatti.
+    /// È una sequenza di brevi strisciate (25-140 ms) separate da micro-pause; ognuna ha una sua nota
+    /// (700-1500 Hz) e un suo volume ed è fatta di rumore filtrato attorno a quella nota, non di toni puri:
+    /// suona ruvida come gomma sull'asfalto e non come un fischio. Il campione finisce in una pausa,
+    /// quindi il loop non fa click.
     /// </summary>
     private static short[] SynthesizeSkid()
     {
-        int length = SampleRate;
-        var data = new short[length];
+        int length = SampleRate * 3;
+        var mix = new float[length];
         var rng = new Random(7);
-        float band = 0f, low = 0f;
-        for (int i = 0; i < length; i++)
+        int i = 0;
+        while (i < length - SampleRate / 10)
         {
-            float t = i / (float)SampleRate;
-            // Fischio principale con vibrato irregolare (due modulazioni lente) e un'armonica
-            float wobble = 2.2f * MathF.Sin(MathF.Tau * 6f * t) + 1.3f * MathF.Sin(MathF.Tau * 13f * t + 1f);
-            float squeal = 0.6f * MathF.Sin(MathF.Tau * 1180f * t + wobble)
-                         + 0.25f * MathF.Sin(MathF.Tau * 2360f * t + wobble * 2f)
-                         + 0.2f * MathF.Sin(MathF.Tau * 1530f * t + wobble * 1.3f);
-            // Fruscio: rumore filtrato passa-banda (differenza di due passa-basso)
-            float white = rng.NextSingle() * 2f - 1f;
-            band += (white - band) * 0.35f;
-            low += (white - low) * 0.06f;
-            float hiss = band - low;
-            // Intensità che pulsa un po', come una gomma che si aggrappa e scivola
-            float grab = 0.75f + 0.25f * MathF.Sin(MathF.Tau * 9f * t) * MathF.Sin(MathF.Tau * 4f * t);
-            // Raccordo morbido ai bordi del campione per il fruscio (il fischio è già periodico)
-            float edge = MathF.Min(1f, MathF.Min(i, length - 1 - i) / 300f);
-            float s = squeal * grab + hiss * 0.9f * edge;
-            data[i] = (short)(Math.Clamp(s * 0.45f, -1f, 1f) * short.MaxValue);
+            int burst = (int)(SampleRate * (0.025f + 0.115f * rng.NextSingle()));
+            burst = Math.Min(burst, length - SampleRate / 20 - i);
+            float f0 = 700f + 800f * rng.NextSingle();
+            float glide = 1f + (rng.NextSingle() * 2f - 1f) * 0.08f; // la nota scivola un po' durante la strisciata
+            float amp = 0.55f + 0.45f * rng.NextSingle();
+            float q = 6f + 14f * rng.NextSingle();                   // più alto = più "cantato", più basso = più ruvido
+
+            // Filtro passa-banda risonante (biquad) applicato a rumore bianco, con la frequenza che cambia
+            float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+            for (int k = 0; k < burst; k++)
+            {
+                float u = k / (float)burst;
+                float f = f0 * (1f + (glide - 1f) * u);
+                float w = MathF.Tau * f / SampleRate, alpha = MathF.Sin(w) / (2f * q);
+                float a0 = 1f + alpha;
+                float b0 = alpha / a0, b2 = -alpha / a0, a1 = -2f * MathF.Cos(w) / a0, a2 = (1f - alpha) / a0;
+                float x = rng.NextSingle() * 2f - 1f;
+                float y = b0 * x + b2 * x2 - a1 * y1 - a2 * y2;
+                x2 = x1; x1 = x; y2 = y1; y1 = y;
+                // Attacco e rilascio rapidi; dentro la strisciata il volume tremola (micro scatti)
+                float env = MathF.Min(1f, k / (SampleRate * 0.003f)) * MathF.Min(1f, (burst - k) / (SampleRate * 0.008f));
+                float flutter = 0.7f + 0.3f * MathF.Sin(MathF.Tau * (35f + 30f * u) * k / SampleRate);
+                float grit = (rng.NextSingle() * 2f - 1f) * 0.12f; // fruscio di fondo della gomma
+                mix[i + k] += (y * 3.2f + grit) * env * flutter * amp;
+            }
+            i += burst;
+            // Micro-pausa (la gomma fa presa) oppure attacco subito della strisciata successiva
+            if (rng.NextSingle() < 0.55f) i += (int)(SampleRate * (0.008f + 0.05f * rng.NextSingle()));
         }
+        // Normalizza: il picco a 0.9, così il volume finale dipende solo da quello impostato in gioco
+        float peak = 1e-6f;
+        foreach (float v in mix) peak = MathF.Max(peak, MathF.Abs(v));
+        var data = new short[length];
+        for (int k = 0; k < length; k++)
+            data[k] = (short)(Math.Clamp(mix[k] * 0.9f / peak, -1f, 1f) * short.MaxValue);
         return data;
     }
 
@@ -131,16 +157,59 @@ public sealed unsafe class EngineSound : IDisposable
         // L'intonazione segue i giri: sale dentro la marcia e crolla a ogni cambiata
         float targetPitch = 0.55f + 1.45f * rpm;
         float targetGain = running ? 0.08f + 0.15f * throttle + 0.05f * rpm : 0f;
-        _pitch += (targetPitch - _pitch) * (1f - MathF.Exp(-16f * dt));
-        _gain += (targetGain - _gain) * (1f - MathF.Exp(-12f * dt));
+        // Segue i giri quasi all'istante: il suono corrisponde sempre alla velocità vera (in un urto crolla subito)
+        _pitch += (targetPitch - _pitch) * (1f - MathF.Exp(-45f * dt));
+        _gain += (targetGain - _gain) * (1f - MathF.Exp(-30f * dt));
         _al.SetSourceProperty(_source, SourceFloat.Pitch, _pitch);
         _al.SetSourceProperty(_source, SourceFloat.Gain, _gain);
 
-        // Lo stridio entra deciso e sfuma un po' più lento; l'intonazione sale con l'intensità
-        float targetSkid = 0.32f * skid;
-        _skidGain += (targetSkid - _skidGain) * (1f - MathF.Exp((targetSkid > _skidGain ? -25f : -9f) * dt));
-        _al.SetSourceProperty(_skidSource, SourceFloat.Gain, _skidGain);
-        _al.SetSourceProperty(_skidSource, SourceFloat.Pitch, 0.85f + 0.25f * skid);
+        UpdateSkid(dt, skid);
+    }
+
+    private void UpdateSkid(float dt, float skid)
+    {
+        if (_al == null) return;
+
+        // Inizio di una nuova derapata: timbro e punto di partenza nel campione scelti a caso,
+        // così due derapate non suonano mai identiche
+        if (!_skidActive && skid > 0.05f)
+        {
+            _skidActive = true;
+            _skidPitchBase = 0.86f + 0.28f * _rng.NextSingle();
+            _al.SetSourceProperty(_skidSource, SourceFloat.SecOffset, 2.9f * _rng.NextSingle());
+            _chatterTimer = 0f;
+        }
+        else if (_skidActive && skid < 0.02f && _skidGain < 0.005f) _skidActive = false;
+
+        // Presa e non presa: segmenti brevi (30-130 ms) a volume pieno alternati a "prese" quasi mute.
+        // Con poca derapata le pause sono frequenti (stridio spezzato), di traverso pieno quasi continuo.
+        _chatterTimer -= dt;
+        if (_chatterTimer <= 0f)
+        {
+            float gapChance = 0.35f - 0.25f * skid;
+            bool gap = _rng.NextSingle() < gapChance;
+            _chatterTarget = gap ? 0.1f * _rng.NextSingle() : 0.65f + 0.35f * _rng.NextSingle();
+            _chatterTimer = gap ? 0.025f + 0.06f * _rng.NextSingle() : 0.04f + 0.09f * _rng.NextSingle();
+        }
+        _chatter += (_chatterTarget - _chatter) * (1f - MathF.Exp(-90f * dt));
+
+        // Il tono vaga lentamente attorno a quello della derapata
+        _wanderTimer -= dt;
+        if (_wanderTimer <= 0f)
+        {
+            _wanderTarget = (_rng.NextSingle() * 2f - 1f) * 0.07f;
+            _wanderTimer = 0.1f + 0.25f * _rng.NextSingle();
+        }
+        _pitchWander += (_wanderTarget - _pitchWander) * (1f - MathF.Exp(-8f * dt));
+
+        // Volume legato all'intensità (che dipende dalla velocità): entra deciso e si spegne quasi subito.
+        // Il tono invece NON segue l'intensità (altrimenti, mentre la derapata si chiude, sembra un fischio
+        // che scende): dipende solo dal timbro scelto per questa derapata e da piccole variazioni casuali.
+        float targetSkid = 0.4f * skid;
+        _skidGain += (targetSkid - _skidGain) * (1f - MathF.Exp((targetSkid > _skidGain ? -30f : -25f) * dt));
+        _al.SetSourceProperty(_skidSource, SourceFloat.Gain, _skidGain * _chatter);
+        float pitch = _skidPitchBase * (1f + _pitchWander);
+        _al.SetSourceProperty(_skidSource, SourceFloat.Pitch, pitch);
     }
 
     public void Dispose()

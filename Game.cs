@@ -25,6 +25,7 @@ public sealed class DebugOptions
     public bool Mute;
     public string? Character; // personaggio di partenza (test)
     public List<float> Toggles { get; } = new(); // istanti in cui premere Invio (test)
+    public Vector2? Start;         // punto di partenza (test): x e riga della strada est-ovest
     public float? Hour;            // ora di partenza (test)
     public bool Lights;            // fari accesi da subito (test)
     public float? Zoom;            // distanza della visuale lontana (test; la rotella va da 8 a 32)
@@ -161,6 +162,7 @@ public sealed class Game : IDisposable
         _marker = BuildMarker(_gl);
 
         var start = new Vector3(-2.5f, 0f, 0.3f);
+        if (_debug.Start is { } s) start = new Vector3(s.X, 0f, Terrain.RoadZ((int)MathF.Round(s.Y / Terrain.ChunkSize), s.X)); // test: sulla strada est-ovest
         _world = new WorldMap(_gl, start);
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);

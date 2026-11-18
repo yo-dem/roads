@@ -15,6 +15,7 @@ public static class Program
     ///   --slow                    passo lento (come tenere premuto Shift)
     ///   --mute                    nessun suono
     ///   --handbrake da,a          tiene tirato il freno a mano tra i due istanti (secondi)
+    ///   --start x,z               parte sulla strada est-ovest più vicina al punto (test)
     ///   --char nome               personaggio di partenza (es. female-a, male-c; tasto C in gioco)
     ///   --enter secondi           (ripetibile) preme Invio: scende o sale dall'auto
     ///   --time ore                ora di partenza (es. 12 = mezzogiorno; di serie si parte alle 8:00)
@@ -95,6 +96,10 @@ public static class Program
                     break;
                 case "--char" when i + 1 < args.Length:
                     d.Character = args[++i];
+                    break;
+                case "--start" when i + 1 < args.Length:
+                    var st = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
+                    d.Start = new Vector2(st[0], st[1]);
                     break;
                 case "--mute":
                     d.Mute = true;

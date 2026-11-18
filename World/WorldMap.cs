@@ -190,6 +190,23 @@ public sealed class WorldMap : IDisposable
 
     public bool IsRoad(Vector3 p) => ZoneAt(p)?.IsRoad(p) ?? false;
 
+    /// <summary>Il ponte più vicino entro <paramref name="range"/> (sul piano), se c'è.</summary>
+    public Bridge? NearestBridge(Vector3 p, float range)
+    {
+        Bridge? best = null;
+        float bestD = range * range;
+        foreach (var zone in _zones.Values)
+        {
+            if (CellDistance(zone.X, zone.Z, p) > range) continue;
+            foreach (var b in zone.Bridges)
+            {
+                float dx = b.Center.X - p.X, dz = b.Center.Z - p.Z, d = dx * dx + dz * dz;
+                if (d < bestD) { bestD = d; best = b; }
+            }
+        }
+        return best;
+    }
+
     public float GroundHeight(Vector3 p) => ZoneAt(p)?.GroundHeight(p) ?? 0f;
 
     public void Dispose()
