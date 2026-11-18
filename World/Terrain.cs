@@ -41,12 +41,43 @@ public static class Terrain
         return env * (sign * amp + 1.4f * MathF.Sin(MathF.Tau * 2f * t + Noise.Hash01(a, b, salt + 2) * 6f));
     }
 
-    /// <summary>Quota z della strada est-ovest della riga <paramref name="j"/> nel punto x (tratto tra gli incroci i e i+1).</summary>
-    public static float RoadZ(int j, float x)
+    /// <summary>Quota z della strada est-ovest senza tener conto dei ponti (solo l'ondulazione).</summary>
+    private static float RawRoadZ(int j, float x)
     {
         int i = (int)MathF.Floor(x / ChunkSize);
         float t = x / ChunkSize - i;
         return j * ChunkSize + Wobble(t, i, j, 501);
+    }
+
+    // Vicino a un ponte la strada smette di serpeggiare: dritta e allineata al ponte (est-ovest)
+    private const float BridgeStraight = 7f;   // tratto perfettamente dritto per lato, dal centro del ponte
+    private const float BridgeBlend = 13f;     // da qui in poi torna a serpeggiare
+
+    /// <summary>Punto x in cui il fiume della colonna attraversa la strada della riga (dove sta il ponte).</summary>
+    public static float BridgeX(int column, int row)
+    {
+        float x = RiverX(column, row * ChunkSize);
+        for (int k = 0; k < 3; k++)
+            x = RiverX(column, RawRoadZ(row, x));
+        return x;
+    }
+
+    /// <summary>
+    /// Quota z della strada est-ovest della riga <paramref name="j"/> nel punto x: serpeggia tra gli incroci,
+    /// ma attorno a ogni attraversamento di fiume si raddrizza, così entra ed esce dal ponte in linea retta.
+    /// </summary>
+    public static float RoadZ(int j, float x)
+    {
+        float z = RawRoadZ(j, x);
+        int c = (int)MathF.Round(x / ChunkSize);
+        for (int k = c - 1; k <= c + 1; k++)
+        {
+            if (!HasRiver(k)) continue;
+            float xc = BridgeX(k, j), d = MathF.Abs(x - xc);
+            if (d >= BridgeBlend) continue;
+            z = Noise.Lerp(z, RawRoadZ(j, xc), 1f - Noise.Smooth(BridgeStraight, BridgeBlend, d));
+        }
+        return z;
     }
 
     /// <summary>Quota x della strada nord-sud della colonna <paramref name="i"/> nel punto z.</summary>

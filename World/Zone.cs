@@ -161,13 +161,8 @@ public sealed class Zone : IDisposable
     private void BuildRiverBridge()
     {
         if (!Terrain.HasRiver(X)) return;
-        // Punto d'incrocio tra la strada (ondulata) e il fiume (sinuoso): due passi di raffinamento
-        float z = Z * WorldMap.Spacing, x = Terrain.RiverX(X, z);
-        for (int k = 0; k < 2; k++)
-        {
-            z = Terrain.RoadZ(Z, x);
-            x = Terrain.RiverX(X, z);
-        }
+        // Il ponte sta dove il fiume incrocia la strada, che lì è dritta e allineata a lui (vedi Terrain.RoadZ)
+        float x = Terrain.BridgeX(X, Z), z = Terrain.RoadZ(Z, x);
         bool east = x > Origin.X;
         if (!WorldMap.EdgeOpen(X, Z, east ? Dir.East : Dir.West)) return;
         Bridges.Add(new Bridge
