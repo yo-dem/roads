@@ -8,7 +8,7 @@ namespace Roads.Rendering;
 /// tutto a zero = sempre disegnato.
 /// </summary>
 public readonly record struct DrawItem(Mesh Mesh, Matrix4x4 Model, float Emissive = 0f, bool CastShadow = true,
-                                       bool SeeThrough = false, Vector4 Area = default)
+                                       bool SeeThrough = false, Vector4 Area = default, bool Smooth = false)
 {
     public bool HasArea => Area.Z > Area.X;
 }

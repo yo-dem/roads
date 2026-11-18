@@ -6,29 +6,37 @@ using Silk.NET.OpenGL;
 namespace Roads.Characters;
 
 /// <summary>
-/// Personaggio chibi low poly (testa grande, corpo piccolo) con animazioni procedurali:
-/// camminata/corsa (gambe e braccia che oscillano, saltello, inclinazione), respiro da fermo,
-/// battito di ciglia e sbuffi di polvere ai passi. Il modello guarda verso +Z locale.
+/// Personaggino che scende dall'auto e va a piedi. L'aspetto è uno dei "Mini Characters" di Kenney (CC0),
+/// con le loro animazioni (fermo, camminata, corsa, salto); si cambia con il tasto C.
+/// Alto circa 0.78, in proporzione all'automobilina (alta 0.95 e lunga 1.9). Il modello guarda verso +Z locale.
 /// </summary>
 public sealed class Villager : IDisposable
 {
-    private const float WalkSpeed = 3.4f;   // riferimento per l'ampiezza dell'animazione
-    private const float SlowSpeed = 2.4f;   // con Shift
-    private const float RunSpeed = 6.5f;    // andatura normale
-    private const float Radius = 0.4f;
-    private const float HipHeight = 0.33f;
+    private const float RunSpeed = 3.0f;    // andatura normale
+    private const float SlowSpeed = 1.5f;   // con Shift
+    public const float Radius = 0.2f;
+    private const float PlanRadius = Radius + 0.03f;
+    private const float HopTime = 0.32f;    // durata del saltello dentro/fuori dall'auto
 
     public Vector3 Position;
     public float Yaw;
 
+    /// <summary>Nascosto: è seduto in auto.</summary>
+    public bool Hidden { get; private set; } = true;
+    /// <summary>Sta saltando dentro o fuori dall'auto: in quel momento non si comanda.</summary>
+    public bool Busy => _hop < 1f;
+
     private Vector3 _velocity;
-    private float _phase, _time, _move, _lastSin;
-    private float _blinkTimer = 2.5f;
+    private float _time, _move;
     private float _stuckTimer;
 
-    private const float PlanRadius = Radius + 0.03f;
+    // Saltello: da _hopFrom a _hopTo, crescendo (uscita) o rimpicciolendo (entrata)
+    private float _hop = 1f;
+    private Vector3 _hopFrom, _hopTo;
+    private bool _hopOut;
 
-    /// <summary>Punto verso cui il personaggio si sta dirigendo (click del mouse).</summary>
+    // ------------------------------------------------------------------ destinazione (click)
+
     public Vector3? Target { get; private set; }
 
     private readonly List<Vector3> _waypoints = new();
@@ -36,7 +44,6 @@ public sealed class Villager : IDisposable
     private float _planCooldown;
     private int _replans;
 
-    /// <summary>Richiede di raggiungere un punto: il percorso viene calcolato al prossimo Update.</summary>
     public void SetTarget(Vector3 point) => _request = point;
 
     public void ClearTarget()
@@ -52,7 +59,7 @@ public sealed class Villager : IDisposable
         _stuckTimer = 0f;
         var path = PathFinder.Find(world, Position, goal, PlanRadius, out Vector3 reached);
         _waypoints.Clear();
-        if (path == null || new Vector2(reached.X - Position.X, reached.Z - Position.Z).Length() < 0.2f)
+        if (path == null || Flat(reached - Position).Length() < 0.15f)
         {
             Target = null;
             return;
@@ -62,63 +69,127 @@ public sealed class Villager : IDisposable
         Target = reached with { Y = exact ? goal.Y : world.GroundHeight(reached) };
     }
 
-    private readonly Mesh _body, _head, _eye, _arm, _leg;
+    // ------------------------------------------------------------------ modello
 
-    private static readonly Vector3 Skin = new(1.0f, 0.82f, 0.66f);
-    private static readonly Vector3 Shirt = new(0.30f, 0.62f, 0.86f);
-    private static readonly Vector3 Pants = new(0.95f, 0.92f, 0.82f);
-    private static readonly Vector3 Hair = new(0.45f, 0.26f, 0.14f);
-    private static readonly Vector3 Shoes = new(0.85f, 0.35f, 0.25f);
+    /// <summary>Cartella dei personaggi "Mini Characters" di Kenney (CC0), copiata accanto all'eseguibile.</summary>
+    private static readonly string AssetDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Characters");
 
-    public Villager(GL gl, Vector3 position, float yaw)
+    /// <summary>Nomi dei personaggi disponibili (es. "female-a"), in ordine alfabetico.</summary>
+    public static IReadOnlyList<string> Characters { get; } =
+        Directory.Exists(AssetDir)
+            ? Directory.GetFiles(AssetDir, "character-*.glb").Select(f => System.IO.Path.GetFileNameWithoutExtension(f)[10..]).Order().ToArray()
+            : Array.Empty<string>();
+
+    public const string DefaultCharacter = "female-e";
+
+    private readonly GL _gl;
+    private GlbModel _model = null!;
+    private GlbModel.Pose _pose = null!, _layer = null!;
+    private int _rootNode = -1;
+    public string Character { get; private set; } = "";
+
+    // Tempo di ciascuna animazione e pesi delle andature (per mescolarle senza scatti)
+    private float _walkTime, _walkWeight, _sprintWeight;
+
+    public Villager(GL gl, Vector3 position, float yaw, string character = DefaultCharacter)
     {
+        _gl = gl;
         Position = position;
         Yaw = yaw;
-
-        var mb = new MeshBuilder();
-        mb.AddPrism(new Vector3(0, -0.02f, 0), 0.26f, 0.19f, 0.44f, 8, Shirt);
-        mb.AddPrism(new Vector3(0, -0.06f, 0), 0.275f, 0.265f, 0.14f, 8, Pants);
-        mb.AddPrism(new Vector3(0, 0.38f, 0), 0.12f, 0.1f, 0.06f, 6, Skin); // collo
-        _body = mb.Build(gl);
-
-        mb = new MeshBuilder();
-        mb.AddIcosphere(new Vector3(0, 0.34f, 0), new Vector3(0.40f, 0.37f, 0.38f), 1, Skin);
-        mb.AddIcosphere(new Vector3(0, 0.50f, -0.04f), new Vector3(0.43f, 0.28f, 0.42f), 1, Hair);
-        mb.AddIcosphere(new Vector3(0, 0.36f, -0.12f), new Vector3(0.41f, 0.30f, 0.33f), 1, Hair);
-        mb.AddIcosphere(new Vector3(0, 0.27f, 0.385f), new Vector3(0.045f), 0, Skin * 0.92f); // naso
-        foreach (float sx in new[] { -0.22f, 0.22f })
-            mb.AddBox(new Vector3(sx, 0.235f, 0.305f), new Vector3(0.08f, 0.035f, 0.03f), new Vector3(1f, 0.55f, 0.55f)); // guance
-        // Fogliolina sulla testa
-        var leaf = new Vector3(0.35f, 0.72f, 0.25f);
-        mb.AddTriangle(new(0, 0.76f, 0), new(0.13f, 0.88f, 0.04f), new(0.02f, 1.0f, -0.02f), leaf);
-        mb.AddTriangle(new(0, 0.76f, 0), new(0.02f, 1.0f, -0.02f), new(-0.1f, 0.9f, 0.0f), leaf * 0.85f);
-        _head = mb.Build(gl);
-
-        mb = new MeshBuilder();
-        mb.AddBox(Vector3.Zero, new Vector3(0.075f, 0.11f, 0.06f), new Vector3(0.08f, 0.06f, 0.06f));
-        _eye = mb.Build(gl);
-
-        mb = new MeshBuilder();
-        mb.AddPrism(new Vector3(0, -0.26f, 0), 0.06f, 0.07f, 0.26f, 6, Shirt);
-        mb.AddIcosphere(new Vector3(0, -0.3f, 0), new Vector3(0.075f), 0, Skin);
-        _arm = mb.Build(gl);
-
-        mb = new MeshBuilder();
-        mb.AddPrism(new Vector3(0, -0.24f, 0), 0.08f, 0.085f, 0.24f, 6, Pants);
-        mb.AddBox(new Vector3(0, -0.28f, 0.03f), new Vector3(0.16f, 0.09f, 0.24f), Shoes);
-        _leg = mb.Build(gl);
+        SetCharacter(character);
     }
 
+    /// <summary>Cambia l'aspetto del personaggio (uno di <see cref="Characters"/>).</summary>
+    public void SetCharacter(string name)
+    {
+        if (!Characters.Contains(name)) name = Characters.Count > 0 ? Characters[0] : name;
+        var model = new GlbModel(_gl, System.IO.Path.Combine(AssetDir, $"character-{name}.glb"));
+        _model?.Dispose();
+        _model = model;
+        _pose = model.NewPose();
+        _layer = model.NewPose();
+        _rootNode = model.NodeIndex("root");
+        Character = name;
+    }
+
+    /// <summary>Passa al personaggio successivo (o precedente) della lista.</summary>
+    public void CycleCharacter(int step = 1)
+    {
+        if (Characters.Count == 0) return;
+        int i = Math.Max(0, Characters.ToList().IndexOf(Character));
+        SetCharacter(Characters[((i + step) % Characters.Count + Characters.Count) % Characters.Count]);
+    }
+
+    // ------------------------------------------------------------------ entrare e uscire dall'auto
+
+    /// <summary>Esce dall'auto: saltello da <paramref name="from"/> (dentro l'abitacolo) a <paramref name="to"/>.</summary>
+    public void HopOut(Vector3 from, Vector3 to, float yaw)
+    {
+        Hidden = false;
+        _hopOut = true;
+        _hop = 0f;
+        _hopFrom = from;
+        _hopTo = to;
+        Position = from;
+        Yaw = yaw;
+        _velocity = Vector3.Zero;
+        ClearTarget();
+    }
+
+    /// <summary>Rientra in auto: saltello verso <paramref name="door"/> rimpicciolendo, poi sparisce.</summary>
+    public void HopIn(Vector3 door)
+    {
+        _hopOut = false;
+        _hop = 0f;
+        _hopFrom = Position;
+        _hopTo = door;
+        _velocity = Vector3.Zero;
+        Vector3 d = Flat(door - Position);
+        if (d.LengthSquared() > 1e-4f) Yaw = MathF.Atan2(d.X, d.Z);
+        ClearTarget();
+    }
+
+    /// <summary>Arriva oltre 1 e torna indietro: il "pop" quando salta fuori.</summary>
+    private static float EaseOutBack(float t)
+    {
+        const float c1 = 1.70158f, c3 = c1 + 1f;
+        float u = t - 1f;
+        return 1f + c3 * u * u * u + c1 * u * u;
+    }
+
+    private float HopScale => _hop >= 1f ? 1f
+        : _hopOut ? 0.35f + 0.65f * EaseOutBack(_hop)
+        : 1f - 0.75f * _hop * _hop;
+
+    // ------------------------------------------------------------------ movimento
+
     /// <param name="input">Direzione da tastiera nel mondo (XZ); lunghezza 0 = nessun input.</param>
-    /// <param name="slow">Shift premuto: passo lento invece della corsa.</param>
-    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx)
+    /// <param name="slow">Shift premuto: passo lento.</param>
+    /// <param name="blocked">Ostacoli in più rispetto al mondo (l'auto parcheggiata).</param>
+    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Func<Vector3, float, bool>? blocked = null)
     {
         _time += dt;
+
+        if (_hop < 1f)
+        {
+            _hop = MathF.Min(1f, _hop + dt / HopTime);
+            float arc = MathF.Sin(MathF.PI * _hop) * 0.28f; // balzo
+            Position = Vector3.Lerp(_hopFrom, _hopTo, _hop) + new Vector3(0, arc, 0);
+            if (_hop >= 1f)
+            {
+                if (_hopOut) fx.Dust(Position, 3);
+                else Hidden = true;
+            }
+            _move = Noise.Lerp(_move, 0f, Noise.Damp(10f, dt));
+            return;
+        }
+        if (Hidden) return;
+
+        bool Free(Vector3 p) => world.IsWalkable(p, Radius) && !(blocked?.Invoke(p, Radius) ?? false);
 
         float maxSpeed = slow ? SlowSpeed : RunSpeed;
         bool moving = input.LengthSquared() > 0.01f;
 
-        // Nuova destinazione dal mouse (ricalcolo limitato mentre si tiene premuto il tasto)
         _planCooldown -= dt;
         if (!moving && _request is { } req && _planCooldown <= 0f)
         {
@@ -132,14 +203,10 @@ public sealed class Villager : IDisposable
             }
         }
 
-        if (moving)
-        {
-            ClearTarget(); // la tastiera ha la precedenza sul click
-        }
+        if (moving) ClearTarget(); // la tastiera ha la precedenza sul click
         else if (Target != null && _waypoints.Count > 0)
         {
-            // Punti intermedi: si passa al successivo appena ci si avvicina
-            while (_waypoints.Count > 1 && Flat(_waypoints[0] - Position).Length() < 0.35f)
+            while (_waypoints.Count > 1 && Flat(_waypoints[0] - Position).Length() < 0.3f)
                 _waypoints.RemoveAt(0);
 
             var toNext = Flat(_waypoints[0] - Position);
@@ -147,51 +214,42 @@ public sealed class Villager : IDisposable
             float remaining = dist;
             for (int i = 1; i < _waypoints.Count; i++) remaining += Flat(_waypoints[i] - _waypoints[i - 1]).Length();
 
-            if (_waypoints.Count == 1 && dist < 0.15f)
-            {
-                ClearTarget();
-            }
+            if (_waypoints.Count == 1 && dist < 0.12f) ClearTarget();
             else
             {
                 input = toNext;
                 moving = true;
-                maxSpeed = MathF.Min(maxSpeed, remaining * 5f + 0.6f); // frena in arrivo
+                maxSpeed = MathF.Min(maxSpeed, remaining * 5f + 0.5f); // frena in arrivo
             }
         }
 
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;
-        float targetSpeed = moving ? maxSpeed : 0f;
-        _velocity = Vector3.Lerp(_velocity, dir * targetSpeed, Noise.Damp(12f, dt));
+        _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed : 0f), Noise.Damp(14f, dt));
         Vector3 before = Position;
 
-        if (moving)
-        {
-            float targetYaw = MathF.Atan2(dir.X, dir.Z);
-            Yaw += Noise.WrapAngle(targetYaw - Yaw) * MathF.Min(1f, 14f * dt);
-        }
+        if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
 
         // Movimento con "scivolamento" lungo gli ostacoli
         Vector3 step = new(_velocity.X * dt, 0, _velocity.Z * dt);
         if (step.LengthSquared() > 0f)
         {
             Vector3 p = Position;
-            if (world.IsWalkable(p + step, Radius)) p += step;
+            if (Free(p + step)) p += step;
             else
             {
                 var sx = new Vector3(step.X, 0, 0);
                 var sz = new Vector3(0, 0, step.Z);
-                if (world.IsWalkable(p + sx, Radius)) p += sx; else _velocity.X = 0;
-                if (world.IsWalkable(p + sz, Radius)) p += sz; else _velocity.Z = 0;
+                if (Free(p + sx)) p += sx; else _velocity.X = 0;
+                if (Free(p + sz)) p += sz; else _velocity.Z = 0;
             }
             Position = p;
         }
         Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
 
-        // Bloccato nonostante il percorso: ricalcola un paio di volte, poi rinuncia
         if (Target is { } dest)
         {
-            float progress = new Vector2(Position.X - before.X, Position.Z - before.Z).Length();
-            _stuckTimer = progress < targetSpeed * dt * 0.25f ? _stuckTimer + dt : 0f;
+            float progress = Flat(Position - before).Length();
+            _stuckTimer = progress < maxSpeed * dt * 0.25f ? _stuckTimer + dt : 0f;
             if (_stuckTimer > 0.35f)
             {
                 if (_replans++ < 2) Plan(dest, world);
@@ -199,79 +257,54 @@ public sealed class Villager : IDisposable
             }
         }
 
-        // --- Stato dell'animazione ---
+        // Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità
         float speed = new Vector2(_velocity.X, _velocity.Z).Length();
-        _move = Noise.Lerp(_move, Math.Clamp(speed / WalkSpeed, 0f, 1.5f), Noise.Damp(10f, dt));
-        if (speed > 0.1f) _phase += dt * (3f + speed * 4.5f);
-        else _phase = Noise.Lerp(_phase, MathF.Round(_phase / MathF.PI) * MathF.PI, Noise.Damp(10f, dt)); // piedi uniti
+        _move = Noise.Lerp(_move, speed, Noise.Damp(10f, dt));
+        _walkWeight = Noise.Lerp(_walkWeight, Math.Clamp(speed / 0.6f, 0f, 1f), Noise.Damp(12f, dt));
+        _sprintWeight = Noise.Lerp(_sprintWeight, Math.Clamp((speed - 1.7f) / 1.0f, 0f, 1f), Noise.Damp(8f, dt));
+        float before01 = _walkTime % 1f;
+        _walkTime += dt * MathF.Min(MathF.Max(_move, 0.5f) * 0.95f, 2.1f); // cicli al secondo (due passi per ciclo)
+        float now01 = _walkTime % 1f;
 
-        float s = MathF.Sin(_phase);
-        if (_move > 0.3f && MathF.Sign(s) != MathF.Sign(_lastSin))
-        {
-            float side = s > 0 ? -1f : 1f;
-            fx.Dust(Vector3.Transform(new Vector3(side * 0.12f, 0, 0), RootMatrix), speed > WalkSpeed + 0.5f ? 4 : 1);
-        }
-        _lastSin = s;
-
-        _blinkTimer -= dt;
-        if (_blinkTimer < 0f) _blinkTimer = 2f + Random.Shared.NextSingle() * 3f;
+        // Sbuffi di polvere a ogni passo quando corre
+        if (_sprintWeight > 0.5f && (now01 < before01 || (before01 < 0.5f && now01 >= 0.5f)))
+            fx.Dust(Vector3.Transform(new Vector3(now01 < 0.5f ? -0.05f : 0.05f, 0, 0), RootMatrix), 1);
     }
 
     private static Vector3 Flat(Vector3 v) => new(v.X, 0, v.Z);
 
-    private const float Scale = 1.3f;
+    public Vector3 Velocity => _velocity;
 
     private Matrix4x4 RootMatrix =>
-        Matrix4x4.CreateScale(Scale) * Matrix4x4.CreateRotationY(Yaw) * Matrix4x4.CreateTranslation(Position);
+        Matrix4x4.CreateScale(HopScale) * Matrix4x4.CreateRotationY(Yaw) * Matrix4x4.CreateTranslation(Position);
 
     public void Collect(List<DrawItem> items)
     {
-        float amt = MathF.Min(_move, 1.25f);
-        float idle = 1f - MathF.Min(amt, 1f);
-        float s = MathF.Sin(_phase);
-        float swing = s * 0.7f * MathF.Min(amt, 1.1f);
+        if (Hidden) return;
 
-        float bob = -MathF.Abs(s) * 0.05f * amt + MathF.Abs(MathF.Cos(_phase)) * 0.03f * amt;
-        float lean = 0.10f * amt;
-        float roll = s * 0.05f * amt;
-        float breathe = 1f + MathF.Sin(_time * 2.4f) * 0.02f * idle;
-
-        Matrix4x4 root = RootMatrix;
-        Matrix4x4 pelvis = Matrix4x4.CreateTranslation(0, HipHeight + bob, 0) * root;
-        Matrix4x4 hip = Matrix4x4.CreateRotationZ(roll) * Matrix4x4.CreateRotationX(lean) * pelvis;
-
-        items.Add(new DrawItem(_body, Matrix4x4.CreateScale(1f, breathe, 1f) * hip));
-
-        float headPitch = -lean * 0.6f + MathF.Sin(_phase * 2f) * 0.04f * amt + MathF.Sin(_time * 1.1f) * 0.03f * idle;
-        float headRoll = -roll * 1.5f + MathF.Sin(_time * 0.7f) * 0.06f * idle;
-        Matrix4x4 head = Matrix4x4.CreateRotationX(headPitch) * Matrix4x4.CreateRotationZ(headRoll)
-                         * Matrix4x4.CreateTranslation(0, 0.42f * breathe, 0) * hip;
-        items.Add(new DrawItem(_head, head));
-
-        float eyeScale = _blinkTimer < 0.12f ? 0.12f : 1f;
-        foreach (float ex in new[] { -0.13f, 0.13f })
-            items.Add(new DrawItem(_eye, Matrix4x4.CreateScale(1f, eyeScale, 1f)
-                                         * Matrix4x4.CreateTranslation(ex, 0.33f, 0.335f) * head));
-
-        foreach (float side in new[] { 1f, -1f })
+        _model.Sample(_model["idle"], _time, _pose);
+        if (_walkWeight > 0.01f)
         {
-            // Braccia in opposizione alle gambe dello stesso lato
-            float armAngle = -swing * 0.9f * side + 0.05f * idle * MathF.Sin(_time * 2.4f);
-            items.Add(new DrawItem(_arm, Matrix4x4.CreateRotationX(armAngle) * Matrix4x4.CreateRotationZ(side * 0.15f)
-                                         * Matrix4x4.CreateTranslation(side * 0.27f, 0.36f, 0) * hip));
-
-            float legAngle = swing * side;
-            items.Add(new DrawItem(_leg, Matrix4x4.CreateRotationX(legAngle)
-                                         * Matrix4x4.CreateTranslation(side * 0.12f, 0, 0) * pelvis));
+            var walk = _model["walk"];
+            _model.Sample(walk, _walkTime * (walk?.Duration ?? 1f), _layer);
+            GlbModel.Blend(_pose, _layer, _walkWeight);
         }
+        if (_sprintWeight > 0.01f)
+        {
+            var sprint = _model["sprint"];
+            _model.Sample(sprint, _walkTime * (sprint?.Duration ?? 1f), _layer);
+            GlbModel.Blend(_pose, _layer, _sprintWeight);
+        }
+        // La corsa originale solleva il corpo di 0.2 a ogni passo (un quarto dell'altezza): troppo saltellante
+        _pose.ScaleHeight(_rootNode, Noise.Lerp(1f, 0.3f, _sprintWeight), _model.RestTranslation(_rootNode).Y);
+        if (_hop < 1f && _model["jump"] is { } jump)
+        {
+            // Durante il saltello dentro/fuori dall'auto: posa del salto
+            _model.Sample(jump, MathF.Min(_hop, 0.99f) * jump.Duration, _layer);
+            GlbModel.Blend(_pose, _layer, MathF.Sin(MathF.PI * _hop));
+        }
+        _model.Collect(items, _pose, RootMatrix);
     }
 
-    public void Dispose()
-    {
-        _body.Dispose();
-        _head.Dispose();
-        _eye.Dispose();
-        _arm.Dispose();
-        _leg.Dispose();
-    }
+    public void Dispose() => _model.Dispose();
 }

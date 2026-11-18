@@ -10,7 +10,7 @@ namespace Roads.World;
 /// </summary>
 public sealed class DayCycle
 {
-    /// <summary>Durata di un giorno intero in secondi reali.</summary>
+    /// <summary>Durata di un giorno intero in secondi reali: 5 minuti di giorno (6-18) e 5 di notte (18-6).</summary>
     public const float DayLength = 600f;
 
     /// <summary>Ora del giorno, 0..24.</summary>

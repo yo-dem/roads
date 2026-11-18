@@ -25,6 +25,7 @@ public static class Shaders
         out vec3 vWorld;
         out vec4 vLightPos;
         out vec3 vBary;
+        out vec3 vNormal;
         flat out float vFade;
 
         // Quanto l'oggetto (cilindro verticale) copre la linea di vista camera -> giocatore.
@@ -56,6 +57,7 @@ public static class Shaders
             vWorld = w.xyz;
             vColor = aColor;
             vBary = aBary;
+            vNormal = mat3(uModel) * aNormal;
             vFade = objectFade();
             vLightPos = uLightSpace * w;
             gl_Position = uProj * uView * w;
@@ -84,9 +86,11 @@ public static class Shaders
         in vec3 vWorld;
         in vec4 vLightPos;
         in vec3 vBary;
+        in vec3 vNormal;
         flat in float vFade;
 
         uniform sampler2D uShadowMap;
+        uniform int uSmooth;         // ombreggiatura morbida (normali interpolate) invece che a facce piatte
         uniform vec3 uLightDir;
         uniform vec3 uCameraPos;
         uniform float uFogNear;
@@ -96,13 +100,15 @@ public static class Shaders
         uniform int uWater;
         uniform int uCloud;
         uniform int uSeeThrough;
-        uniform int uSkyBody;        // sole e luna: niente nebbia, ombre o luci, solo il loro colore
         uniform vec3 uLightColor;    // sole di giorno, luna di notte (già moltiplicato per l'intensità)
         uniform vec3 uAmbientLow;    // luce ambiente dal basso e dall'alto
         uniform vec3 uAmbientHigh;
         uniform int uHeadOn;         // fari dell'auto: due fasci, uno per faro
         uniform vec3 uHeadPos[2];
         uniform vec3 uHeadDir[2];
+        uniform vec3 uTailPos;       // stop: bagliore rosso a terra dietro l'auto (di notte, in frenata)
+        uniform vec3 uTailDir;
+        uniform float uTailGlow;
 
         out vec4 FragColor;
 
@@ -128,6 +134,7 @@ public static class Shaders
         {
             // Normale di faccia dalle derivate: shading piatto "low poly" garantito
             vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+            if (uSmooth == 1) n = normalize(vNormal);
             // Spigoli: distanza (in pixel) dal lato più vicino, calcolata prima di qualunque discard
             vec3 edgeAA = smoothstep(vec3(0.0), fwidth(vBary) * 1.4, vBary);
             float edge = 1.0 - min(min(edgeAA.x, edgeAA.y), edgeAA.z);
@@ -136,13 +143,6 @@ public static class Shaders
             const float FadeOn = 0.004;
             if (uSeeThrough == 1 && vFade > FadeOn) discard;
             if (uSeeThrough == 2 && vFade <= FadeOn) discard;
-            if (uSkyBody == 1)
-            {
-                // Astro low poly: facce appena sfumate verso il bordo, sempre luminoso
-                float facing = max(dot(n, normalize(uCameraPos - vWorld)), 0.0);
-                FragColor = vec4(vColor * (0.72 + 0.28 * facing), 1.0);
-                return;
-            }
 
             vec3 L = -uLightDir;
             float ndl = max(dot(n, L), 0.0);
@@ -166,7 +166,21 @@ public static class Shaders
                     col += vColor * vec3(1.0, 0.92, 0.72) * cone * reach * facing * 1.25;
                 }
             }
-            col = mix(col, vColor * 1.25, uEmissive);
+            // Bagliore degli stop: luce rossa che si allarga dietro l'auto, a corto raggio
+            if (uTailGlow > 0.0 && uCloud == 0)
+            {
+                vec3 toFrag = vWorld - uTailPos;
+                float dist = length(toFrag);
+                vec3 l = toFrag / max(dist, 1e-3);
+                float behind = smoothstep(-0.2, 0.6, dot(l, uTailDir));
+                float reach = 1.0 - smoothstep(0.5, 5.5, dist);
+                float facing = 0.4 + 0.6 * max(dot(n, -l), 0.0);
+                col += vColor * vec3(1.0, 0.12, 0.08) * behind * reach * reach * facing * uTailGlow;
+            }
+            col = mix(col, vColor * 1.25, min(uEmissive, 1.0));
+            // Oltre 1 la luce si fa più intensa restando del suo colore (stop in frenata: rosso pieno e acceso)
+            float boost = max(uEmissive - 1.0, 0.0);
+            col += vColor * vec3(0.7, 0.25, 0.25) * boost;
 
             float alpha = 1.0;
             if (uWater == 1)

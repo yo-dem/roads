@@ -20,14 +20,22 @@ public sealed class IsoCamera
     private const float ChaseDistance = 7.5f;
     private const float ChaseLift = 0.6f;     // il punto guardato sta un po' sopra l'auto
     private float _chaseYaw;
+
+    // Visuale a piedi: più vicina e più bassa della vista dall'alto, senza girarsi da sola
+    private const float WalkPitch = 0.5f;
+    private const float WalkDistance = 5.5f;
+    private const float WalkLift = 0.4f;
+
+    /// <summary>Quanto si è nella visuale a piedi (0 = vista dall'alto, 1 = vicino al personaggio).</summary>
+    public float Walk { get; private set; }
     private bool _wasChase;
 
     /// <summary>Quanto si è nella vista di inseguimento (0 = dall'alto, 1 = dietro l'auto).</summary>
     public float Chase { get; private set; }
 
     public float EffectiveYaw => Yaw + Noise.WrapAngle(_chaseYaw - Yaw) * Chase;
-    public float EffectivePitch => Noise.Lerp(Pitch, ChasePitch, Chase);
-    public float EffectiveDistance => Noise.Lerp(Distance, ChaseDistance, Chase);
+    public float EffectivePitch => Noise.Lerp(Noise.Lerp(Pitch, WalkPitch, Walk), ChasePitch, Chase);
+    public float EffectiveDistance => Noise.Lerp(Noise.Lerp(Distance, WalkDistance, Walk), ChaseDistance, Chase);
 
     public Vector3 Position => Target + new Vector3(
         MathF.Sin(EffectiveYaw) * MathF.Cos(EffectivePitch),
@@ -50,8 +58,10 @@ public sealed class IsoCamera
     /// <param name="follow">Punto da seguire.</param>
     /// <param name="chase">Vero per la visuale dietro l'auto, falso per quella lontana.</param>
     /// <param name="heading">Direzione dell'auto (yaw), usata per mettersi alle sue spalle.</param>
-    public void Update(float dt, Vector3 follow, bool chase, float heading)
+    /// <param name="walk">Vero per la visuale vicina a piedi (ha senso solo quando <paramref name="chase"/> è falso).</param>
+    public void Update(float dt, Vector3 follow, bool chase, float heading, bool walk = false)
     {
+        Walk = Noise.Lerp(Walk, walk ? 1f : 0f, Noise.Damp(3f, dt));
         // Entrando nell'inseguimento si parte dall'angolo attuale, così non ci sono scatti
         if (Chase <= 0.001f) _chaseYaw = Yaw;
         // Uscendo, la vista dall'alto eredita la direzione di guida: la camera si alza senza girare
@@ -68,7 +78,7 @@ public sealed class IsoCamera
         float behind = heading + MathF.PI;
         _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(4f, dt);
 
-        Vector3 aim = follow + new Vector3(0, Noise.Lerp(0.8f, ChaseLift, Chase), 0);
+        Vector3 aim = follow + new Vector3(0, Noise.Lerp(Noise.Lerp(0.8f, WalkLift, Walk), ChaseLift, Chase), 0);
         Target = Vector3.Lerp(Target, aim, Noise.Damp(Noise.Lerp(5f, 9f, Chase), dt));
     }
 

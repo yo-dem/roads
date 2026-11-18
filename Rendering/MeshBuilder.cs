@@ -27,6 +27,12 @@ public sealed class MeshBuilder
     /// </summary>
     public bool ComputeEdges;
 
+    /// <summary>
+    /// Se vero, le normali dei vertici che coincidono vengono mediate: con l'ombreggiatura morbida dello
+    /// shader (DrawItem.Smooth) la superficie appare liscia invece che a facce piatte (per il personaggio).
+    /// </summary>
+    public bool SmoothNormals;
+
     public bool IsEmpty => _indices.Count == 0;
 
     private const int BaseFloats = 9;   // posizione, normale, colore (come vengono accumulati)
@@ -103,6 +109,22 @@ public sealed class MeshBuilder
         AddVertex(b, n, color);
         AddVertex(c, n, color);
         _indices.AddRange([i, i + 1, i + 2]);
+    }
+
+    /// <summary>Triangolo con normali e colori propri per ogni vertice (modelli importati, ombreggiatura morbida).</summary>
+    public void AddTriangle(Vector3 a, Vector3 b, Vector3 c, Vector3 na, Vector3 nb, Vector3 nc, Vector3 ca, Vector3 cb, Vector3 cc)
+    {
+        uint i = VertexCount;
+        AddVertex(Vector3.Transform(a, Transform), SafeNormal(Vector3.TransformNormal(na, Transform)), ca);
+        AddVertex(Vector3.Transform(b, Transform), SafeNormal(Vector3.TransformNormal(nb, Transform)), cb);
+        AddVertex(Vector3.Transform(c, Transform), SafeNormal(Vector3.TransformNormal(nc, Transform)), cc);
+        _indices.AddRange([i, i + 1, i + 2]);
+    }
+
+    private static Vector3 SafeNormal(Vector3 n)
+    {
+        float len = n.Length();
+        return len < 1e-8f ? Vector3.UnitY : n / len;
     }
 
     /// <summary>Quad (a,b,c,d) in senso antiorario visto dal lato della normale.</summary>
@@ -276,7 +298,31 @@ public sealed class MeshBuilder
         var data = new float[count * Mesh.FloatsPerVertex];
         for (int v = 0; v < count; v++)
             WriteVertex(data, v, v, Vector3.One); // nessuno spigolo: baricentriche mai a zero
+        if (SmoothNormals) AverageNormals(data, count);
         return new MeshData(data, _indices.ToArray());
+    }
+
+    /// <summary>Media le normali dei vertici nella stessa posizione (somma delle normali delle facce).</summary>
+    private static void AverageNormals(float[] data, int count)
+    {
+        const int F = Mesh.FloatsPerVertex;
+        static (int, int, int) Key(float[] d, int o) =>
+            ((int)MathF.Round(d[o] * 4000f), (int)MathF.Round(d[o + 1] * 4000f), (int)MathF.Round(d[o + 2] * 4000f));
+
+        var sums = new Dictionary<(int, int, int), Vector3>();
+        for (int v = 0; v < count; v++)
+        {
+            int o = v * F;
+            var key = Key(data, o);
+            sums[key] = sums.GetValueOrDefault(key) + new Vector3(data[o + 3], data[o + 4], data[o + 5]);
+        }
+        for (int v = 0; v < count; v++)
+        {
+            int o = v * F;
+            Vector3 n = sums[Key(data, o)];
+            n = n.LengthSquared() > 1e-10f ? Vector3.Normalize(n) : new Vector3(data[o + 3], data[o + 4], data[o + 5]);
+            data[o + 3] = n.X; data[o + 4] = n.Y; data[o + 5] = n.Z;
+        }
     }
 
     private void WriteVertex(float[] data, int dst, int src, Vector3 bary)

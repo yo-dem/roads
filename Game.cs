@@ -18,10 +18,13 @@ public sealed class DebugOptions
     public List<(Vector2 Screen, float Time)> Clicks { get; } = new();
     public Vector3? Walk;
     public float WalkUntil = float.MaxValue;
-    public Vector2? Drive;          // guida manuale simulata: X = sterzo, Y = gas
-    public float DriveUntil = float.MaxValue;
+    /// <summary>Guida manuale simulata, a tratti in sequenza: X = sterzo, Y = gas, fino all'istante Until.</summary>
+    public List<(Vector2 Drive, float Until)> Drives { get; } = new();
+    public float HandbrakeFrom = float.MaxValue, HandbrakeUntil = float.MaxValue; // freno a mano simulato (test)
     public bool Slow;
     public bool Mute;
+    public string? Character; // personaggio di partenza (test)
+    public List<float> Toggles { get; } = new(); // istanti in cui premere Invio (test)
     public float? Hour;            // ora di partenza (test)
     public bool Lights;            // fari accesi da subito (test)
     public float? Zoom;            // distanza della visuale lontana (test; la rotella va da 8 a 32)
@@ -31,9 +34,8 @@ public sealed class DebugOptions
 
 public sealed class Game : IDisposable
 {
-    private const float StartHour = 20.5f; // il gioco parte di notte
+    private const float StartHour = 8f;    // il gioco parte di mattina
     private DayCycle _day = null!;
-    private Mesh _sunMesh = null!;
     private Hud _hud = null!;
 
     private readonly IWindow _window;
@@ -51,12 +53,20 @@ public sealed class Game : IDisposable
     private bool _mouseHeld, _rightHeld;
     private Vector2 _lastMouse;
     private float _markerAge;
+    private int _toggleIndex;
     private bool _farView;        // visuale scelta: false = dietro l'auto (standard, tasto 1), true = lontana dall'alto (tasto 2)
     private bool _driving;        // guida da tastiera in corso (fino al prossimo click di destinazione)
     private int _clickIndex;
 
     private WorldMap _world = null!;
-    private Car _player = null!; // il personaggio (Villager) è messo da parte
+    private Car _player = null!;
+    private Villager _kid = null!;   // il personaggino: scende e sale dall'auto con Invio
+    private bool _onFoot;
+
+    // Chi si sta comandando in questo momento: l'auto o il personaggino a piedi
+    private Vector3 ActivePos => _onFoot ? _kid.Position : _player.Position;
+    private float ActiveYaw => _onFoot ? _kid.Yaw : _player.Yaw;
+    private Vector3 ActiveVelocity => _onFoot ? _kid.Velocity : _player.Velocity;
     private Particles _particles = null!;
     private EngineSound? _engine;
     private readonly IsoCamera _camera = new();
@@ -91,7 +101,13 @@ public sealed class Game : IDisposable
             // La visuale cambia solo con questi tasti e resta quella scelta
             if (key is Key.Number1 or Key.Keypad1) _farView = false;
             if (key is Key.Number2 or Key.Keypad2) _farView = true;
-            if (key == Key.F) _player.Headlights = !_player.Headlights;
+            if (key == Key.F && !_onFoot) _player.Headlights = !_player.Headlights; // i fari si comandano solo da dentro l'auto
+            if (key is Key.Enter or Key.KeypadEnter) ToggleOnFoot();
+            if (key == Key.C) // cambia personaggio (con Shift: il precedente)
+            {
+                _kid.CycleCharacter(_keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight) ? -1 : 1);
+                Console.WriteLine($"Personaggio: {_kid.Character}");
+            }
         };
         foreach (var mouse in _input.Mice)
         {
@@ -142,7 +158,6 @@ public sealed class Game : IDisposable
         _hud = new Hud(_gl);
         _flame = Props.BuildFlame(_gl);
         _day = new DayCycle(_debug.Hour ?? StartHour);
-        BuildSkyBodies();
         _marker = BuildMarker(_gl);
 
         var start = new Vector3(-2.5f, 0f, 0.3f);
@@ -151,6 +166,7 @@ public sealed class Game : IDisposable
         _particles = new Particles(_gl);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, MathF.PI / 2f);
+        _kid = new Villager(_gl, start, 0f, _debug.Character ?? Villager.DefaultCharacter); // seduto in auto finché non si scende
         _farView = _debug.Far;
         if (_debug.Zoom is { } zoom) _camera.Distance = Math.Clamp(zoom, 8f, 32f);
         _player.Headlights = _debug.Lights;
@@ -183,7 +199,8 @@ public sealed class Game : IDisposable
         Vector3 dir = Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - origin);
 
         if (!_world.Raycast(origin, dir, out Vector3 hit)) return false;
-        _player.SetTarget(hit);
+        if (_onFoot) _kid.SetTarget(hit);
+        else _player.SetTarget(hit);
         return true;
     }
 
@@ -222,8 +239,9 @@ public sealed class Game : IDisposable
 
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
             input = walk;
-        if (_debug.Drive is { } drive && _time > 0.5f && _time < _debug.DriveUntil)
-            (steerIn, throttleIn) = (drive.X, drive.Y);
+        if (_time > 0.5f)
+            foreach (var (drive, until) in _debug.Drives)
+                if (_time < until) { (steerIn, throttleIn) = (drive.X, drive.Y); break; }
         if (_debug.Slow) slow = true;
         while (_clickIndex < _debug.Clicks.Count && _time >= _debug.Clicks[_clickIndex].Time)
         {
@@ -231,15 +249,45 @@ public sealed class Game : IDisposable
             if (Pick(_debug.Clicks[_clickIndex].Screen)) _markerAge = 0f;
             _clickIndex++;
         }
+        while (_toggleIndex < _debug.Toggles.Count && _time >= _debug.Toggles[_toggleIndex])
+        {
+            ToggleOnFoot();
+            _toggleIndex++;
+        }
 
-        // Un tasto di guida prende il controllo (e annulla il percorso); un click lo restituisce al percorso.
-        // Rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
-        if (steerIn != 0f || throttleIn != 0f) _driving = true;
-        Vector2? manual = _driving ? new Vector2(steerIn, throttleIn) : null;
-
-        _player.Update(dt, input, slow, _world, _particles, manual);
+        if (_onFoot)
+        {
+            // A piedi: WASD/frecce rispetto alla camera; l'auto resta parcheggiata a motore spento
+            if (input == Vector3.Zero) input = _camera.Right * steerIn + _camera.Forward * throttleIn;
+            _player.Handbrake = false;
+            _player.Update(dt, Vector3.Zero, false, _world, _particles, Vector2.Zero);
+            _kid.Update(dt, input, slow, _world, _particles, _player.Blocks);
+            if (_kid.Hidden)
+            {
+                // Il saltello per rientrare è finito: si torna a guidare
+                _onFoot = false;
+                _player.EngineOn = true;
+            }
+        }
+        else
+        {
+            // Un tasto di guida prende il controllo (e annulla il percorso); un click lo restituisce al percorso.
+            // Rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
+            if (steerIn != 0f || throttleIn != 0f) _driving = true;
+            Vector2? manual = _driving ? new Vector2(steerIn, throttleIn) : null;
+            // Freno a mano (spazio): tirato in velocità con lo sterzo fa entrare in curva in derapata
+            _player.Handbrake = _keyboard.IsKeyPressed(Key.Space)
+                                || (_time >= _debug.HandbrakeFrom && _time < _debug.HandbrakeUntil);
+            if (_player.Handbrake && manual == null && MathF.Abs(_player.Speed) > 0.1f)
+            {
+                // Tirarlo mentre l'auto va da sola al punto cliccato passa alla guida manuale
+                _driving = true;
+                manual = new Vector2(steerIn, throttleIn);
+            }
+            _player.Update(dt, input, slow, _world, _particles, manual);
+        }
         _markerAge += dt;
-        Zone? spawned = _world.Update(dt, _player.Position);
+        Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
 
@@ -254,8 +302,10 @@ public sealed class Game : IDisposable
 
         _particles.Update(dt);
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
-        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f, chase: !_farView, _player.Yaw);
-        _engine?.Update(dt, _player.Rpm, _player.Throttle);
+        // In derapata la camera da dietro segue la direzione di marcia, così si vede l'auto di traverso
+        _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView && !_onFoot, _player.TravelYaw,
+                       walk: !_farView && _onFoot);
+        _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
 
         _day.Update(dt);
 
@@ -263,13 +313,13 @@ public sealed class Game : IDisposable
         if (_titleTimer > 0.25)
         {
             _titleTimer = 0;
-            var here = _world.ZoneAt(_player.Position);
+            var here = _world.ZoneAt(ActivePos);
             // Prestazioni sempre visibili: FPS medi e fotogramma più lento dall'ultimo aggiornamento
             string perf = _frameTime > 0 ? $"{_frames / _frameTime:F0} FPS (max {_worstFrame * 1000:F0} ms)" : "";
             _frames = 0;
             _frameTime = _worstFrame = 0;
             _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}  |  territorio esplorato: {_world.Count}"
-                            + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
+                            + (_onFoot ? "  |  a piedi" : "") + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
 
@@ -304,10 +354,11 @@ public sealed class Game : IDisposable
         _clouds.Collect(_cloudItems, _camera.Target, _time);
 
         _player.Collect(_opaque);
+        _kid.Collect(_opaque);
         _particles.Collect(_opaque);
 
         // Indicatore di destinazione: "atterra" ingrandito e poi pulsa
-        if (_player.Target is { } target)
+        if ((_onFoot ? _kid.Target : _player.Target) is { } target)
         {
             float pop = 1f + 0.8f * MathF.Max(0f, 1f - _markerAge / 0.2f);
             float pulse = 1f + 0.08f * MathF.Sin(_time * 7f);
@@ -391,8 +442,13 @@ public sealed class Game : IDisposable
         _lit.SetVector3("uHeadPos[1]", _player.HeadlightPos(1f));
         _lit.SetVector3("uHeadDir[0]", _player.HeadlightDir(-1f));
         _lit.SetVector3("uHeadDir[1]", _player.HeadlightDir(1f));
+        // Bagliore degli stop: visibile di notte (di giorno il sole lo copre), forte in frenata
+        float darkness = 1f - _day.Daylight;
+        _lit.SetVector3("uTailPos", _player.TailLightPos);
+        _lit.SetVector3("uTailDir", _player.TailLightDir);
+        _lit.SetFloat("uTailGlow", darkness * ((_player.Headlights ? 0.25f : 0f) + 0.9f * _player.BrakeLight));
         _lit.SetVector3("uCameraPos", _camera.Position);
-        _lit.SetVector3("uFocus", _player.Position + new Vector3(0, 0.45f, 0));
+        _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
 
         _lit.SetFloat("uFogNear", _camera.EffectiveDistance + 14f);
         _lit.SetFloat("uFogFar", ViewRange);
@@ -403,14 +459,15 @@ public sealed class Game : IDisposable
 
         _lit.SetInt("uWater", 0);
         _lit.SetInt("uCloud", 0);
-        DrawSkyBodies();
         foreach (var item in _opaque)
         {
             _lit.SetMatrix("uModel", item.Model);
             _lit.SetInt("uSeeThrough", item.SeeThrough ? 1 : 0);
+            _lit.SetInt("uSmooth", item.Smooth ? 1 : 0);
             _lit.SetFloat("uEmissive", item.Emissive);
             item.Mesh.Draw();
         }
+        _lit.SetInt("uSmooth", 0);
 
         _lit.SetInt("uSeeThrough", 0);
         _lit.SetInt("uCloud", 1);
@@ -507,7 +564,7 @@ public sealed class Game : IDisposable
     /// </summary>
     private bool NearSightLine(Vector4 area)
     {
-        Vector3 cam = _camera.Position, focus = _player.Position;
+        Vector3 cam = _camera.Position, focus = ActivePos;
         const float reach = 8f;
         return area.X <= MathF.Max(cam.X, focus.X) + reach && area.Z >= MathF.Min(cam.X, focus.X) - reach
             && area.Y <= MathF.Max(cam.Z, focus.Z) + reach && area.W >= MathF.Min(cam.Z, focus.Z) - reach;
@@ -524,45 +581,6 @@ public sealed class Game : IDisposable
         shader.SetVector3("uSkyZenith", _day.SkyZenith);
         shader.SetVector3("uSkyHorizon", _day.SkyHorizon);
         shader.SetVector3("uSkyBelow", _day.SkyBelow);
-    }
-
-    /// <summary>Sole low poly: icosfera a facce piatte, luminosa di colore proprio. (La luna non si disegna: resta solo la sua luce.)</summary>
-    private void BuildSkyBodies()
-    {
-        var mb = new MeshBuilder { ColorRng = new Random(11), ColorJitter = 0.06f };
-        mb.AddIcosphere(Vector3.Zero, Vector3.One, 1, new Vector3(1f, 0.82f, 0.36f));
-        _sunMesh = mb.Build(_gl);
-    }
-
-    /// <summary>
-    /// Disegna il sole lontano nel cielo, nella sua direzione: prima della scena, così tutto ciò
-    /// che sta davanti lo copre. Niente nebbia né ombre (uSkyBody).
-    /// </summary>
-    private void DrawSkyBodies()
-    {
-        const float distance = 160f, radius = 9f;
-        Vector3 shown = SkyPlacement(_day.SunDir);
-        if (shown.Y < -0.06f) return; // tramontato
-        _lit.SetInt("uSkyBody", 1);
-        _lit.SetInt("uSeeThrough", 0);
-        _lit.SetMatrix("uModel", Matrix4x4.CreateScale(radius) * Matrix4x4.CreateRotationY(_time * 0.05f)
-                                 * Matrix4x4.CreateTranslation(_camera.Position + shown * distance));
-        _sunMesh.Draw();
-        _lit.SetInt("uSkyBody", 0);
-    }
-
-    /// <summary>
-    /// Dove disegnare un astro: stessa direzione orizzontale di quella vera, ma su un arco basso
-    /// (al massimo ~10° sull'orizzonte), così resta nella fascia di cielo che le visuali inquadrano.
-    /// Luce e ombre seguono comunque la posizione vera.
-    /// </summary>
-    private static Vector3 SkyPlacement(Vector3 dir)
-    {
-        float elevation = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
-        float shown = elevation >= 0f ? 0.03f + elevation * 0.11f : 0.03f + elevation;
-        var flat = new Vector3(dir.X, 0f, dir.Z);
-        flat = flat.LengthSquared() > 1e-6f ? Vector3.Normalize(flat) : Vector3.UnitX;
-        return flat * MathF.Cos(shown) + Vector3.UnitY * MathF.Sin(shown);
     }
 
     // ------------------------------------------------------------------ minimappa
@@ -609,7 +627,7 @@ public sealed class Game : IDisposable
             _hud.Letter(letter, c + ToMap(dir) * (r - 20f * k), 12f * k, 2.2f * k, letter == 'N' ? north : white);
 
         // Auto al centro: freccia a punta nella sua direzione, con un bordo scuro per staccarla dallo sfondo
-        Vector2 h = ToMap(new Vector3(MathF.Sin(_player.Yaw), 0f, MathF.Cos(_player.Yaw)));
+        Vector2 h = ToMap(new Vector3(MathF.Sin(ActiveYaw), 0f, MathF.Cos(ActiveYaw)));
         if (h.LengthSquared() > 1e-6f) h = Vector2.Normalize(h);
         Vector2 side = new(-h.Y, h.X);
         void Arrow(float s, Vector4 color)
@@ -623,6 +641,44 @@ public sealed class Game : IDisposable
         Arrow(1f, new Vector4(1f, 0.84f, 0.38f, 1f));
 
         _hud.Flush(framebuffer.X, framebuffer.Y);
+    }
+
+    // ------------------------------------------------------------------ scendere e salire dall'auto
+
+    /// <summary>
+    /// Invio: se si guida e l'auto è (quasi) ferma, il personaggino salta fuori dalla portiera del guidatore
+    /// (o da quella opposta se è bloccata) e il motore si spegne; se si è a piedi vicino all'auto, ci risale.
+    /// </summary>
+    private void ToggleOnFoot()
+    {
+        if (!_onFoot)
+        {
+            if (MathF.Abs(_player.Speed) > 0.6f) return;
+            foreach (float side in new[] { 1f, -1f }) // +1 = sinistra (guidatore), -1 = destra
+            {
+                Vector3 spot = _player.DoorPoint(side);
+                if (!_world.IsWalkable(spot, Villager.Radius) || _player.Blocks(spot, Villager.Radius)) continue;
+                spot.Y = _world.GroundHeight(spot);
+                Vector3 outward = Vector3.Normalize(new Vector3(spot.X - _player.Position.X, 0, spot.Z - _player.Position.Z));
+                _kid.HopOut(_player.SeatPoint(side), spot, MathF.Atan2(outward.X, outward.Z));
+                _onFoot = true;
+                _driving = false;
+                _player.ClearTarget();
+                _player.EngineOn = false;
+                return;
+            }
+            return; // non c'è spazio per scendere da nessuna delle due parti
+        }
+
+        if (_kid.Busy) return;
+        // Si risale dalla portiera più vicina, se si è abbastanza vicini all'auto
+        float best = float.MaxValue, bestSide = 1f;
+        foreach (float side in new[] { 1f, -1f })
+        {
+            float d = Vector2.Distance(new(_kid.Position.X, _kid.Position.Z), new(_player.DoorPoint(side).X, _player.DoorPoint(side).Z));
+            if (d < best) { best = d; bestSide = side; }
+        }
+        if (best < 1.3f) _kid.HopIn(_player.SeatPoint(bestSide));
     }
 
     private void DrawSeeThrough()
@@ -664,9 +720,9 @@ public sealed class Game : IDisposable
         _hud?.Dispose();
         _world?.Dispose();
         _player?.Dispose();
+        _kid?.Dispose();
         _particles?.Dispose();
         _flame?.Dispose();
-        _sunMesh?.Dispose();
         _marker?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();
