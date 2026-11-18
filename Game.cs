@@ -145,10 +145,10 @@ public sealed class Game : IDisposable
         BuildSkyBodies();
         _marker = BuildMarker(_gl);
 
-        _world = new WorldMap(_gl);
+        var start = new Vector3(-2.5f, 0f, 0.3f);
+        _world = new WorldMap(_gl, start);
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
-        var start = new Vector3(-2.5f, 0f, 0.3f);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, MathF.PI / 2f);
         _farView = _debug.Far;
@@ -241,7 +241,7 @@ public sealed class Game : IDisposable
         _markerAge += dt;
         Zone? spawned = _world.Update(dt, _player.Position);
         if (spawned != null)
-            Console.WriteLine($"Nuova zona ({spawned.X},{spawned.Z}): {spawned.Name}");
+            Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
 
         // Scintille dai falò (solo quelli che si possono vedere)
         foreach (var zone in _world.Zones)
@@ -268,7 +268,7 @@ public sealed class Game : IDisposable
             string perf = _frameTime > 0 ? $"{_frames / _frameTime:F0} FPS (max {_worstFrame * 1000:F0} ms)" : "";
             _frames = 0;
             _frameTime = _worstFrame = 0;
-            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}  |  isole scoperte: {_world.Count}"
+            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}  |  territorio esplorato: {_world.Count}"
                             + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
@@ -298,14 +298,6 @@ public sealed class Game : IDisposable
                                                  * Matrix4x4.CreateTranslation(zone.Campfires[i] + new Vector3(0, 0.1f, 0)) * m,
                                          0.9f, CastShadow: false));
             }
-        }
-
-        foreach (var c in _world.Connectors)
-        {
-            if (!c.Visible) continue; // il ponte compare solo quando entrambe le isole sono arrivate
-            const float r = WorldMap.Gap;
-            var area = new Vector4(c.Bridge.Center.X - r, c.Bridge.Center.Z - r, c.Bridge.Center.X + r, c.Bridge.Center.Z + r);
-            if (InView(area) && InFrustum(area, -14f, 4f)) _opaque.Add(new DrawItem(c.Mesh, c.Model, Area: area));
         }
 
         _cloudItems.Clear();
