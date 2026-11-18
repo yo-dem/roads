@@ -262,15 +262,21 @@ public sealed class MeshBuilder
         }
     }
 
-    public Mesh Build(GL gl)
+    public Mesh Build(GL gl) => new(gl, BuildData());
+
+    /// <summary>
+    /// Prepara i dati dei vertici senza toccare OpenGL: si può chiamare da un thread in background
+    /// e caricare poi la mesh sul thread principale con <see cref="Mesh(GL, MeshData)"/>.
+    /// </summary>
+    public MeshData BuildData()
     {
-        if (ComputeEdges) return BuildWithEdges(gl);
+        if (ComputeEdges) return BuildDataWithEdges();
 
         int count = (int)VertexCount;
         var data = new float[count * Mesh.FloatsPerVertex];
         for (int v = 0; v < count; v++)
             WriteVertex(data, v, v, Vector3.One); // nessuno spigolo: baricentriche mai a zero
-        return new Mesh(gl, data, CollectionsMarshal.AsSpan(_indices));
+        return new MeshData(data, _indices.ToArray());
     }
 
     private void WriteVertex(float[] data, int dst, int src, Vector3 bary)
@@ -289,7 +295,7 @@ public sealed class MeshBuilder
     /// triangolo complanare (es. la diagonale di un quad) la componente viene alzata di 1, così lo
     /// shader non lo disegna.
     /// </summary>
-    private Mesh BuildWithEdges(GL gl)
+    private MeshData BuildDataWithEdges()
     {
         int triCount = _indices.Count / 3;
         Vector3 Pos(uint v) => new(_vertices[(int)v * BaseFloats], _vertices[(int)v * BaseFloats + 1], _vertices[(int)v * BaseFloats + 2]);
@@ -332,6 +338,12 @@ public sealed class MeshBuilder
                 indices[dst] = (uint)dst;
             }
         }
-        return new Mesh(gl, data, indices);
+        return new MeshData(data, indices);
     }
+}
+
+/// <summary>Vertici e indici pronti da caricare sulla GPU.</summary>
+public sealed record MeshData(float[] Vertices, uint[] Indices)
+{
+    public bool IsEmpty => Indices.Length == 0;
 }

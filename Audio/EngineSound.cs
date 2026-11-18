@@ -76,16 +76,16 @@ public sealed unsafe class EngineSound : IDisposable
         return data;
     }
 
-    /// <param name="speed01">Velocità rispetto al massimo (0..1).</param>
-    /// <param name="throttle">Acceleratore (0..1).</param>
-    public void Update(float dt, float speed01, float throttle)
+    /// <param name="rpm">Giri del motore normalizzati (minimo ≈ 0.2, limite = 1).</param>
+    /// <param name="throttle">Acceleratore (0..1): cala di colpo durante le cambiate.</param>
+    public void Update(float dt, float rpm, float throttle)
     {
         if (!Enabled || _al == null) return;
-        float targetPitch = 0.75f + 1.1f * speed01 + 0.15f * throttle;
-        float targetGain = 0.10f + 0.12f * throttle + 0.06f * speed01;
-        float k = 1f - MathF.Exp(-8f * dt);
-        _pitch += (targetPitch - _pitch) * k;
-        _gain += (targetGain - _gain) * k;
+        // L'intonazione segue i giri: sale dentro la marcia e crolla a ogni cambiata
+        float targetPitch = 0.55f + 1.45f * rpm;
+        float targetGain = 0.08f + 0.15f * throttle + 0.05f * rpm;
+        _pitch += (targetPitch - _pitch) * (1f - MathF.Exp(-16f * dt));
+        _gain += (targetGain - _gain) * (1f - MathF.Exp(-12f * dt));
         _al.SetSourceProperty(_source, SourceFloat.Pitch, _pitch);
         _al.SetSourceProperty(_source, SourceFloat.Gain, _gain);
     }

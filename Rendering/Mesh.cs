@@ -14,6 +14,8 @@ public sealed class Mesh : IDisposable
     private readonly uint _vao, _vbo, _ebo;
     private readonly uint _indexCount;
 
+    public Mesh(GL gl, MeshData data) : this(gl, data.Vertices, data.Indices) { }
+
     public unsafe Mesh(GL gl, ReadOnlySpan<float> vertices, ReadOnlySpan<uint> indices)
     {
         _gl = gl;

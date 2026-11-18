@@ -4,8 +4,8 @@ namespace Roads.World;
 
 /// <summary>
 /// Telecamera dall'alto a 3/4 (stile Animal Crossing) che segue morbidamente il giocatore.
-/// In modalità "inseguimento" (guida con la tastiera) si porta dietro l'auto, più bassa e più vicina,
-/// come in un gioco di guida; il passaggio tra le due viste è graduale.
+/// La visuale standard è quella "di guida": dietro l'auto, bassa e vicina, come in un gioco di guida.
+/// La visuale lontana è dall'alto; il passaggio tra le due è graduale.
 /// </summary>
 public sealed class IsoCamera
 {
@@ -16,7 +16,7 @@ public sealed class IsoCamera
     public Vector3 Target;
 
     // Vista di inseguimento
-    private const float ChasePitch = 0.3f;
+    private const float ChasePitch = 0.22f;   // poco inclinata: si vede una bella fascia di cielo
     private const float ChaseDistance = 7.5f;
     private const float ChaseLift = 0.6f;     // il punto guardato sta un po' sopra l'auto
     private float _chaseYaw;
@@ -38,10 +38,17 @@ public sealed class IsoCamera
     public Vector3 Forward => new(-MathF.Sin(EffectiveYaw), 0, -MathF.Cos(EffectiveYaw));
     public Vector3 Right => new(MathF.Cos(EffectiveYaw), 0, -MathF.Sin(EffectiveYaw));
 
-    public void Snap(Vector3 follow) => Target = follow + new Vector3(0, 0.8f, 0);
+    /// <summary>Posiziona la camera subito, senza transizione (all'avvio).</summary>
+    public void Snap(Vector3 follow, bool chase, float heading)
+    {
+        Target = follow + new Vector3(0, chase ? ChaseLift : 0.8f, 0);
+        _chaseYaw = heading + MathF.PI;
+        Chase = chase ? 1f : 0f;
+        _wasChase = chase;
+    }
 
     /// <param name="follow">Punto da seguire.</param>
-    /// <param name="chase">Vero mentre si guida con la tastiera.</param>
+    /// <param name="chase">Vero per la visuale dietro l'auto, falso per quella lontana.</param>
     /// <param name="heading">Direzione dell'auto (yaw), usata per mettersi alle sue spalle.</param>
     public void Update(float dt, Vector3 follow, bool chase, float heading)
     {

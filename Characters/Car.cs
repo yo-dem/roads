@@ -15,9 +15,9 @@ namespace Roads.Characters;
 public sealed class Car : IDisposable
 {
     private const float SlowSpeed = 2.6f;
-    private const float FastSpeed = 6.8f;
+    private const float FastSpeed = 10f;
     private const float ReverseSpeed = 2.4f;
-    private const float Accel = 5f;           // unità/s²
+    private const float Accel = 5f;           // unità/s² (retromarcia)
     private const float Brake = 11f;
     private const float Coast = 3f;            // rallentamento senza gas (guida manuale)
     private const float Scale = 1.1f;
@@ -27,7 +27,7 @@ public sealed class Car : IDisposable
     // Guida da tastiera: i tasti sono tutto-o-niente, quindi lo sterzo va ammorbidito
     private const float ManualSteerIn = 1.1f;     // rad/s: tenendo premuto, le ruote girano piano
     private const float ManualSteerOut = 3f;      // rad/s: rilasciando tornano dritte più in fretta
-    private const float ManualSteerAtSpeed = 0.2f; // angolo massimo a piena velocità (da fermi resta MaxSteer)
+    private const float ManualSteerAtSpeed = 0.14f; // angolo massimo a piena velocità (da fermi resta MaxSteer)
     private const float HullOffset = 0.46f;       // centri dei due cerchi di collisione, davanti e dietro
     private const float HullRadius = 0.5f;
     private const float PlanRadius = 0.6f;        // margine per la ricerca del percorso
@@ -41,8 +41,54 @@ public sealed class Car : IDisposable
     public float Speed => _speed;
     public Vector3 Velocity => Forward * _speed;
     public float MaxSpeed => FastSpeed;
+    /// <summary>Fari accesi (tasto F).</summary>
+    public bool Headlights;
+
+    /// <summary>Posizione di un faro (side = -1 sinistro, +1 destro), sul muso dell'auto.</summary>
+    public Vector3 HeadlightPos(float side) => Vector3.Transform(new Vector3(side * 0.29f, 0.41f, 0.86f), RootMatrix);
+
+    /// <summary>Direzione del fascio di un faro: un po' verso il basso e appena divergente verso l'esterno.</summary>
+    public Vector3 HeadlightDir(float side) =>
+        Vector3.Normalize(Vector3.TransformNormal(Vector3.Normalize(new Vector3(side * 0.07f, -0.13f, 1f)), RootMatrix));
+
     /// <summary>Quanto si sta dando gas (0..1), per il suono del motore.</summary>
     public float Throttle { get; private set; }
+
+    // ------------------------------------------------------------------ cambio automatico a 3 marce
+    // Ogni marcia ha un rapporto (la velocità a cui il motore arriva al limite di giri) e una spinta:
+    // la 1ª è corta e potente, la 3ª lunga e "pigra". Dentro ogni marcia la spinta segue una curva di
+    // coppia: piena a metà giri, cala verso il limite (l'allungo finisce).
+    private static readonly float[] GearTop = { 5.0f, 8.0f, 11.0f };    // velocità al limite di giri (la 3ª è lunga: in crociera non sta al limite)
+    private static readonly float[] GearPower = { 3.1f, 2.0f, 1.7f };    // spinta di picco (unità/s²): ogni marcia dura 1-2 secondi
+    private const float UpshiftRpm = 0.95f;   // si sale di marcia vicino al limite di giri
+    private const float DownshiftRpm = 0.5f;  // si scala quando la marcia inferiore sarebbe a metà giri
+    private const float ShiftTime = 0.25f;    // durante la cambiata il motore non spinge
+    private const float IdleRpm = 0.22f;
+
+    /// <summary>Marcia inserita: 1..3, oppure -1 in retromarcia.</summary>
+    public int Gear { get; private set; } = 1;
+    /// <summary>Giri del motore normalizzati (minimo ≈ 0.22, limite = 1), per il suono.</summary>
+    public float Rpm { get; private set; } = IdleRpm;
+    private float _shiftTimer;
+
+    private float GearRpm(int gear) => MathF.Abs(_speed) / GearTop[gear - 1];
+
+    private static float TorqueCurve(float rpm) => 0.6f + 0.4f * MathF.Sin(MathF.PI * Math.Clamp(rpm, 0f, 1f));
+
+    private void UpdateGearbox(float dt)
+    {
+        _shiftTimer = MathF.Max(0f, _shiftTimer - dt);
+        if (_speed < -0.05f) { Gear = -1; return; }
+        if (Gear < 1) Gear = 1;
+
+        if (_shiftTimer <= 0f && Gear < GearTop.Length && GearRpm(Gear) >= UpshiftRpm)
+        {
+            Gear++;
+            _shiftTimer = ShiftTime;
+        }
+        else if (Gear > 1 && GearRpm(Gear - 1) < DownshiftRpm)
+            Gear--;
+    }
 
     private float _speed, _yawRate, _spin, _steer, _time, _accel;
     private float _slopePitch, _slopeRoll, _tilt, _roll;
@@ -375,9 +421,18 @@ public sealed class Car : IDisposable
         _steer = MoveTowards(_steer, wantSteer, steerRate * dt);
         bool braking = MathF.Abs(wantSpeed) < MathF.Abs(_speed) - 0.05f || wantSpeed * _speed < 0f;
         float prevSpeed = _speed;
-        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? Brake : Accel) * dt);
+        // In avanti la spinta viene dal cambio: marcia, curva di coppia e pausa durante la cambiata
+        float push = Accel;
+        if (!braking && !coasting && wantSpeed > 0f && _speed >= -0.05f)
+            push = _shiftTimer > 0f ? 0f : GearPower[Gear - 1] * TorqueCurve(GearRpm(Gear));
+        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? Brake : push) * dt);
+        UpdateGearbox(dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
-        Throttle = Noise.Lerp(Throttle, braking || wantSpeed == 0f ? 0f : 1f, Noise.Damp(6f, dt));
+        bool onGas = !braking && wantSpeed != 0f && _shiftTimer <= 0f;
+        Throttle = Noise.Lerp(Throttle, onGas ? 1f : 0f, Noise.Damp(onGas ? 6f : 18f, dt));
+        // Giri: dalla velocità nella marcia inserita; in partenza col gas il motore sale un po' (convertitore)
+        float rpm = Gear < 0 ? MathF.Abs(_speed) / ReverseSpeed * 0.8f : GearRpm(Gear);
+        Rpm = MathF.Max(rpm, IdleRpm + 0.2f * Throttle);
 
         // Modello a bicicletta: la rotazione dipende dalla velocità (niente rotazioni sul posto)
         float yawRate = _speed * MathF.Tan(_steer) / WheelBase;
@@ -448,8 +503,10 @@ public sealed class Car : IDisposable
         Matrix4x4 body = Matrix4x4.CreateRotationZ(_roll) * Matrix4x4.CreateRotationX(-_tilt)
                          * Matrix4x4.CreateTranslation(0, bounce, 0) * root;
         items.Add(new DrawItem(_body, body));
-        items.Add(new DrawItem(_headLights, body, 0.6f));
-        items.Add(new DrawItem(_tailLights, body, 0.2f + 0.8f * _brakeGlow));
+        // Fari spenti: solo il vetro chiaro; accesi: pieni. Coi fari accesi anche le luci posteriori restano accese.
+        items.Add(new DrawItem(_headLights, body, Headlights ? 1f : 0.2f, CastShadow: !Headlights));
+        float tail = Headlights ? 0.55f : 0.2f;
+        items.Add(new DrawItem(_tailLights, body, tail + (1f - tail) * _brakeGlow));
         if (_speed < -0.05f) items.Add(new DrawItem(_reverseLights, body, 1f, CastShadow: false));
 
         foreach (float sx in new[] { -1f, 1f })

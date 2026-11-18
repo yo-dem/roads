@@ -14,6 +14,11 @@ public static class Program
     ///   --click px,py@secondi     (ripetibile) simula un click sinistro nel punto dello schermo
     ///   --slow                    passo lento (come tenere premuto Shift)
     ///   --mute                    nessun suono
+    ///   --time ore                ora di partenza (es. 12 = mezzogiorno; di serie si parte alle 20:30)
+    ///   --lights                  fari accesi da subito (come premere F)
+    ///   --zoom distanza           distanza della visuale lontana (8..32, come la rotella)
+    ///   --far                     parte con la visuale lontana dall'alto (tasto 2)
+    ///   --prespawn R              crea subito le isole entro R celle (test di prestazioni)
     ///   --drive sterzo,gas[,finoA] guida con la visuale da dietro (come i tasti WASD)
     /// </summary>
     public static void Main(string[] args)
@@ -63,6 +68,21 @@ public static class Program
                     var dv = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
                     d.Drive = new Vector2(dv[0], dv[1]);
                     if (dv.Length > 2) d.DriveUntil = dv[2];
+                    break;
+                case "--prespawn" when i + 1 < args.Length:
+                    d.PreSpawn = int.Parse(args[++i], inv);
+                    break;
+                case "--far":
+                    d.Far = true;
+                    break;
+                case "--time" when i + 1 < args.Length:
+                    d.Hour = float.Parse(args[++i], inv);
+                    break;
+                case "--zoom" when i + 1 < args.Length:
+                    d.Zoom = float.Parse(args[++i], inv);
+                    break;
+                case "--lights":
+                    d.Lights = true;
                     break;
                 case "--mute":
                     d.Mute = true;

@@ -62,15 +62,19 @@ public static class Shaders
         }
         """;
 
-    /// <summary>Colore del cielo per una direzione di vista (condiviso da sfondo e nebbia).</summary>
+    /// <summary>
+    /// Colore del cielo per una direzione di vista (condiviso da sfondo e nebbia).
+    /// I tre colori cambiano con l'ora del giorno (DayCycle).
+    /// </summary>
     private const string SkyGlsl = """
+        uniform vec3 uSkyZenith;
+        uniform vec3 uSkyHorizon;
+        uniform vec3 uSkyBelow;
+
         vec3 skyColor(vec3 d)
         {
-            vec3 zenith  = vec3(0.30, 0.58, 0.92);
-            vec3 horizon = vec3(0.88, 0.94, 0.98);
-            vec3 below   = vec3(0.52, 0.76, 0.96);
-            return d.y > 0.0 ? mix(horizon, zenith, pow(d.y, 0.55))
-                             : mix(horizon, below, pow(-d.y, 0.45));
+            return d.y > 0.0 ? mix(uSkyHorizon, uSkyZenith, pow(d.y, 0.55))
+                             : mix(uSkyHorizon, uSkyBelow, pow(-d.y, 0.45));
         }
         """;
 
@@ -92,6 +96,13 @@ public static class Shaders
         uniform int uWater;
         uniform int uCloud;
         uniform int uSeeThrough;
+        uniform int uSkyBody;        // sole e luna: niente nebbia, ombre o luci, solo il loro colore
+        uniform vec3 uLightColor;    // sole di giorno, luna di notte (già moltiplicato per l'intensità)
+        uniform vec3 uAmbientLow;    // luce ambiente dal basso e dall'alto
+        uniform vec3 uAmbientHigh;
+        uniform int uHeadOn;         // fari dell'auto: due fasci, uno per faro
+        uniform vec3 uHeadPos[2];
+        uniform vec3 uHeadDir[2];
 
         out vec4 FragColor;
 
@@ -125,12 +136,36 @@ public static class Shaders
             const float FadeOn = 0.004;
             if (uSeeThrough == 1 && vFade > FadeOn) discard;
             if (uSeeThrough == 2 && vFade <= FadeOn) discard;
+            if (uSkyBody == 1)
+            {
+                // Astro low poly: facce appena sfumate verso il bordo, sempre luminoso
+                float facing = max(dot(n, normalize(uCameraPos - vWorld)), 0.0);
+                FragColor = vec4(vColor * (0.72 + 0.28 * facing), 1.0);
+                return;
+            }
+
             vec3 L = -uLightDir;
             float ndl = max(dot(n, L), 0.0);
             float sh = ndl > 0.0 ? shadowFactor(ndl) : 0.0;
 
-            vec3 hemi = mix(vec3(0.30, 0.32, 0.38), vec3(0.62, 0.70, 0.76), n.y * 0.5 + 0.5);
-            vec3 col = vColor * (hemi * 0.8 + vec3(1.0, 0.93, 0.80) * ndl * sh * 0.68);
+            vec3 hemi = mix(uAmbientLow, uAmbientHigh, n.y * 0.5 + 0.5);
+            vec3 col = vColor * (hemi * 0.8 + uLightColor * ndl * sh);
+
+            // Fari: due coni di luce calda, uno per faro, che si attenuano con la distanza.
+            // Vicino all'auto sono due chiazze distinte; più avanti si sovrappongono.
+            if (uHeadOn == 1 && uCloud == 0)
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    vec3 toFrag = vWorld - uHeadPos[i];
+                    float dist = length(toFrag);
+                    vec3 l = toFrag / max(dist, 1e-3);
+                    float cone = smoothstep(0.92, 0.985, dot(l, uHeadDir[i]));
+                    float reach = (1.0 - smoothstep(16.0, 26.0, dist)) / (1.0 + dist * dist * 0.01);
+                    float facing = 0.35 + 0.65 * max(dot(n, -l), 0.0);
+                    col += vColor * vec3(1.0, 0.92, 0.72) * cone * reach * facing * 1.25;
+                }
+            }
             col = mix(col, vColor * 1.25, uEmissive);
 
             float alpha = 1.0;
@@ -138,7 +173,7 @@ public static class Shaders
             {
                 vec3 V = normalize(uCameraPos - vWorld);
                 vec3 H = normalize(L + V);
-                col += vec3(1.0) * pow(max(dot(n, H), 0.0), 60.0) * 0.6 * sh;
+                col += uLightColor * pow(max(dot(n, H), 0.0), 60.0) * 0.9 * sh;
                 alpha = 0.8;
                 if (abs(n.y) < 0.6)
                 {
@@ -183,6 +218,8 @@ public static class Shaders
         #version 330 core
         in vec2 vNdc;
         uniform mat4 uInvViewProj;
+        uniform float uStars;   // 0 di giorno, 1 a notte fonda
+        uniform float uTime;
         out vec4 FragColor;
 
         //SKY
@@ -192,7 +229,17 @@ public static class Shaders
             vec4 a = uInvViewProj * vec4(vNdc, 0.0, 1.0);
             vec4 b = uInvViewProj * vec4(vNdc, 1.0, 1.0);
             vec3 dir = normalize(b.xyz / b.w - a.xyz / a.w);
-            FragColor = vec4(skyColor(dir), 1.0);
+            vec3 col = skyColor(dir);
+
+            // Stelle: celle della sfera celeste accese a caso, con un leggero scintillio
+            if (uStars > 0.0 && dir.y > 0.0)
+            {
+                vec3 cell = floor(dir * 240.0);
+                float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+                float twinkle = 0.65 + 0.35 * sin(uTime * 2.5 + h * 120.0);
+                col += vec3(0.92, 0.94, 1.0) * step(0.9972, h) * twinkle * uStars * smoothstep(0.02, 0.25, dir.y);
+            }
+            FragColor = vec4(col, 1.0);
         }
         """.Replace("//SKY", SkyGlsl);
 

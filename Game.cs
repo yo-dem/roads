@@ -22,12 +22,18 @@ public sealed class DebugOptions
     public float DriveUntil = float.MaxValue;
     public bool Slow;
     public bool Mute;
+    public float? Hour;            // ora di partenza (test)
+    public bool Lights;            // fari accesi da subito (test)
+    public float? Zoom;            // distanza della visuale lontana (test; la rotella va da 8 a 32)
+    public bool Far;               // parte con la visuale lontana
+    public int PreSpawn;
 }
 
 public sealed class Game : IDisposable
 {
-    private static readonly Vector3 Background = new(0.55f, 0.77f, 0.95f);
-    private static readonly Vector3 LightDir = Vector3.Normalize(new Vector3(0.45f, -1f, -0.35f));
+    private const float StartHour = 20.5f; // il gioco parte di notte, con la luna che sorge davanti
+    private DayCycle _day = null!;
+    private Mesh _sunMesh = null!, _moonMesh = null!;
 
     private readonly IWindow _window;
     private readonly DebugOptions _debug;
@@ -44,9 +50,8 @@ public sealed class Game : IDisposable
     private bool _mouseHeld, _rightHeld;
     private Vector2 _lastMouse;
     private float _markerAge;
-    private bool _chase;          // vista di guida dietro l'auto (tastiera)
-    private float _chaseIdle;
-    private const float ChaseTimeout = 2.5f;
+    private bool _farView;        // visuale scelta: false = dietro l'auto (standard, tasto 1), true = lontana dall'alto (tasto 2)
+    private bool _driving;        // guida da tastiera in corso (fino al prossimo click di destinazione)
     private int _clickIndex;
 
     private WorldMap _world = null!;
@@ -60,6 +65,8 @@ public sealed class Game : IDisposable
     private readonly Random _rng = new();
     private float _time;
     private double _titleTimer;
+    private int _frames;                 // per gli FPS mostrati nel titolo
+    private double _frameTime, _worstFrame;
     private int _shotIndex;
 
     public Game(IWindow window, DebugOptions debug)
@@ -77,7 +84,14 @@ public sealed class Game : IDisposable
         _gl = _window.CreateOpenGL();
         _input = _window.CreateInput();
         _keyboard = _input.Keyboards[0];
-        _keyboard.KeyDown += (_, key, _) => { if (key == Key.Escape) _window.Close(); };
+        _keyboard.KeyDown += (_, key, _) =>
+        {
+            if (key == Key.Escape) _window.Close();
+            // La visuale cambia solo con questi tasti e resta quella scelta
+            if (key is Key.Number1 or Key.Keypad1) _farView = false;
+            if (key is Key.Number2 or Key.Keypad2) _farView = true;
+            if (key == Key.F) _player.Headlights = !_player.Headlights;
+        };
         foreach (var mouse in _input.Mice)
         {
             _mouse ??= mouse;
@@ -103,7 +117,7 @@ public sealed class Game : IDisposable
                 }
                 if (button != MouseButton.Left) return;
                 _mouseHeld = true;
-                _chase = false; // il click riporta alla vista dall'alto
+                _driving = false; // il click passa al percorso automatico (la visuale non cambia)
                 _mouse = m;
                 if (Pick(m.Position)) _markerAge = 0f;
             };
@@ -124,14 +138,20 @@ public sealed class Game : IDisposable
         _clouds = new Clouds(_gl);
         _shadow = new ShadowMap(_gl, 2048);
         _flame = Props.BuildFlame(_gl);
+        _day = new DayCycle(_debug.Hour ?? StartHour);
+        BuildSkyBodies();
         _marker = BuildMarker(_gl);
 
         _world = new WorldMap(_gl);
+        if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         var start = new Vector3(-2.5f, 0f, 0.3f);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, MathF.PI / 2f);
-        _camera.Snap(_player.Position);
+        _farView = _debug.Far;
+        if (_debug.Zoom is { } zoom) _camera.Distance = Math.Clamp(zoom, 8f, 32f);
+        _player.Headlights = _debug.Lights;
+        _camera.Snap(_player.Position, chase: !_farView, _player.Yaw);
         if (!_debug.Mute) _engine = new EngineSound();
     }
 
@@ -184,11 +204,11 @@ public sealed class Game : IDisposable
         float dt = (float)Math.Min(deltaTime, 0.05);
         _time += dt;
 
-        // Rotazione e input relativo alla camera
+        // Rotazione della visuale lontana
         if (_keyboard.IsKeyPressed(Key.Q)) _camera.Yaw -= 1.8f * dt;
         if (_keyboard.IsKeyPressed(Key.E)) _camera.Yaw += 1.8f * dt;
 
-        // Tastiera = guida "da gioco di auto": sterzo e gas relativi all'auto, camera alle sue spalle
+        // Tastiera = guida "da gioco di auto" in entrambe le visuali: sterzo e gas relativi all'auto
         float steerIn = (Down(Key.D, Key.Right) ? 1f : 0f) - (Down(Key.A, Key.Left) ? 1f : 0f);
         float throttleIn = (Down(Key.W, Key.Up) ? 1f : 0f) - (Down(Key.S, Key.Down) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
@@ -204,24 +224,15 @@ public sealed class Game : IDisposable
         if (_debug.Slow) slow = true;
         while (_clickIndex < _debug.Clicks.Count && _time >= _debug.Clicks[_clickIndex].Time)
         {
-            _chase = false;
+            _driving = false;
             if (Pick(_debug.Clicks[_clickIndex].Screen)) _markerAge = 0f;
             _clickIndex++;
         }
 
-        // Si entra nella vista di guida premendo un tasto; si torna dall'alto con un click,
-        // o dopo qualche secondo da fermi senza toccare i tasti
-        if (steerIn != 0f || throttleIn != 0f)
-        {
-            _chase = true;
-            _chaseIdle = 0f;
-        }
-        else if (_chase)
-        {
-            _chaseIdle += dt;
-            if (_chaseIdle > ChaseTimeout && MathF.Abs(_player.Speed) < 0.3f) _chase = false;
-        }
-        Vector2? manual = _chase ? new Vector2(steerIn, throttleIn) : null;
+        // Un tasto di guida prende il controllo (e annulla il percorso); un click lo restituisce al percorso.
+        // Rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
+        if (steerIn != 0f || throttleIn != 0f) _driving = true;
+        Vector2? manual = _driving ? new Vector2(steerIn, throttleIn) : null;
 
         _player.Update(dt, input, slow, _world, _particles, manual);
         _markerAge += dt;
@@ -229,37 +240,52 @@ public sealed class Game : IDisposable
         if (spawned != null)
             Console.WriteLine($"Nuova zona ({spawned.X},{spawned.Z}): {spawned.Name}");
 
-        // Scintille dai falò
+        // Scintille dai falò (solo quelli che si possono vedere)
         foreach (var zone in _world.Zones)
+        {
+            if (!InView(ZoneArea(zone))) continue;
             foreach (var c in zone.Campfires)
                 if (_rng.NextSingle() < dt * 7f)
                     _particles.Ember(zone.Origin + c + new Vector3(0, zone.YOffset, 0));
+        }
 
         _particles.Update(dt);
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
-        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f, _chase, _player.Yaw);
-        _engine?.Update(dt, MathF.Min(MathF.Abs(_player.Speed) / _player.MaxSpeed, 1f), _player.Throttle);
+        _camera.Update(dt, _player.Position + _player.Velocity * 0.3f, chase: !_farView, _player.Yaw);
+        _engine?.Update(dt, _player.Rpm, _player.Throttle);
+
+        _day.Update(dt);
 
         _titleTimer += deltaTime;
         if (_titleTimer > 0.25)
         {
             _titleTimer = 0;
             var here = _world.ZoneAt(_player.Position);
-            _window.Title = $"Roads  |  {here?.Name ?? "..."}  |  isole scoperte: {_world.Count}";
+            // Prestazioni sempre visibili: FPS medi e fotogramma più lento dall'ultimo aggiornamento
+            string perf = _frameTime > 0 ? $"{_frames / _frameTime:F0} FPS (max {_worstFrame * 1000:F0} ms)" : "";
+            _frames = 0;
+            _frameTime = _worstFrame = 0;
+            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}  |  isole scoperte: {_world.Count}"
+                            + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
 
-    private void CollectScene()
+    private void CollectScene(Matrix4x4 viewProj)
     {
+        _viewProj = viewProj;
         _opaque.Clear();
         _water.Clear();
 
         foreach (var zone in _world.Zones)
         {
+            // Si disegna solo ciò che è entro la nebbia E dentro l'inquadratura
+            Vector4 area = ZoneArea(zone);
+            float lift = zone.YOffset;
+            if (!InView(area) || !InFrustum(area, -5f + MathF.Min(lift, 0f), 8f + MathF.Max(lift, 0f))) continue;
             Matrix4x4 m = zone.Model;
-            _opaque.Add(new DrawItem(zone.Opaque, m));
-            _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true));
-            if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m));
+            _opaque.Add(new DrawItem(zone.Opaque, m, Area: area));
+            _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true, Area: area));
+            if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m, Area: area));
 
             for (int i = 0; i < zone.Campfires.Count; i++)
             {
@@ -272,7 +298,12 @@ public sealed class Game : IDisposable
         }
 
         foreach (var c in _world.Connectors)
-            _opaque.Add(new DrawItem(c.Mesh, c.Model));
+        {
+            if (!c.Visible) continue; // il ponte compare solo quando entrambe le isole sono arrivate
+            const float r = WorldMap.Gap;
+            var area = new Vector4(c.Bridge.Center.X - r, c.Bridge.Center.Z - r, c.Bridge.Center.X + r, c.Bridge.Center.Z + r);
+            if (InView(area) && InFrustum(area, -14f, 4f)) _opaque.Add(new DrawItem(c.Mesh, c.Model, Area: area));
+        }
 
         _cloudItems.Clear();
         _clouds.Collect(_cloudItems, _camera.Target, _time);
@@ -293,15 +324,20 @@ public sealed class Game : IDisposable
 
     private unsafe void OnRender(double deltaTime)
     {
+        _frames++;
+        _frameTime += deltaTime;
+        _worstFrame = Math.Max(_worstFrame, deltaTime);
+
         Vector2D<int> size = _window.FramebufferSize;
         if (size.X == 0 || size.Y == 0) return;
 
-        CollectScene();
+        CollectScene(_camera.View * Projection((float)size.X / size.Y));
 
         // --- 1. Shadow map dal punto di vista del sole, centrata sulla camera ---
         // In vista di guida si vede lontano davanti: l'area delle ombre si sposta in avanti
         Vector3 center = _camera.Target + _camera.Forward * (12f * _camera.Chase);
-        Matrix4x4 lightView = Matrix4x4.CreateLookAt(center - LightDir * 50f, center, Vector3.UnitY);
+        Vector3 lightDir = _day.LightDir;
+        Matrix4x4 lightView = Matrix4x4.CreateLookAt(center - lightDir * 50f, center, Vector3.UnitY);
         Matrix4x4 lightSpace = lightView * Matrix4x4.CreateOrthographic(56f, 56f, 1f, 110f);
 
         _shadow.Bind();
@@ -310,9 +346,12 @@ public sealed class Game : IDisposable
         _gl.PolygonOffset(1.5f, 3f);
         _depth.Use();
         _depth.SetMatrix("uLightSpace", lightSpace);
+        var shadowCenter = new Vector2(center.X, center.Z);
         foreach (var item in _opaque)
         {
             if (!item.CastShadow) continue;
+            // Fuori dal riquadro della shadow map non serve disegnarlo nel pass delle ombre
+            if (item.HasArea && RectDistance(shadowCenter, item.Area) > ShadowReach) continue;
             _depth.SetMatrix("uModel", item.Model);
             item.Mesh.Draw();
         }
@@ -321,7 +360,8 @@ public sealed class Game : IDisposable
         // --- 2. Scena principale ---
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         _gl.Viewport(0, 0, (uint)size.X, (uint)size.Y);
-        _gl.ClearColor(Background.X, Background.Y, Background.Z, 1f);
+        Vector3 horizon = _day.SkyHorizon;
+        _gl.ClearColor(horizon.X, horizon.Y, horizon.Z, 1f);
         _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         var proj = Projection((float)size.X / size.Y);
@@ -333,6 +373,9 @@ public sealed class Game : IDisposable
             _gl.DepthMask(false);
             _sky.Use();
             _sky.SetMatrix("uInvViewProj", invViewProj);
+            SetSkyColors(_sky);
+            _sky.SetFloat("uStars", _day.Stars);
+            _sky.SetFloat("uTime", _time);
             _gl.BindVertexArray(_skyVao);
             _gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
             _gl.DepthMask(true);
@@ -343,12 +386,21 @@ public sealed class Game : IDisposable
         _lit.SetMatrix("uProj", proj);
         _lit.SetMatrix("uView", _camera.View);
         _lit.SetMatrix("uLightSpace", lightSpace);
-        _lit.SetVector3("uLightDir", LightDir);
+        _lit.SetVector3("uLightDir", lightDir);
+        _lit.SetVector3("uLightColor", _day.LightColor);
+        _lit.SetVector3("uAmbientLow", _day.AmbientLow);
+        _lit.SetVector3("uAmbientHigh", _day.AmbientHigh);
+        SetSkyColors(_lit);
+        _lit.SetInt("uHeadOn", _player.Headlights ? 1 : 0);
+        _lit.SetVector3("uHeadPos[0]", _player.HeadlightPos(-1f));
+        _lit.SetVector3("uHeadPos[1]", _player.HeadlightPos(1f));
+        _lit.SetVector3("uHeadDir[0]", _player.HeadlightDir(-1f));
+        _lit.SetVector3("uHeadDir[1]", _player.HeadlightDir(1f));
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", _player.Position + new Vector3(0, 0.45f, 0));
 
         _lit.SetFloat("uFogNear", _camera.EffectiveDistance + 14f);
-        _lit.SetFloat("uFogFar", _camera.EffectiveDistance + 55f);
+        _lit.SetFloat("uFogFar", ViewRange);
         _lit.SetFloat("uTime", _time);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, _shadow.Texture);
@@ -356,6 +408,7 @@ public sealed class Game : IDisposable
 
         _lit.SetInt("uWater", 0);
         _lit.SetInt("uCloud", 0);
+        DrawSkyBodies();
         foreach (var item in _opaque)
         {
             _lit.SetMatrix("uModel", item.Model);
@@ -407,11 +460,129 @@ public sealed class Game : IDisposable
         TakeScreenshotIfDue(size);
     }
 
+    /// <summary>Oltre questa distanza dalla camera la nebbia copre tutto (è la stessa uFogFar dello shader).</summary>
+    private float ViewRange => _camera.EffectiveDistance + 55f;
+
+    /// <summary>Metà diagonale del riquadro delle ombre (56 x 56) più lo spazio per le ombre lunghe.</summary>
+    private const float ShadowReach = 48f;
+
+    private static Vector4 ZoneArea(Zone z) =>
+        new(z.Origin.X - Zone.Half, z.Origin.Z - Zone.Half, z.Origin.X + Zone.Half, z.Origin.Z + Zone.Half);
+
+    /// <summary>Distanza sul piano tra un punto e un rettangolo (0 se il punto è dentro).</summary>
+    private static float RectDistance(Vector2 p, Vector4 area)
+    {
+        float dx = MathF.Max(MathF.Max(area.X - p.X, p.X - area.Z), 0f);
+        float dz = MathF.Max(MathF.Max(area.Y - p.Y, p.Y - area.W), 0f);
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    private Matrix4x4 _viewProj;
+
+    /// <summary>Margine sui lati: un albero appena fuori inquadratura può ancora proiettare l'ombra dentro.</summary>
+    private const float FrustumMargin = 8f;
+
+    /// <summary>
+    /// Il volume (rettangolo <paramref name="area"/> sul piano, tra le quote indicate) tocca la piramide di vista?
+    /// Scartato solo se tutti gli 8 vertici stanno fuori dallo stesso piano della piramide (test conservativo).
+    /// </summary>
+    private bool InFrustum(Vector4 area, float yMin, float yMax)
+    {
+        int left = 0, right = 0, down = 0, up = 0, behind = 0, far = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            float x = (i & 1) == 0 ? area.X - FrustumMargin : area.Z + FrustumMargin;
+            float z = (i & 2) == 0 ? area.Y - FrustumMargin : area.W + FrustumMargin;
+            float y = (i & 4) == 0 ? yMin : yMax;
+            Vector4 c = Vector4.Transform(new Vector4(x, y, z, 1f), _viewProj);
+            if (c.X < -c.W) left++;
+            if (c.X > c.W) right++;
+            if (c.Y < -c.W) down++;
+            if (c.Y > c.W) up++;
+            if (c.Z < 0f) behind++;   // System.Numerics: profondità NDC in [0, 1]
+            if (c.Z > c.W) far++;
+        }
+        return left < 8 && right < 8 && down < 8 && up < 8 && behind < 8 && far < 8;
+    }
+
+    /// <summary>
+    /// Solo vicino al tratto camera → giocatore un albero può coprire l'auto: i due pass della trasparenza
+    /// ridisegnano soltanto la vegetazione delle isole che toccano quella striscia.
+    /// </summary>
+    private bool NearSightLine(Vector4 area)
+    {
+        Vector3 cam = _camera.Position, focus = _player.Position;
+        const float reach = 8f;
+        return area.X <= MathF.Max(cam.X, focus.X) + reach && area.Z >= MathF.Min(cam.X, focus.X) - reach
+            && area.Y <= MathF.Max(cam.Z, focus.Z) + reach && area.W >= MathF.Min(cam.Z, focus.Z) - reach;
+    }
+
+    private bool InView(Vector4 area)
+    {
+        Vector3 cam = _camera.Position;
+        return RectDistance(new Vector2(cam.X, cam.Z), area) < ViewRange;
+    }
+
+    private void SetSkyColors(Shader shader)
+    {
+        shader.SetVector3("uSkyZenith", _day.SkyZenith);
+        shader.SetVector3("uSkyHorizon", _day.SkyHorizon);
+        shader.SetVector3("uSkyBelow", _day.SkyBelow);
+    }
+
+    /// <summary>Sole e luna low poly: icosfere a facce piatte, luminose di colore proprio.</summary>
+    private void BuildSkyBodies()
+    {
+        var mb = new MeshBuilder { ColorRng = new Random(11), ColorJitter = 0.06f };
+        mb.AddIcosphere(Vector3.Zero, Vector3.One, 1, new Vector3(1f, 0.82f, 0.36f));
+        _sunMesh = mb.Build(_gl);
+        // La luna ha facce più irregolari e macchiate, come crateri
+        mb = new MeshBuilder { ColorRng = new Random(23), ColorJitter = 0.16f };
+        mb.AddIcosphere(Vector3.Zero, Vector3.One, 1, new Vector3(0.86f, 0.89f, 0.97f), new Random(5), 0.07f);
+        _moonMesh = mb.Build(_gl);
+    }
+
+    /// <summary>
+    /// Disegna sole e luna lontani nel cielo, nella loro direzione: prima della scena, così tutto ciò
+    /// che sta davanti li copre. Niente nebbia né ombre (uSkyBody).
+    /// </summary>
+    private void DrawSkyBodies()
+    {
+        const float distance = 160f;
+        Vector3 cam = _camera.Position;
+        _lit.SetInt("uSkyBody", 1);
+        _lit.SetInt("uSeeThrough", 0);
+        foreach (var (mesh, dir, radius, spin) in new[]
+                 { (_sunMesh, _day.SunDir, 9f, 0.05f), (_moonMesh, _day.MoonDir, 6f, 0f) })
+        {
+            Vector3 shown = SkyPlacement(dir);
+            if (shown.Y < -0.06f) continue; // tramontato
+            _lit.SetMatrix("uModel", Matrix4x4.CreateScale(radius) * Matrix4x4.CreateRotationY(_time * spin)
+                                     * Matrix4x4.CreateTranslation(cam + shown * distance));
+            mesh.Draw();
+        }
+        _lit.SetInt("uSkyBody", 0);
+    }
+
+    /// <summary>
+    /// Dove disegnare un astro: stessa direzione orizzontale di quella vera, ma su un arco basso
+    /// (al massimo ~10° sull'orizzonte), così resta nella fascia di cielo che le visuali inquadrano.
+    /// Luce e ombre seguono comunque la posizione vera.
+    /// </summary>
+    private static Vector3 SkyPlacement(Vector3 dir)
+    {
+        float elevation = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
+        float shown = elevation >= 0f ? 0.03f + elevation * 0.11f : 0.03f + elevation;
+        var flat = new Vector3(dir.X, 0f, dir.Z);
+        flat = flat.LengthSquared() > 1e-6f ? Vector3.Normalize(flat) : Vector3.UnitX;
+        return flat * MathF.Cos(shown) + Vector3.UnitY * MathF.Sin(shown);
+    }
+
     private void DrawSeeThrough()
     {
         foreach (var item in _opaque)
         {
-            if (!item.SeeThrough) continue;
+            if (!item.SeeThrough || (item.HasArea && !NearSightLine(item.Area))) continue;
             _lit.SetMatrix("uModel", item.Model);
             _lit.SetFloat("uEmissive", item.Emissive);
             item.Mesh.Draw();
@@ -447,6 +618,8 @@ public sealed class Game : IDisposable
         _player?.Dispose();
         _particles?.Dispose();
         _flame?.Dispose();
+        _sunMesh?.Dispose();
+        _moonMesh?.Dispose();
         _marker?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();

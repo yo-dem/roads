@@ -30,10 +30,14 @@ public sealed class Zone : IDisposable
     public Biome Biome { get; }
     public bool[] Exits { get; } = new bool[4];
 
-    public Mesh Opaque { get; }
+    // Le mesh esistono solo dopo Upload(): la generazione avviene in background senza OpenGL
+    public Mesh Opaque { get; private set; } = null!;
     /// <summary>Alberi, rocce e oggetti di scena: separati dal terreno per renderli trasparenti quando coprono il giocatore.</summary>
-    public Mesh Scenery { get; }
-    public Mesh? Water { get; }
+    public Mesh Scenery { get; private set; } = null!;
+    public Mesh? Water { get; private set; }
+    public bool Uploaded { get; private set; }
+
+    private MeshData? _opaqueData, _sceneryData, _waterData;
     public List<Bridge> Bridges { get; } = new();
     public List<Vector3> Campfires { get; } = new(); // coordinate locali
 
@@ -62,7 +66,8 @@ public sealed class Zone : IDisposable
 
     private readonly record struct Palette(Vector3 Grass, Vector3 GrassSide, Vector3 Path, Vector3 Bank);
 
-    public Zone(GL gl, int x, int z, bool[] exits)
+    /// <summary>Genera l'isola (solo CPU, sicuro su un thread in background). Poi va chiamato <see cref="Upload"/>.</summary>
+    public Zone(int x, int z, bool[] exits)
     {
         X = x;
         Z = z;
@@ -122,19 +127,19 @@ public sealed class Zone : IDisposable
         BuildPaths(mb, rng);
         foreach (var b in Bridges)
             b.Build(mb, b.Center - Origin);
-        Opaque = mb.Build(gl);
+        _opaqueData = mb.BuildData();
 
         // Stesso Random: la sequenza dei numeri casuali (e quindi il mondo) resta identica
         var pb = new MeshBuilder { ColorRng = rng, ColorJitter = 0.05f, ComputeEdges = true };
         PlaceProps(pb, rng, home);
-        Scenery = pb.Build(gl);
+        _sceneryData = pb.BuildData();
 
         var wb = new MeshBuilder();
         if (_hasRiver) BuildWater(wb);
-        Water = wb.IsEmpty ? null : wb.Build(gl);
+        _waterData = wb.IsEmpty ? null : wb.BuildData();
     }
 
-    private static float EaseOutBack(float t)
+    internal static float EaseOutBack(float t)
     {
         const float c1 = 1.70158f, c3 = c1 + 1f;
         float u = t - 1f;
@@ -625,8 +630,20 @@ public sealed class Zone : IDisposable
         return HeightLocal(x, z) + PathLift(x, z) + YOffset;
     }
 
+    /// <summary>Carica le mesh sulla GPU (thread principale) e libera i dati lato CPU.</summary>
+    public void Upload(GL gl)
+    {
+        if (Uploaded) return;
+        Opaque = new Mesh(gl, _opaqueData!);
+        Scenery = new Mesh(gl, _sceneryData!);
+        if (_waterData != null) Water = new Mesh(gl, _waterData);
+        _opaqueData = _sceneryData = _waterData = null;
+        Uploaded = true;
+    }
+
     public void Dispose()
     {
+        if (!Uploaded) return;
         Opaque.Dispose();
         Scenery.Dispose();
         Water?.Dispose();
