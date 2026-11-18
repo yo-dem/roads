@@ -31,9 +31,10 @@ public sealed class DebugOptions
 
 public sealed class Game : IDisposable
 {
-    private const float StartHour = 20.5f; // il gioco parte di notte, con la luna che sorge davanti
+    private const float StartHour = 20.5f; // il gioco parte di notte
     private DayCycle _day = null!;
-    private Mesh _sunMesh = null!, _moonMesh = null!;
+    private Mesh _sunMesh = null!;
+    private Hud _hud = null!;
 
     private readonly IWindow _window;
     private readonly DebugOptions _debug;
@@ -116,6 +117,7 @@ public sealed class Game : IDisposable
                     return;
                 }
                 if (button != MouseButton.Left) return;
+                if (OverMinimap(m.Position)) return; // un click sulla minimappa non è una destinazione
                 _mouseHeld = true;
                 _driving = false; // il click passa al percorso automatico (la visuale non cambia)
                 _mouse = m;
@@ -137,6 +139,7 @@ public sealed class Game : IDisposable
         _skyVao = _gl.GenVertexArray();
         _clouds = new Clouds(_gl);
         _shadow = new ShadowMap(_gl, 2048);
+        _hud = new Hud(_gl);
         _flame = Props.BuildFlame(_gl);
         _day = new DayCycle(_debug.Hour ?? StartHour);
         BuildSkyBodies();
@@ -457,6 +460,7 @@ public sealed class Game : IDisposable
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
 
+        DrawMinimap(size);
         TakeScreenshotIfDue(size);
     }
 
@@ -530,37 +534,28 @@ public sealed class Game : IDisposable
         shader.SetVector3("uSkyBelow", _day.SkyBelow);
     }
 
-    /// <summary>Sole e luna low poly: icosfere a facce piatte, luminose di colore proprio.</summary>
+    /// <summary>Sole low poly: icosfera a facce piatte, luminosa di colore proprio. (La luna non si disegna: resta solo la sua luce.)</summary>
     private void BuildSkyBodies()
     {
         var mb = new MeshBuilder { ColorRng = new Random(11), ColorJitter = 0.06f };
         mb.AddIcosphere(Vector3.Zero, Vector3.One, 1, new Vector3(1f, 0.82f, 0.36f));
         _sunMesh = mb.Build(_gl);
-        // La luna ha facce più irregolari e macchiate, come crateri
-        mb = new MeshBuilder { ColorRng = new Random(23), ColorJitter = 0.16f };
-        mb.AddIcosphere(Vector3.Zero, Vector3.One, 1, new Vector3(0.86f, 0.89f, 0.97f), new Random(5), 0.07f);
-        _moonMesh = mb.Build(_gl);
     }
 
     /// <summary>
-    /// Disegna sole e luna lontani nel cielo, nella loro direzione: prima della scena, così tutto ciò
-    /// che sta davanti li copre. Niente nebbia né ombre (uSkyBody).
+    /// Disegna il sole lontano nel cielo, nella sua direzione: prima della scena, così tutto ciò
+    /// che sta davanti lo copre. Niente nebbia né ombre (uSkyBody).
     /// </summary>
     private void DrawSkyBodies()
     {
-        const float distance = 160f;
-        Vector3 cam = _camera.Position;
+        const float distance = 160f, radius = 9f;
+        Vector3 shown = SkyPlacement(_day.SunDir);
+        if (shown.Y < -0.06f) return; // tramontato
         _lit.SetInt("uSkyBody", 1);
         _lit.SetInt("uSeeThrough", 0);
-        foreach (var (mesh, dir, radius, spin) in new[]
-                 { (_sunMesh, _day.SunDir, 9f, 0.05f), (_moonMesh, _day.MoonDir, 6f, 0f) })
-        {
-            Vector3 shown = SkyPlacement(dir);
-            if (shown.Y < -0.06f) continue; // tramontato
-            _lit.SetMatrix("uModel", Matrix4x4.CreateScale(radius) * Matrix4x4.CreateRotationY(_time * spin)
-                                     * Matrix4x4.CreateTranslation(cam + shown * distance));
-            mesh.Draw();
-        }
+        _lit.SetMatrix("uModel", Matrix4x4.CreateScale(radius) * Matrix4x4.CreateRotationY(_time * 0.05f)
+                                 * Matrix4x4.CreateTranslation(_camera.Position + shown * distance));
+        _sunMesh.Draw();
         _lit.SetInt("uSkyBody", 0);
     }
 
@@ -576,6 +571,66 @@ public sealed class Game : IDisposable
         var flat = new Vector3(dir.X, 0f, dir.Z);
         flat = flat.LengthSquared() > 1e-6f ? Vector3.Normalize(flat) : Vector3.UnitX;
         return flat * MathF.Cos(shown) + Vector3.UnitY * MathF.Sin(shown);
+    }
+
+    // ------------------------------------------------------------------ minimappa
+
+    // Dimensioni in punti della finestra (sugli schermi Retina vengono moltiplicate)
+    private const float MapRadius = 62f, MapMargin = 18f;
+    private static readonly Vector2 MapCenter = new(MapMargin + MapRadius, MapMargin + MapRadius);
+
+    private bool OverMinimap(Vector2 windowPos) => Vector2.Distance(windowPos, MapCenter) < MapRadius;
+
+    /// <summary>
+    /// Minimappa in alto a sinistra: ruota con la camera (in alto c'è sempre la direzione in cui si guarda),
+    /// con i punti cardinali sul bordo e al centro una freccia con la direzione dell'auto.
+    /// Pronta per mostrare in futuro gli obiettivi.
+    /// </summary>
+    private void DrawMinimap(Vector2D<int> framebuffer)
+    {
+        float k = _window.Size.X > 0 ? (float)framebuffer.X / _window.Size.X : 1f; // pixel per punto
+        Vector2 c = MapCenter * k;
+        float r = MapRadius * k;
+
+        // Direzione del mondo → schermo: l'avanti della camera punta in alto
+        Vector3 right = _camera.Right, forward = _camera.Forward;
+        Vector2 ToMap(Vector3 world) => new(Vector3.Dot(world, right), -Vector3.Dot(world, forward));
+
+        var white = new Vector4(0.93f, 0.95f, 0.98f, 0.95f);
+        var north = new Vector4(0.98f, 0.38f, 0.32f, 1f);
+
+        _hud.Disc(c, r, 32, new Vector4(0.05f, 0.07f, 0.11f, 0.55f));
+        _hud.Ring(c, r - 2f * k, r, 32, new Vector4(0.93f, 0.95f, 0.98f, 0.8f));
+
+        // Tacche: lunghe sui punti cardinali, corte su quelli intermedi
+        for (int i = 0; i < 8; i++)
+        {
+            float a = MathF.Tau * i / 8f;
+            Vector2 d = ToMap(new Vector3(MathF.Sin(a), 0f, -MathF.Cos(a))); // i = 0 → nord (-Z), poi in senso orario
+            float inner = i % 2 == 0 ? r - 9f * k : r - 6f * k;
+            _hud.Line(c + d * inner, c + d * (r - 2f * k), 2f * k, i == 0 ? north : white with { W = 0.7f });
+        }
+
+        // Lettere sempre dritte, che girano lungo il bordo
+        foreach (var (letter, dir) in new[]
+                 { ('N', new Vector3(0, 0, -1)), ('E', new Vector3(1, 0, 0)), ('S', new Vector3(0, 0, 1)), ('O', new Vector3(-1, 0, 0)) })
+            _hud.Letter(letter, c + ToMap(dir) * (r - 20f * k), 12f * k, 2.2f * k, letter == 'N' ? north : white);
+
+        // Auto al centro: freccia a punta nella sua direzione, con un bordo scuro per staccarla dallo sfondo
+        Vector2 h = ToMap(new Vector3(MathF.Sin(_player.Yaw), 0f, MathF.Cos(_player.Yaw)));
+        if (h.LengthSquared() > 1e-6f) h = Vector2.Normalize(h);
+        Vector2 side = new(-h.Y, h.X);
+        void Arrow(float s, Vector4 color)
+        {
+            Vector2 tip = c + h * 11f * k * s, back = c - h * 3f * k * s;
+            Vector2 left = c - h * 8f * k * s + side * 7f * k * s, rightCorner = c - h * 8f * k * s - side * 7f * k * s;
+            _hud.Triangle(tip, left, back, color);
+            _hud.Triangle(tip, back, rightCorner, color);
+        }
+        Arrow(1.3f, new Vector4(0.05f, 0.07f, 0.11f, 0.9f));
+        Arrow(1f, new Vector4(1f, 0.84f, 0.38f, 1f));
+
+        _hud.Flush(framebuffer.X, framebuffer.Y);
     }
 
     private void DrawSeeThrough()
@@ -614,12 +669,12 @@ public sealed class Game : IDisposable
     public void Dispose()
     {
         _engine?.Dispose();
+        _hud?.Dispose();
         _world?.Dispose();
         _player?.Dispose();
         _particles?.Dispose();
         _flame?.Dispose();
         _sunMesh?.Dispose();
-        _moonMesh?.Dispose();
         _marker?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();
