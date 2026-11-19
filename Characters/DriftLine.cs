@@ -26,6 +26,8 @@ public sealed class DriftLine
     public float Length => _cum.Count > 0 ? _cum[^1] : 0f;
     /// <summary>La linea arriva fino a un incrocio raggiungibile entro la finestra (per scegliere la svolta dopo).</summary>
     public bool HubAhead { get; private set; }
+    /// <summary>Lato della svolta scelta: +1 destra, -1 sinistra (come lo sterzo).</summary>
+    public float TurnSign { get; private set; }
 
     private enum Axis { EastWest, NorthSouth }
 
@@ -81,6 +83,7 @@ public sealed class DriftLine
 
         if (exit is { } turn)
         {
+            line.TurnSign = turn == TurnLeft(forward) ? -1f : 1f;
             // Mezzeria fino all'inizio della curva
             float until = hubS - dir * CornerReach;
             for (float t = s; dir * (until - t) > 0f; t += dir * Step) line.Add(Center(axis, index, t));

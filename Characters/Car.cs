@@ -141,7 +141,7 @@ public sealed class Car : IDisposable
     private float _driftTime, _steerIn, _gasIn, _lineU, _flickSign, _lastHeading;
     private DriftLine? _line;
     private bool _uturn;
-    private float _brakeHold;
+    private float _brakeHold, _steerLatch;
 
     /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
     public bool WheelsLocked { get; private set; }
@@ -556,6 +556,10 @@ public sealed class Car : IDisposable
         if (manual is { } drive)
         {
             _maneuver = 0f;
+            // Dopo l'inversione a U lo sterzo tenuto per farla non conta finché non si rilascia il tasto,
+            // altrimenti l'auto, finito il giro, continuerebbe a girare oltre i 180°
+            if (_steerLatch != 0f && MathF.Sign(drive.X) != _steerLatch) _steerLatch = 0f;
+            if (_steerLatch != 0f) drive.X = 0f;
             _steerIn = Math.Clamp(drive.X, -1f, 1f);
             _gasIn = Math.Clamp(drive.Y, -1f, 1f);
             // Sterzo a destra = rotazione oraria vista dall'alto = yaw che diminuisce
@@ -657,8 +661,9 @@ public sealed class Car : IDisposable
         _grip = Noise.Lerp(_grip, gripTarget, Noise.Damp(gripTarget < _grip ? 12f : GripRecover, dt));
         float slip = Math.Clamp((GripFull - _grip) / (GripFull - GripDrift), 0f, 1f);
 
-        // Innesco della derapata assistita: freno a mano in velocità su una strada
-        if (!_drifting && manual != null && handbrake && _speed > DriftMinSpeed
+        // Innesco della derapata assistita: freno a mano in velocità su una strada (non durante un'inversione a U:
+        // nello slargo in fondo a un vicolo cieco, a metà giro, sostituirebbe la traiettoria e farebbe un secondo giro)
+        if (!_drifting && !_uturn && manual != null && handbrake && _speed > DriftMinSpeed
             && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } planned)
         {
             _drifting = true;
@@ -691,6 +696,7 @@ public sealed class Car : IDisposable
 
         float yawRate, newYaw;
         Vector3? railStep = null;
+        if (_line == null) { _uturn = false; _drifting = false; } // manovre senza traiettoria: mai "appese"
         if (_uturn && _line != null)
         {
             var line = _line;
@@ -724,10 +730,22 @@ public sealed class Car : IDisposable
                 _steer = 0f;
                 _speed = clean ? UTurnExitSpeed : 0f;
                 Gear = 1;
+                _steerLatch = -_uturnSide; // il segno dello sterzo che ha avviato il giro
             }
         }
         else if (_drifting && _line != null)
         {
+            // Lo sterzo decide la svolta finché non si è entrati in curva: se si è tirato il freno a mano un attimo
+            // prima di sterzare (o già in avvicinamento), la svolta scelta senza sterzo si corregge verso quel lato
+            float wantSide = MathF.Abs(_steerIn) > 0.3f ? MathF.Sign(_steerIn) : 0f;
+            if (wantSide != 0f && wantSide != _line.TurnSign && _lineU < _line.CornerStart
+                && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } replanned && replanned.TurnSign == wantSide)
+            {
+                _line = replanned;
+                _lineU = replanned.Project(Position);
+                _lineOffset = Flat(Position - replanned.At(_lineU));
+                _lastHeading = replanned.Heading(_lineU);
+            }
             var line = _line;
             // Prima della curva si frena da soli alla velocità giusta per farla di traverso
             if (_lineU < line.CornerEnd)
