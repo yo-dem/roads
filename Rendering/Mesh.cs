@@ -55,6 +55,15 @@ public sealed class Mesh : IDisposable
         _gl.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, (void*)0);
     }
 
+    /// <summary>Riscrive tutti i vertici (stessa quantità): per le mesh deformate dallo scheletro a ogni fotogramma.</summary>
+    public unsafe void Update(ReadOnlySpan<float> vertices)
+    {
+        _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vbo);
+        fixed (float* p = vertices)
+            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (nuint)(vertices.Length * sizeof(float)), p);
+        _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+    }
+
     /// <summary>
     /// Azzera un tratto di indici: quei triangoli degenerano e spariscono (per "staccare" un oggetto dalla mesh
     /// unica del pezzo e disegnarlo a parte quando viene spostato).
