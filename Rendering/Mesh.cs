@@ -55,6 +55,21 @@ public sealed class Mesh : IDisposable
         _gl.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, (void*)0);
     }
 
+    /// <summary>
+    /// Azzera un tratto di indici: quei triangoli degenerano e spariscono (per "staccare" un oggetto dalla mesh
+    /// unica del pezzo e disegnarlo a parte quando viene spostato).
+    /// </summary>
+    public unsafe void ZeroIndices(int start, int count)
+    {
+        if (count <= 0) return;
+        var zeros = new uint[count];
+        // Nel profilo "core" il buffer degli indici fa parte del VAO: si lega il VAO della mesh stessa
+        _gl.BindVertexArray(_vao);
+        fixed (uint* p = zeros)
+            _gl.BufferSubData(BufferTargetARB.ElementArrayBuffer, (nint)(start * sizeof(uint)), (nuint)(count * sizeof(uint)), p);
+        _gl.BindVertexArray(0);
+    }
+
     public void Dispose()
     {
         _gl.DeleteBuffer(_vbo);

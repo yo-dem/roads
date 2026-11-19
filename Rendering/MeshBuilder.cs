@@ -35,6 +35,9 @@ public sealed class MeshBuilder
 
     public bool IsEmpty => _indices.Count == 0;
 
+    /// <summary>Indici aggiunti finora (per ricordare dove inizia e finisce un oggetto nella mesh).</summary>
+    public int IndexCount => _indices.Count;
+
     private const int BaseFloats = 9;   // posizione, normale, colore (come vengono accumulati)
     private const int ObjectFloats = 5; // centro x/z, raggio, quota minima e massima dell'oggetto
 

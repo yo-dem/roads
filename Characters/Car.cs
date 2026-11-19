@@ -65,6 +65,11 @@ public sealed class Car : IDisposable
 
     // Inversione a U col freno a mano (lontano dagli incroci, a velocità sostenuta): l'auto scivola lungo la
     // corsia rallentando fino a fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso.
+    // Bloccaggio delle ruote: insistendo sul freno in corsa le ruote si bloccano e l'auto striscia dritta
+    private const float BrakeLockTime = 0.3f;        // s di freno tenuto premuto prima del bloccaggio
+    private const float BrakeLocked = 8.5f;          // unità/s²: a ruote bloccate si frena un po' meno (si striscia)
+    private const float LockedSteer = 0.12f;         // quota di sterzo che resta a ruote bloccate
+
     private const float UTurnMinSpeed = 6f;          // velocità minima per la manovra
     private const float UTurnSlideMin = 4f;          // spazio di scivolata (cresce con la velocità)
     private const float UTurnSlideMax = 8f;
@@ -136,6 +141,10 @@ public sealed class Car : IDisposable
     private float _driftTime, _steerIn, _gasIn, _lineU, _flickSign, _lastHeading;
     private DriftLine? _line;
     private bool _uturn;
+    private float _brakeHold;
+
+    /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
+    public bool WheelsLocked { get; private set; }
     private float _uturnSide, _uturnLength, _uturnDecel, _uturnTime, _uturnSpeed;
 
     /// <summary>In inversione a U col freno a mano.</summary>
@@ -347,6 +356,37 @@ public sealed class Car : IDisposable
             float turnRate = Noise.Lerp(TurnRateSlow, TurnRateFast, MathF.Pow(MathF.Min(v / FastSpeed, 1f), 0.7f));
             return MathF.Min(MaxSteer, MathF.Atan(WheelBase * turnRate / v));
         }
+    }
+
+    // ------------------------------------------------------------------ spinta degli oggetti
+    // Rocce e cespugli non fermano l'auto di colpo: vengono spinti via secondo la loro massa (la roccia pesa in
+    // proporzione al volume, il cespuglio poco) e l'auto perde la velocità che cede all'oggetto.
+    private const float CarMass = 1.5f;
+
+    private Vector3 PushObstacles(WorldMap world, Particles fx, Vector3 step, float newYaw, float dt)
+    {
+        float len = step.Length();
+        if (len < 1e-5f || dt <= 0f) return step;
+        Vector2 velocity = new Vector2(step.X, step.Z) / dt;
+        Vector3 next = Position + step, f = Dir(newYaw) * HullOffset;
+        float hardest = 0f;
+        Vector3 where = default;
+        foreach (var c in new[] { next + f, next - f })
+        {
+            float hit = world.PushMovables(c, HullRadius, ref velocity, CarMass, out var contact);
+            if (hit > hardest) { hardest = hit; where = contact; }
+        }
+        if (hardest > 0f && hardest > 1f) fx.Dust(where, hardest > 4f ? 4 : 2); // sbuffo di polvere nell'urto
+
+        // La velocità ceduta all'oggetto si perde: il passo si accorcia (mai all'indietro)
+        Vector2 dir = new Vector2(step.X, step.Z) / len;
+        float kept = MathF.Max(0f, Vector2.Dot(velocity, dir)) * dt;
+        if (kept < len)
+        {
+            _speed *= kept / len;
+            step *= kept / len;
+        }
+        return step;
     }
 
     // ------------------------------------------------------------------ aiuto ai ponti
@@ -590,7 +630,11 @@ public sealed class Car : IDisposable
         float push = Accel;
         if (!braking && !coasting && wantSpeed > 0f && _speed >= -0.05f)
             push = _shiftTimer > 0f ? 0f : GearPower[Gear - 1] * TorqueCurve(GearRpm(Gear));
-        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? Brake : push) * dt);
+        // Freno tenuto premuto in corsa (in avanti): dopo un attimo le ruote si bloccano
+        bool brakePedal = manual != null && _gasIn < -0.1f && _speed > 0.3f;
+        _brakeHold = brakePedal ? _brakeHold + dt : 0f;
+        WheelsLocked = brakePedal && _brakeHold > BrakeLockTime && _speed > 1f;
+        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? (WheelsLocked ? BrakeLocked : Brake) : push) * dt);
         bool handbrake = Handbrake && manual != null;
         // In velocità il freno a mano serve a far scartare la coda, non a inchiodare: frena la metà
         if (handbrake) _speed = MoveTowards(_speed, 0f, (_speed > DriftMinSpeed ? 0.5f : 1f) * HandbrakeDecel * dt);
@@ -740,7 +784,8 @@ public sealed class Car : IDisposable
         }
         else
         {
-            float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase;
+            // A ruote bloccate le anteriori non direzionano: lo sterzo quasi non conta
+            float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f);
             yawRate = gripYawRate * (1f + DriftYawBoost * slip);
             // Senza aderenza la rotazione in più ha un tetto: si entra di traverso senza girarsi su se stessi
             float yawCap = MathF.Max(MathF.Abs(gripYawRate), DriftYawMax);
@@ -754,13 +799,14 @@ public sealed class Car : IDisposable
         BoostFlash = MathF.Max(0f, BoostFlash - dt * 2.5f);
         if (railStep == null && _speed > 0.5f) newYaw = BridgeAssist(world, newYaw, dt);
         Vector3 step = railStep ?? Dir(_travelYaw) * (_speed * dt);
+        step = PushObstacles(world, fx, step, newYaw, dt);
         float moved = step.LengthSquared() > 0f ? Move(world, step, newYaw) : 0f;
         _yawRate = Noise.Lerp(_yawRate, yawRate, Noise.Damp(10f, dt));
 
         // Urti: la velocità diventa quella davvero percorsa. Contro un albero preso in pieno si azzera; strisciando
         // lungo un ostacolo resta solo la parte che si è mossa. (Prima si scalava solo tenendo il gas: lasciandolo,
         // l'auto restava ferma con la velocità di prima "in memoria" e, appena libera, ripartiva da sola.)
-        float expected = railStep is { } rs ? rs.Length() : MathF.Abs(_speed) * dt;
+        float expected = step.Length(); // il passo tentato (già ridotto da eventuali oggetti spinti)
         if (expected > 1e-6f && moved < expected * 0.999f)
             _speed *= moved / expected;
 
@@ -791,6 +837,7 @@ public sealed class Car : IDisposable
         _brakeGlow = stopLights ? 1f : MathF.Max(0f, _brakeGlow - dt * 4f);
         _handbrakeGlow = Handbrake ? 1f : MathF.Max(0f, _handbrakeGlow - dt * 4f);
         float skid = Math.Clamp((MathF.Abs(DriftAngle) - 0.08f) / 0.45f, 0f, 1f) * Math.Clamp((MathF.Abs(_speed) - 0.8f) / 3f, 0f, 1f);
+        if (WheelsLocked) skid = MathF.Max(skid, Math.Clamp(_speed / 6f, 0.45f, 1f)); // gomme che strisciano
         Skid = Noise.Lerp(Skid, skid, Noise.Damp(skid > Skid ? 20f : 30f, dt)); // si spegne subito se l'auto si ferma
 
         // Assetto: segue il terreno (ponti ad arco, pendii) e si inclina in curva e in frenata
@@ -801,7 +848,7 @@ public sealed class Car : IDisposable
         _tilt = Noise.Lerp(_tilt, Math.Clamp(_accel * 0.012f, -0.09f, 0.09f), Noise.Damp(8f, dt));
         _roll = Noise.Lerp(_roll, Math.Clamp(_yawRate * _speed * 0.012f, -0.12f, 0.12f), Noise.Damp(8f, dt));
 
-        _spin += _speed * dt / (WheelRadius * Scale);
+        if (!WheelsLocked) _spin += _speed * dt / (WheelRadius * Scale); // bloccate: le ruote non girano
 
         // Fumo dalle gomme posteriori mentre derapa
         _smokeTimer -= dt;
@@ -810,6 +857,14 @@ public sealed class Car : IDisposable
             _smokeTimer = 0.045f;
             foreach (float sx in new[] { -0.42f, 0.42f })
                 fx.Dust(Vector3.Transform(new Vector3(sx, 0.05f, -0.5f), RootMatrix), 1);
+        }
+        else if (WheelsLocked && _speed > 1.5f && _smokeTimer <= 0f)
+        {
+            // Ruote bloccate: fumo da tutte e quattro le gomme
+            _smokeTimer = 0.06f;
+            foreach (float sx in new[] { -0.42f, 0.42f })
+                foreach (float sz in new[] { -0.5f, 0.5f })
+                    fx.Dust(Vector3.Transform(new Vector3(sx, 0.05f, sz), RootMatrix), 1);
         }
 
         // Sbuffi dallo scarico, più fitti in accelerazione

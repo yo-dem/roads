@@ -340,6 +340,7 @@ public sealed class Game : IDisposable
             Matrix4x4 m = zone.Model;
             _opaque.Add(new DrawItem(zone.Opaque, m, Area: area));
             _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true, Area: area));
+            zone.CollectMovables(_opaque, area); // rocce e cespugli spostati, disegnati a parte
             if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m, Area: area));
 
             for (int i = 0; i < zone.Campfires.Count; i++)

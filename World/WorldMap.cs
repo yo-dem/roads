@@ -19,6 +19,8 @@ public sealed class WorldMap : IDisposable
     private readonly Dictionary<(int, int), Zone> _zones = new();
     private readonly HashSet<(int, int)> _explored = new();
     private readonly Dictionary<(int, int), Task<Zone>> _pending = new();
+    // Oggetti spostati dei pezzi liberati: quando il pezzo si rigenera tornano dove li si era lasciati
+    private readonly Dictionary<(int, int), List<(int Index, Vector2 Offset, Quaternion Rotation)>> _moved = new();
 
     /// <summary>Pezzi caricati.</summary>
     public IEnumerable<Zone> Zones => _zones.Values;
@@ -60,6 +62,7 @@ public sealed class WorldMap : IDisposable
     private void Register(Zone zone)
     {
         zone.Upload(_gl);
+        if (_moved.Remove((zone.X, zone.Z), out var moved)) zone.RestoreMoved(moved);
         _zones[(zone.X, zone.Z)] = zone;
         _explored.Add((zone.X, zone.Z));
     }
@@ -104,6 +107,8 @@ public sealed class WorldMap : IDisposable
             break;
         }
 
+        foreach (var zone in _zones.Values) zone.UpdateMovables(dt);
+
         var (px, pz) = CellOf(player);
         for (int x = px - 2; x <= px + 2; x++)
             for (int z = pz - 2; z <= pz + 2; z++)
@@ -120,6 +125,8 @@ public sealed class WorldMap : IDisposable
         if (far != null)
             foreach (var zone in far)
             {
+                var moved = zone.MovedState();
+                if (moved.Count > 0) _moved[(zone.X, zone.Z)] = moved;
                 _zones.Remove((zone.X, zone.Z));
                 zone.Dispose();
             }
@@ -189,6 +196,23 @@ public sealed class WorldMap : IDisposable
     }
 
     public bool IsRoad(Vector3 p) => ZoneAt(p)?.IsRoad(p) ?? false;
+
+    /// <summary>
+    /// Un cerchio in movimento (l'auto) urta rocce e cespugli: li spinge via secondo le masse e restituisce la
+    /// propria velocità ridotta. Ritorna la velocità d'impatto più forte (0 se nessun urto) e il punto d'urto.
+    /// </summary>
+    public float PushMovables(Vector3 center, float radius, ref Vector2 velocity, float mass, out Vector3 contact)
+    {
+        contact = default;
+        float worst = 0f;
+        foreach (var zone in _zones.Values)
+        {
+            if (CellDistance(zone.X, zone.Z, center) > radius + 2f) continue;
+            float hit = zone.PushFrom(center, radius, ref velocity, mass, out var c);
+            if (hit > worst) { worst = hit; contact = c; }
+        }
+        return worst;
+    }
 
     /// <summary>Il ponte più vicino entro <paramref name="range"/> (sul piano), se c'è.</summary>
     public Bridge? NearestBridge(Vector3 p, float range)

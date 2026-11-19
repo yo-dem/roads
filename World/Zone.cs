@@ -11,7 +11,7 @@ public enum Biome { Meadow, Blossom, Autumn, Snowy }
 /// loro ponti e oggetti di scena. Altezze, strade, fiumi e colori vengono da <see cref="Terrain"/>,
 /// funzioni globali del mondo: i pezzi vicini combaciano senza giunture.
 /// </summary>
-public sealed class Zone : IDisposable
+public sealed partial class Zone : IDisposable
 {
     public const float Half = 48f;           // pezzo di 96 x 96
     public const int N = 128;                // celle del terreno per lato (0.75 ciascuna)
@@ -334,7 +334,7 @@ public sealed class Zone : IDisposable
         // Prova a piazzare 'count' oggetti del bioma dato: un punto viene accettato con probabilità pari al
         // peso del bioma lì, così la vegetazione sfuma insieme ai colori del terreno.
         void Scatter(Biome? biome, int count, float minS, float maxS, float radius, float colliderR, float pathMargin,
-                     Action<Vector3, float> build)
+                     Action<Vector3, float> build, Push kind = Push.None)
         {
             count = (int)(count * AreaFactor);
             for (int n = 0; n < count; n++)
@@ -346,23 +346,29 @@ public sealed class Zone : IDisposable
                     if (biome is { } b && rng.NextSingle() > Terrain.Weight(b, WX(x), WZ(z))) continue;
                     if (!Free(x, z, radius * s, pathMargin)) continue;
                     placed.Add((x, z, radius * s));
-                    if (colliderR > 0f) AddCollider(x, z, colliderR * s);
-                    // Solo ciò che ha un ingombro (alberi, rocce, cespugli) può nascondere il giocatore
-                    if (colliderR > 0f) mb.BeginObject();
+                    if (colliderR > 0f && kind == Push.None) AddCollider(x, z, colliderR * s);
+                    // Solo gli alberi diventano trasparenti quando coprono il giocatore (rocce e cespugli no)
+                    bool fades = colliderR > 0f && kind == Push.None;
+                    if (fades) mb.BeginObject();
+                    int start = mb.IndexCount;
                     build(At(x, z), s);
-                    if (colliderR > 0f) mb.EndObject();
+                    if (fades) mb.EndObject();
+                    // Rocce e cespugli si possono spostare urtandoli: hanno un ingombro "mobile"
+                    if (kind != Push.None) AddMovable(kind, At(x, z), colliderR * s, s, start, mb.IndexCount - start);
                     break;
                 }
             }
         }
 
-        void Fixed(float x, float z, float radius, float colliderR, Action<Vector3> build)
+        void Fixed(float x, float z, float radius, float colliderR, Action<Vector3> build, Push kind = Push.None, float size = 1f)
         {
             placed.Add((x, z, radius));
-            if (colliderR > 0f) AddCollider(x, z, colliderR);
-            mb.BeginObject();
+            if (colliderR > 0f && kind == Push.None) AddCollider(x, z, colliderR);
+            if (kind == Push.None) mb.BeginObject(); // solo gli alberi diventano trasparenti
+            int start = mb.IndexCount;
             build(At(x, z));
-            mb.EndObject();
+            if (kind == Push.None) mb.EndObject();
+            if (kind != Push.None) AddMovable(kind, At(x, z), colliderR, size, start, mb.IndexCount - start);
         }
 
         var pineGreen = new Vector3(0.16f, 0.48f, 0.20f);
@@ -394,10 +400,10 @@ public sealed class Zone : IDisposable
             Fixed(-6f, -6.8f, 1.0f, 0.4f, p => Props.Pine(mb, rng, p, 1.0f, pineGreen));
             Fixed(-7.2f, -10f, 0.9f, 0.4f, p => Props.ConeTree(mb, rng, p, 1.25f, coneGreen));
             Fixed(-3.6f, -9.4f, 0.9f, 0.4f, p => Props.ConeTree(mb, rng, p, 1.1f, coneGreen));
-            Fixed(-1.4f, -8.6f, 1.4f, 1.1f, p => Props.Rock(mb, rng, p, 1.4f, rockGrey));
+            Fixed(-1.4f, -8.6f, 1.4f, 1.1f, p => Props.Rock(mb, rng, p, 1.4f, rockGrey), Push.Rock, 1.4f);
             Fixed(9.2f, -4.2f, 2.0f, 0.5f, p => Props.RoundTree(mb, rng, p, 1.25f, blossom));
             Fixed(8.6f, -8.8f, 1.5f, 0.45f, p => Props.RoundTree(mb, rng, p, 0.95f, blossom));
-            Fixed(9.6f, 4.5f, 0.9f, 0.7f, p => Props.Rock(mb, rng, p, 0.9f, rockGrey));
+            Fixed(9.6f, 4.5f, 0.9f, 0.7f, p => Props.Rock(mb, rng, p, 0.9f, rockGrey), Push.Rock, 0.9f);
             Fixed(9.2f, 8.8f, 0.9f, 0.4f, p => Props.ConeTree(mb, rng, p, 1.0f, coneGreen));
             Fixed(-9.6f, 9.4f, 1.1f, 0.4f, p => Props.Pine(mb, rng, p, 1.1f, pineGreen));
         }
@@ -406,23 +412,23 @@ public sealed class Zone : IDisposable
         Scatter(Biome.Meadow, 7, 0.9f, 1.5f, 1.1f, 0.4f, 0.6f, (p, s) => Props.Pine(mb, rng, p, s, pineGreen));
         Scatter(Biome.Meadow, 6, 0.9f, 1.3f, 0.8f, 0.4f, 0.6f, (p, s) => Props.ConeTree(mb, rng, p, s, coneGreen));
         Scatter(Biome.Meadow, 2, 0.9f, 1.3f, 1.6f, 0.45f, 0.6f, (p, s) => Props.RoundTree(mb, rng, p, s, blossom));
-        Scatter(Biome.Meadow, 10, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, bushGreen));
-        Scatter(Biome.Meadow, 7, 0.35f, 1.3f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey));
+        Scatter(Biome.Meadow, 10, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, bushGreen), Push.Bush);
+        Scatter(Biome.Meadow, 7, 0.35f, 1.3f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey), Push.Rock);
         // Bosco fiorito
         Scatter(Biome.Blossom, 6, 0.9f, 1.3f, 1.6f, 0.45f, 0.6f, (p, s) => Props.RoundTree(mb, rng, p, s, blossom));
         Scatter(Biome.Blossom, 3, 0.9f, 1.3f, 1.1f, 0.4f, 0.6f, (p, s) => Props.Pine(mb, rng, p, s, pineGreen));
-        Scatter(Biome.Blossom, 10, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, bushGreen));
-        Scatter(Biome.Blossom, 5, 0.35f, 1.0f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey));
+        Scatter(Biome.Blossom, 10, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, bushGreen), Push.Bush);
+        Scatter(Biome.Blossom, 5, 0.35f, 1.0f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey), Push.Rock);
         // Bosco d'autunno
         Scatter(Biome.Autumn, 7, 0.9f, 1.3f, 1.6f, 0.45f, 0.6f, (p, s) => Props.RoundTree(mb, rng, p, s, autumn));
         Scatter(Biome.Autumn, 4, 0.9f, 1.4f, 1.1f, 0.4f, 0.6f, (p, s) => Props.Pine(mb, rng, p, s, new Vector3(0.14f, 0.38f, 0.2f)));
-        Scatter(Biome.Autumn, 8, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, new Vector3(0.78f, 0.48f, 0.16f)));
-        Scatter(Biome.Autumn, 5, 0.35f, 1.0f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey));
+        Scatter(Biome.Autumn, 8, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, new Vector3(0.78f, 0.48f, 0.16f)), Push.Bush);
+        Scatter(Biome.Autumn, 5, 0.35f, 1.0f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, rockGrey), Push.Rock);
         Scatter(Biome.Autumn, 12, 0.8f, 1.4f, 0.3f, 0f, 0.15f, (p, s) => Props.Mushroom(mb, rng, p, s));
         // Valle innevata
         Scatter(Biome.Snowy, 12, 0.9f, 1.6f, 1.1f, 0.4f, 0.6f, (p, s) => Props.Pine(mb, rng, p, s, new Vector3(0.12f, 0.36f, 0.24f), snowy: true));
-        Scatter(Biome.Snowy, 8, 0.35f, 1.3f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, new Vector3(0.6f, 0.64f, 0.72f)));
-        Scatter(Biome.Snowy, 5, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, new Vector3(0.82f, 0.88f, 0.94f)));
+        Scatter(Biome.Snowy, 8, 0.35f, 1.3f, 0.9f, 0.8f, 0.4f, (p, s) => Props.Rock(mb, rng, p, s, new Vector3(0.6f, 0.64f, 0.72f)), Push.Rock);
+        Scatter(Biome.Snowy, 5, 0.8f, 1.2f, 0.6f, 0.45f, 0.4f, (p, s) => Props.Bush(mb, rng, p, s, new Vector3(0.82f, 0.88f, 0.94f)), Push.Bush);
         // Fiori ovunque (meno sulla neve), del colore del bioma in cui spuntano
         Scatter(null, 12, 1f, 1f, 0.5f, 0f, 0.15f, (p, _) => Props.Flowers(mb, rng, p, FlowerColor(p)));
 
@@ -459,14 +465,7 @@ public sealed class Zone : IDisposable
         foreach (var b in Bridges)
             if (b.TryGetHeight(world, 0.15f, out _)) return false;
         float x = world.X - Origin.X, z = world.Z - Origin.Z;
-        var bucket = _buckets[BucketIndex(x), BucketIndex(z)];
-        if (bucket == null) return false;
-        foreach (var c in bucket)
-        {
-            float dx = x - c.X, dz = z - c.Z;
-            if (dx * dx + dz * dz < (c.R + radius) * (c.R + radius)) return true;
-        }
-        return false;
+        return HitsStatic(x, z, radius) || HitsMovable(x, z, radius);
     }
 
     // Griglia di secchielli per gli ostacoli: ogni ostacolo è registrato in tutte le celle che
@@ -510,6 +509,8 @@ public sealed class Zone : IDisposable
         Opaque = new Mesh(gl, _opaqueData!);
         Scenery = new Mesh(gl, _sceneryData!);
         if (_waterData != null) Water = new Mesh(gl, _waterData);
+        _sceneryKeep = _sceneryData; // serve per staccare gli oggetti spostati
+        _gl = gl;
         _opaqueData = _sceneryData = _waterData = null;
         Uploaded = true;
     }
@@ -520,5 +521,6 @@ public sealed class Zone : IDisposable
         Opaque.Dispose();
         Scenery.Dispose();
         Water?.Dispose();
+        DisposeMovables();
     }
 }
