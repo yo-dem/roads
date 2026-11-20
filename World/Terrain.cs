@@ -127,7 +127,7 @@ public static class Terrain
     // Fiumi nord-sud: alcune colonne hanno un fiume, spostato dalla strada nord-sud di 20-37 unità,
     // quindi non la incontra mai; attraversa invece le strade est-ovest, dove nasce un ponte.
 
-    public static bool HasRiver(int column) => column == 0 || Noise.Hash01(column, 0, 303) < 0.4f;
+    public static bool HasRiver(int column) => column == 0 || Noise.Hash01(column, 0, 303) < 0.22f; // fiumi (e ponti) rari
 
     public static float RiverX(int column, float z)
     {

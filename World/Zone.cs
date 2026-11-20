@@ -19,10 +19,10 @@ public sealed partial class Zone : IDisposable
     public const float Cell = Half * 2f / N;
     public const float WaterY = -0.3f;
     public const float RiverHalf = 2.0f;
-    public const float PathHalf = 1.1f;
+    public const float PathHalf = 1.3f;
     public const float PathRaise = 0.2f;    // spessore dei sentieri sopra l'erba
     private const float PathDepth = 0.1f;   // quanto la lastra affonda sotto il terreno
-    public const float HubRadius = 1.9f;
+    public const float HubRadius = 2.1f;
 
     public int X { get; }
     public int Z { get; }

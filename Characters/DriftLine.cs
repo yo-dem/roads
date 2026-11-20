@@ -14,7 +14,8 @@ public sealed class DriftLine
     private const float CornerReach = 3f;     // la curva parte e finisce a questa distanza dal centro dell'incrocio
     private const float TurnWindow = 24f;     // l'aiuto si attiva solo entro questa distanza da un incrocio
     private const float ExitLength = 26f;     // tratto di strada dopo la curva
-    private const float MaxOffRoad = 2.6f;    // oltre questa distanza dalla mezzeria non si è "in strada"
+    private const float MaxOffRoad = 2.8f;
+    private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo    // oltre questa distanza dalla mezzeria non si è "in strada"
 
     private readonly List<Vector3> _points = new();
     private readonly List<float> _cum = new();
@@ -149,8 +150,43 @@ public sealed class DriftLine
         travel = Vector3.Normalize(new Vector3(travel.X, 0f, travel.Z));
         if (!Locate(pos, travel, out var axis, out int index, out float s, out float dir)) return null;
         var line = new DriftLine();
-        for (float t = s; MathF.Abs(t - s) <= length + Step; t += dir * Step) line.Add(Center(axis, index, t));
+        // In un vicolo cieco la strada finisce allo slargo: la scivolata non deve andare oltre, nel nulla
+        float end = s + dir * (length + Step);
+        // Incrocio più vicino (davanti o appena passato) e, se da lì si prosegue, quello successivo:
+        // la scivolata si ferma al primo dei due che sia la fine di un vicolo cieco
+        Dir forward = axis == Axis.EastWest ? (dir > 0f ? Dir.East : Dir.West) : (dir > 0f ? Dir.South : Dir.North);
+        int near = (int)MathF.Round(s / C);
+        for (int hub = near; dir * (hub * C - s) <= length + DeadEndOverrun + Step; hub += (int)dir)
+        {
+            int hx = axis == Axis.EastWest ? hub : index, hz = axis == Axis.EastWest ? index : hub;
+            if (WorldMap.EdgeOpen(hx, hz, forward)) continue;
+            float stop = hub * C + dir * DeadEndOverrun;
+            if (dir * (stop - end) < 0f) end = stop;
+            break;
+        }
+        if (dir * (end - s) < 0.5f) return null; // oltre la fine della strada: niente inversione guidata
+        for (float t = s; dir * (end - t) > 0f; t += dir * Step) line.Add(Center(axis, index, t));
+        line.Add(Center(axis, index, end));
         return line._points.Count >= 2 ? line : null;
+    }
+
+    /// <summary>
+    /// Per il mantenimento di corsia: punto della mezzeria all'altezza dell'auto, direzione della strada nel verso
+    /// di marcia e punto della mezzeria <paramref name="lookahead"/> più avanti (segue le curve della strada).
+    /// False se non si è su una strada o se si è dentro un incrocio (lì si deve poter svoltare).
+    /// </summary>
+    public static bool RoadFrame(Vector3 pos, Vector3 travel, float lookahead, out Vector3 center, out Vector3 tangent, out Vector3 aim)
+    {
+        center = tangent = aim = default;
+        travel = new Vector3(travel.X, 0f, travel.Z);
+        if (travel.LengthSquared() < 1e-6f || NearHub(pos)) return false;
+        travel = Vector3.Normalize(travel);
+        if (!Locate(pos, travel, out var axis, out int index, out float s, out float dir)) return false;
+        center = Center(axis, index, s);
+        Vector3 d = Center(axis, index, s + dir * Step) - center;
+        tangent = Vector3.Normalize(new Vector3(d.X, 0f, d.Z));
+        aim = Center(axis, index, s + dir * lookahead);
+        return true;
     }
 
     private static bool NearHub(Vector3 p)

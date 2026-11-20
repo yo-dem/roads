@@ -69,6 +69,7 @@ public sealed class Game : IDisposable
     private float ActiveYaw => _onFoot ? _kid.Yaw : _player.Yaw;
     private Vector3 ActiveVelocity => _onFoot ? _kid.Velocity : _player.Velocity;
     private Particles _particles = null!;
+    private SkidMarks _skids = null!;
     private EngineSound? _engine;
     private readonly IsoCamera _camera = new();
 
@@ -166,6 +167,7 @@ public sealed class Game : IDisposable
         _world = new WorldMap(_gl, start);
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
+        _skids = new SkidMarks(_gl);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, MathF.PI / 2f);
         _kid = new Villager(_gl, start, 0f, _debug.Character ?? Villager.DefaultCharacter); // seduto in auto finché non si scende
@@ -176,7 +178,6 @@ public sealed class Game : IDisposable
         if (!_debug.Mute) _engine = new EngineSound();
     }
 
-    private bool Down(Key a, Key b) => _keyboard.IsKeyPressed(a) || _keyboard.IsKeyPressed(b);
 
     private const float FieldOfView = MathF.PI / 180f * 40f;
 
@@ -228,11 +229,12 @@ public sealed class Game : IDisposable
 
         // Rotazione della visuale lontana
         if (_keyboard.IsKeyPressed(Key.Q)) _camera.Yaw -= 1.8f * dt;
-        if (_keyboard.IsKeyPressed(Key.E)) _camera.Yaw += 1.8f * dt;
+        if (_keyboard.IsKeyPressed(Key.R)) _camera.Yaw += 1.8f * dt; // (E è il clacson)
 
         // Tastiera = guida "da gioco di auto" in entrambe le visuali: sterzo e gas relativi all'auto
-        float steerIn = (Down(Key.D, Key.Right) ? 1f : 0f) - (Down(Key.A, Key.Left) ? 1f : 0f);
-        float throttleIn = (Down(Key.W, Key.Up) ? 1f : 0f) - (Down(Key.S, Key.Down) ? 1f : 0f);
+        // Solo frecce (WASD non guidano più)
+        float steerIn = (_keyboard.IsKeyPressed(Key.Right) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Left) ? 1f : 0f);
+        float throttleIn = (_keyboard.IsKeyPressed(Key.Up) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Down) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
         Vector3 input = Vector3.Zero;
 
@@ -259,7 +261,7 @@ public sealed class Game : IDisposable
 
         if (_onFoot)
         {
-            // A piedi: WASD/frecce rispetto alla camera; l'auto resta parcheggiata a motore spento
+            // A piedi: frecce rispetto alla camera; l'auto resta parcheggiata a motore spento
             if (input == Vector3.Zero) input = _camera.Right * steerIn + _camera.Forward * throttleIn;
             _player.Handbrake = false;
             _player.Update(dt, Vector3.Zero, false, _world, _particles, Vector2.Zero);
@@ -303,10 +305,12 @@ public sealed class Game : IDisposable
         }
 
         _particles.Update(dt);
+        _skids.Update(dt, _player);
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
         // In derapata la camera da dietro segue la direzione di marcia, così si vede l'auto di traverso
         _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView && !_onFoot, _player.TravelYaw,
                        walk: !_farView && _onFoot);
+        if (_engine != null) _engine.Horn = !_onFoot && _keyboard.IsKeyPressed(Key.E); // clacson (solo in auto)
         _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
 
         _day.Update(dt);
@@ -445,8 +449,9 @@ public sealed class Game : IDisposable
         _lit.SetVector3("uHeadPos[1]", _player.HeadlightPos(1f));
         _lit.SetVector3("uHeadDir[0]", _player.HeadlightDir(-1f));
         _lit.SetVector3("uHeadDir[1]", _player.HeadlightDir(1f));
-        // Bagliore degli stop: visibile di notte (di giorno il sole lo copre), forte in frenata
+        // Fari e bagliore degli stop: pieni di notte; di giorno il sole li copre (niente terreno bruciato sul bianco)
         float darkness = 1f - _day.Daylight;
+        _lit.SetFloat("uHeadGlow", 0.2f + 0.8f * darkness * darkness);
         _lit.SetVector3("uTailPos", _player.TailLightPos);
         _lit.SetVector3("uTailDir", _player.TailLightDir);
         _lit.SetFloat("uTailGlow", darkness * ((_player.Headlights ? 0.25f : 0f) + 0.9f * _player.BrakeLight));
@@ -481,6 +486,10 @@ public sealed class Game : IDisposable
             item.Mesh.Draw();
         }
         _lit.SetInt("uCloud", 0);
+
+        // Impronte delle gomme: sopra il terreno, sotto acqua e trasparenze
+        _skids.Draw(_camera.View, proj);
+        _lit.Use();
 
         // --- 3. Acqua trasparente ---
         _gl.Enable(EnableCap.Blend);

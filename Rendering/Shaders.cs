@@ -106,6 +106,7 @@ public static class Shaders
         uniform int uHeadOn;         // fari dell'auto: due fasci, uno per faro
         uniform vec3 uHeadPos[2];
         uniform vec3 uHeadDir[2];
+        uniform float uHeadGlow;     // intensità dei fari: piena al buio, quasi nulla in pieno giorno
         uniform vec3 uTailPos;       // stop: bagliore rosso a terra dietro l'auto (di notte, in frenata)
         uniform vec3 uTailDir;
         uniform float uTailGlow;
@@ -153,7 +154,7 @@ public static class Shaders
 
             // Fari: due coni di luce calda, uno per faro, che si attenuano con la distanza.
             // Vicino all'auto sono due chiazze distinte; più avanti si sovrappongono.
-            if (uHeadOn == 1 && uCloud == 0)
+            if (uHeadOn == 1 && uCloud == 0 && uHeadGlow > 0.0)
             {
                 for (int i = 0; i < 2; i++)
                 {
@@ -163,7 +164,7 @@ public static class Shaders
                     float cone = smoothstep(0.92, 0.985, dot(l, uHeadDir[i]));
                     float reach = (1.0 - smoothstep(16.0, 26.0, dist)) / (1.0 + dist * dist * 0.01);
                     float facing = 0.35 + 0.65 * max(dot(n, -l), 0.0);
-                    col += vColor * vec3(1.0, 0.92, 0.72) * cone * reach * facing * 1.25;
+                    col += vColor * vec3(1.0, 0.92, 0.72) * cone * reach * facing * 1.25 * uHeadGlow;
                 }
             }
             // Bagliore degli stop: luce rossa che si allarga dietro l'auto, a corto raggio

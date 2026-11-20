@@ -9,7 +9,7 @@ namespace Roads.World;
 /// </summary>
 public sealed class IsoCamera
 {
-    // Vista dall'alto: valori scelti dal giocatore (Q/E, tasto destro, rotella)
+    // Vista dall'alto: valori scelti dal giocatore (Q/R, tasto destro, rotella)
     public float Yaw = 0.35f;
     public float Pitch = 0.82f;
     public float Distance = 22f;

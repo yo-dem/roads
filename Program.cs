@@ -23,7 +23,7 @@ public static class Program
     ///   --zoom distanza           distanza della visuale lontana (8..32, come la rotella)
     ///   --far                     parte con la visuale lontana dall'alto (tasto 2)
     ///   --prespawn R              crea subito le isole entro R celle (test di prestazioni)
-    ///   --drive sterzo,gas[,finoA] guida con la visuale da dietro (come i tasti WASD); ripetibile, tratti in ordine
+    ///   --drive sterzo,gas[,finoA] guida con la visuale da dietro (come i tasti freccia); ripetibile, tratti in ordine
     /// </summary>
     public static void Main(string[] args)
     {

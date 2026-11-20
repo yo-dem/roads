@@ -10,15 +10,19 @@ namespace Roads.World;
 /// </summary>
 public sealed class DayCycle
 {
-    /// <summary>Durata di un giorno intero in secondi reali: 5 minuti di giorno (6-18) e 5 di notte (18-6).</summary>
-    public const float DayLength = 600f;
+    /// <summary>Durata reale del giorno (6-18): 3 minuti; della notte (18-6): 5 minuti.</summary>
+    public const float DaySeconds = 180f, NightSeconds = 300f;
 
     /// <summary>Ora del giorno, 0..24.</summary>
     public float Hours;
 
     public DayCycle(float startHours) => Hours = startHours;
 
-    public void Update(float dt) => Hours = (Hours + dt * 24f / DayLength) % 24f;
+    public void Update(float dt)
+    {
+        bool day = Hours >= 6f && Hours < 18f;
+        Hours = (Hours + dt * 12f / (day ? DaySeconds : NightSeconds)) % 24f;
+    }
 
     public string Clock => $"{(int)Hours:00}:{(int)(Hours % 1f * 60f):00}";
 

@@ -19,7 +19,11 @@ public sealed unsafe class EngineSound : IDisposable
     private readonly Context* _context;
     private readonly uint _source, _buffer;
     private readonly uint _skidSource, _skidBuffer;
-    private float _pitch = 0.8f, _gain, _skidGain;
+    private readonly uint _hornSource, _hornBuffer;
+    private float _pitch = 0.8f, _gain, _skidGain, _hornGain;
+
+    /// <summary>Clacson premuto (suona finché resta vero).</summary>
+    public bool Horn;
 
     // Stridio "vivo": raffiche e pause casuali (la gomma che si aggrappa e molla) e un timbro diverso a ogni derapata
     private readonly Random _rng = new();
@@ -61,12 +65,44 @@ public sealed unsafe class EngineSound : IDisposable
             _al.SetSourceProperty(_skidSource, SourceBoolean.Looping, true);
             _al.SetSourceProperty(_skidSource, SourceFloat.Gain, 0f);
             _al.SourcePlay(_skidSource);
+
+            // Clacson: due trombe in terza maggiore (420 e 525 Hz), in loop, a volume zero finché non si suona
+            _hornBuffer = _al.GenBuffer();
+            short[] horn = SynthesizeHorn();
+            fixed (short* p = horn)
+                _al.BufferData(_hornBuffer, BufferFormat.Mono16, p, horn.Length * sizeof(short), SampleRate);
+            _hornSource = _al.GenSource();
+            _al.SetSourceProperty(_hornSource, SourceInteger.Buffer, (int)_hornBuffer);
+            _al.SetSourceProperty(_hornSource, SourceBoolean.Looping, true);
+            _al.SetSourceProperty(_hornSource, SourceFloat.Gain, 0f);
+            _al.SourcePlay(_hornSource);
             Enabled = _al.GetError() == AudioError.NoError;
         }
         catch (Exception e)
         {
             Console.WriteLine($"Audio non disponibile: {e.Message}");
         }
+    }
+
+    /// <summary>
+    /// Clacson: due note (420 e 525 Hz) con timbro "a tromba" (onda squadrata morbida, ricca di armoniche dispari)
+    /// e un leggero ronzio della membrana. Il campione dura un numero intero di cicli di entrambe: loop senza click.
+    /// </summary>
+    private static short[] SynthesizeHorn()
+    {
+        const float f1 = 420f, f2 = 525f;           // 4 e 5 cicli ogni 1/105 s
+        int length = SampleRate / 105 * 20;          // 20 periodi comuni (≈ 0.19 s)
+        var data = new short[length];
+        for (int i = 0; i < length; i++)
+        {
+            float t = i / (float)SampleRate;
+            float a = MathF.Tanh(3.2f * MathF.Sin(MathF.Tau * f1 * t));
+            float b = MathF.Tanh(3.2f * MathF.Sin(MathF.Tau * f2 * t));
+            float buzz = 0.15f * MathF.Sin(MathF.Tau * f1 * 2f * t) * MathF.Sin(MathF.Tau * f2 * t);
+            float v = (a * 0.5f + b * 0.45f + buzz) * 0.62f;
+            data[i] = (short)(Math.Clamp(v, -1f, 1f) * 30000f);
+        }
+        return data;
     }
 
     private static short[] Synthesize()
@@ -164,6 +200,11 @@ public sealed unsafe class EngineSound : IDisposable
         _al.SetSourceProperty(_source, SourceFloat.Gain, _gain);
 
         UpdateSkid(dt, skid);
+
+        // Clacson: attacco rapido, rilascio breve (niente click)
+        float hornTarget = Horn ? 0.32f : 0f;
+        _hornGain += (hornTarget - _hornGain) * (1f - MathF.Exp((Horn ? -60f : -35f) * dt));
+        _al.SetSourceProperty(_hornSource, SourceFloat.Gain, _hornGain);
     }
 
     private void UpdateSkid(float dt, float skid)
@@ -225,6 +266,12 @@ public sealed unsafe class EngineSound : IDisposable
             _al.SourceStop(_skidSource);
             _al.DeleteSource(_skidSource);
         }
+        if (_hornSource != 0)
+        {
+            _al.SourceStop(_hornSource);
+            _al.DeleteSource(_hornSource);
+        }
+        if (_hornBuffer != 0) _al.DeleteBuffer(_hornBuffer);
         if (_buffer != 0) _al.DeleteBuffer(_buffer);
         if (_skidBuffer != 0) _al.DeleteBuffer(_skidBuffer);
         if (_context != null)
