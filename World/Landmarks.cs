@@ -203,12 +203,12 @@ public sealed class LandmarkModel : IDisposable
     /// <param name="night">0 di giorno, 1 a notte fonda: accende lanterne e luci.</param>
     public void Collect(List<DrawItem> items, float time, float night)
     {
-        items.Add(new DrawItem(_body, _model, SeeThrough: true, Area: _area, Far: true));
+        items.Add(new DrawItem(_body, _model, SeeThrough: true, Area: _area));
         if (_glow != null)
-            items.Add(new DrawItem(_glow, _model, 0.25f + 1.1f * night, CastShadow: false, Area: _area, Far: true));
+            items.Add(new DrawItem(_glow, _model, 0.25f + 1.1f * night, CastShadow: false, Area: _area));
         if (_rotor != null)
             items.Add(new DrawItem(_rotor, Matrix4x4.CreateRotationZ(time * 0.7f) * Matrix4x4.CreateTranslation(_rotorPivot) * _model,
-                                   Area: _area, Far: true));
+                                   Area: _area));
     }
 
     // ------------------------------------------------------------------ modelli (coordinate locali, base a y = 0)
