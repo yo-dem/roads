@@ -39,21 +39,18 @@ public sealed partial class Zone : IDisposable
     /// <summary>Alberi, rocce e oggetti di scena: separati dal terreno per renderli trasparenti quando coprono il giocatore.</summary>
     public Mesh Scenery { get; private set; } = null!;
     public Mesh? Water { get; private set; }
+    /// <summary>Finestre accese e lampade dei lampioni: si illuminano di notte.</summary>
+    public Mesh? Glow { get; private set; }
     public bool Uploaded { get; private set; }
 
-    private MeshData? _opaqueData, _sceneryData, _waterData;
+    private MeshData? _opaqueData, _sceneryData, _waterData, _glowData;
     public List<Bridge> Bridges { get; } = new();
     public List<Vector3> Campfires { get; } = new(); // coordinate locali
 
     public Matrix4x4 Model => Matrix4x4.CreateTranslation(Origin);
 
-    public string Name => Biome switch
-    {
-        Biome.Meadow => "Prato",
-        Biome.Blossom => "Bosco fiorito",
-        Biome.Autumn => "Bosco d'autunno",
-        _ => "Valle innevata",
-    };
+    /// <summary>Nome del quartiere della mappa in cui sta il pezzo.</summary>
+    public string Name => GameMap.DistrictName(GameMap.Current.At(X, Z));
 
     private readonly float[,] _h = new float[N + 1, N + 1];
     private readonly List<(float X, float Z, float R)> _clearings = new();
@@ -90,8 +87,10 @@ public sealed partial class Zone : IDisposable
         _opaqueData = mb.BuildData();
 
         var pb = new MeshBuilder { ColorRng = rng, ColorJitter = 0.05f, ComputeEdges = true };
-        PlaceProps(pb, rng, home);
+        var gb = new MeshBuilder { ComputeEdges = true }; // spigoli: le finestre accese sfumano col loro edificio
+        PlaceProps(pb, gb, rng, home);
         _sceneryData = pb.BuildData();
+        _glowData = gb.IsEmpty ? null : gb.BuildData();
 
         var wb = new MeshBuilder();
         BuildWater(wb);
@@ -150,6 +149,9 @@ public sealed partial class Zone : IDisposable
             if (PathDistance(x, z) < PathHalf + 2.4f) continue;
             if (RiverDistance(x, z) < RiverHalf + 3f) continue;
             if (ClearingDistance(x, z) < 8f) continue;
+            // Niente falò in paese, in riva al mare o accanto ai punti di riferimento
+            if (Terrain.Urban(WX(x), WZ(z)) > 0.15f || Terrain.Height(WX(x), WZ(z)) < 0.05f) continue;
+            if (NearLandmark(x, z, 3f)) continue;
             _clearings.Add((x, z, 1.7f));
             return;
         }
@@ -241,13 +243,18 @@ public sealed partial class Zone : IDisposable
                        PathRaise + PathDepth, side);
     }
 
-    /// <summary>Una striscia di sentiero lungo la linea data da <paramref name="at"/> (centro, direzione, tratto aperto).</summary>
+    /// <summary>
+    /// Una striscia di sentiero lungo la linea data da <paramref name="at"/> (centro, direzione, tratto aperto).
+    /// Nei centri abitati la carreggiata ha bordi dritti e ai lati corrono i marciapiedi, col cordolo.
+    /// </summary>
     private void Strip(Random rng, int steps, Func<int, (Vector3 Center, Vector3 Axis, bool Open)> at, MeshBuilder mb)
     {
         var raise = new Vector3(0, PathRaise, 0);
         var depth = new Vector3(0, PathRaise + PathDepth, 0);
-        Vector3 prevL = default, prevR = default;
-        bool prevOk = false;
+        var curb = new Vector3(0, Terrain.WalkRaise, 0);
+        var walkDepth = depth + curb;
+        Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default;
+        bool prevOk = false, prevWalk = false;
 
         bool Dry(Vector3 c) => HeightLocal(c.X, c.Z) > WaterY + 0.2f;
 
@@ -260,8 +267,10 @@ public sealed partial class Zone : IDisposable
             dir = dir.LengthSquared() > 1e-6f ? Vector3.Normalize(dir) : axis;
             var perp = new Vector3(-dir.Z, 0, dir.X);
 
+            bool urban = Terrain.Urban(WX(c.X), WZ(c.Z)) >= Terrain.WalkFrom;
             bool border = k == 0 || k == steps;
-            float jl = border ? 0f : (rng.NextSingle() - 0.5f) * 0.24f, jr = border ? 0f : (rng.NextSingle() - 0.5f) * 0.24f;
+            float jl = border || urban ? 0f : (rng.NextSingle() - 0.5f) * 0.24f;
+            float jr = border || urban ? 0f : (rng.NextSingle() - 0.5f) * 0.24f;
             Vector3 l = c + perp * (PathHalf + jl), r = c - perp * (PathHalf + jr);
             l.Y = HeightLocal(l.X, l.Z);
             r.Y = HeightLocal(r.X, r.Z);
@@ -269,6 +278,31 @@ public sealed partial class Zone : IDisposable
             r += raise;
 
             bool ok = open && Dry(c);
+
+            // Marciapiedi: dal bordo della carreggiata per WalkWidth, un gradino più su
+            bool walk = ok && urban && !Terrain.NearHub(WX(c.X), WZ(c.Z));
+            Vector3 ol = c + perp * (PathHalf + Terrain.WalkWidth), or = c - perp * (PathHalf + Terrain.WalkWidth);
+            ol.Y = HeightLocal(ol.X, ol.Z);
+            or.Y = HeightLocal(or.X, or.Z);
+            ol += raise + curb;
+            or += raise + curb;
+            if (k > 0 && walk && prevWalk)
+            {
+                mb.AddQuad(prevL + curb, l + curb, ol, prevOL, Sidewalk);                 // piano sinistro
+                mb.AddQuad(prevL, l, l + curb, prevL + curb, Curb);                       // cordolo sinistro
+                mb.AddQuad(prevOL - walkDepth, ol - walkDepth, ol, prevOL, Sidewalk * 0.8f);
+                mb.AddQuad(r + curb, prevR + curb, prevOR, or, Sidewalk);                 // piano destro
+                mb.AddQuad(r, prevR, prevR + curb, r + curb, Curb);                       // cordolo destro
+                mb.AddQuad(or - walkDepth, prevOR - walkDepth, prevOR, or, Sidewalk * 0.8f);
+            }
+            // Testate dove il marciapiede si interrompe (agli slarghi)
+            if (walk != prevWalk && k > 0)
+            {
+                var (el, eol, er, eor) = walk ? (l, ol, r, or) : (prevL, prevOL, prevR, prevOR);
+                mb.AddQuad(el + curb, eol, eol - walkDepth, el - depth, Curb);
+                mb.AddQuad(er + curb, eor, eor - walkDepth, er - depth, Curb);
+            }
+            prevOL = ol; prevOR = or; prevWalk = walk;
             if (k > 0 && ok && prevOk)
             {
                 Vector3 color = Terrain.PaletteAt(WX(c.X), WZ(c.Z)).Path, side = color * 0.8f;
@@ -290,6 +324,7 @@ public sealed partial class Zone : IDisposable
     /// <summary>Rialzo del sentiero in un punto locale (0 fuori dai sentieri o sui tratti bagnati).</summary>
     private float PathLift(float x, float z)
     {
+        if (Terrain.OnSidewalk(WX(x), WZ(z)) && HeightLocal(x, z) > WaterY + 0.2f) return PathRaise + Terrain.WalkRaise;
         float d = MathF.Min(PathDistance(x, z), ClearingDistance(x, z));
         if (d > PathHalf + 0.1f) return 0f;
         if (HeightLocal(x, z) <= WaterY + 0.2f) return 0f;
@@ -299,19 +334,35 @@ public sealed partial class Zone : IDisposable
     private void BuildWater(MeshBuilder mb)
     {
         var water = new Vector3(0.20f, 0.46f, 0.80f);
-        for (int i = 0; i < N; i++)
-            for (int j = 0; j < N; j++)
+        // Celle bagnate vicine sulla stessa riga unite in un solo quadrato (al più 4: le onde restano visibili):
+        // in mare aperto i vertici sono molti meno
+        const int MaxRun = 4;
+        bool Wet(int i, int j) =>
+            MathF.Min(MathF.Min(_h[i, j], _h[i + 1, j]), MathF.Min(_h[i, j + 1], _h[i + 1, j + 1])) < WaterY;
+        for (int j = 0; j < N; j++)
+            for (int i = 0; i < N;)
             {
-                float min = MathF.Min(MathF.Min(_h[i, j], _h[i + 1, j]), MathF.Min(_h[i, j + 1], _h[i + 1, j + 1]));
-                if (min >= WaterY) continue;
-                float x0 = -Half + i * Cell, x1 = x0 + Cell, z0 = -Half + j * Cell, z1 = z0 + Cell;
+                if (!Wet(i, j)) { i++; continue; }
+                int run = 1;
+                while (run < MaxRun && i + run < N && Wet(i + run, j)) run++;
+                float x0 = -Half + i * Cell, x1 = x0 + run * Cell, z0 = -Half + j * Cell, z1 = z0 + Cell;
                 mb.AddQuad(new(x0, WaterY, z1), new(x1, WaterY, z1), new(x1, WaterY, z0), new(x0, WaterY, z0), water);
+                i += run;
             }
     }
 
     // ------------------------------------------------------------------ oggetti di scena
 
-    private void PlaceProps(MeshBuilder mb, Random rng, bool home)
+    /// <summary>Il punto locale è sulla spianata di un punto di riferimento (più <paramref name="margin"/>)?</summary>
+    private bool NearLandmark(float x, float z, float margin)
+    {
+        var p = new Vector2(WX(x), WZ(z));
+        foreach (var l in GameMap.Current.Landmarks)
+            if (Vector2.Distance(p, l.Pos) < l.Radius + margin) return true;
+        return false;
+    }
+
+    private void PlaceProps(MeshBuilder mb, MeshBuilder glow, Random rng, bool home)
     {
         var placed = new List<(float X, float Z, float R)>();
 
@@ -322,6 +373,8 @@ public sealed partial class Zone : IDisposable
             if (MathF.Abs(x) > lim || MathF.Abs(z) > lim) return false;
             if (PathDistance(x, z) < PathHalf + pathMargin + r) return false;
             if (RiverDistance(x, z) < RiverHalf + 0.5f + r) return false;
+            if (HeightLocal(x, z) < WaterY + 0.3f) return false; // niente alberi in mare
+            if (NearLandmark(x, z, r + 0.5f)) return false;
             foreach (var c in _clearings)
                 if (MathF.Sqrt((x - c.X) * (x - c.X) + (z - c.Z) * (z - c.Z)) < c.R + r + 0.3f) return false;
             foreach (var p in placed)
@@ -344,6 +397,8 @@ public sealed partial class Zone : IDisposable
                     float s = minS + rng.NextSingle() * (maxS - minS);
                     float x = rng.NextSingle() * Half * 2f - Half, z = rng.NextSingle() * Half * 2f - Half;
                     if (biome is { } b && rng.NextSingle() > Terrain.Weight(b, WX(x), WZ(z))) continue;
+                    // In paese restano giardini e alberi qua e là; in città pochissimi
+                    if (rng.NextSingle() < 0.98f * Noise.Smooth(0.15f, 0.9f, Terrain.Urban(WX(x), WZ(z)))) continue;
                     if (!Free(x, z, radius * s, pathMargin)) continue;
                     placed.Add((x, z, radius * s));
                     if (colliderR > 0f && kind == Push.None) AddCollider(x, z, colliderR * s);
@@ -391,6 +446,9 @@ public sealed partial class Zone : IDisposable
             Props.Campfire(mb, rng, new Vector3(c.X, HeightLocal(c.X, c.Z) + PathRaise, c.Z));
             AddCollider(c.X, c.Z, 0.85f);
         }
+
+        // Prima le costruzioni (case, palazzi, lampioni): la vegetazione riempie quel che resta
+        BuildTown(mb, glow, rng, placed);
 
         if (home)
         {
@@ -509,9 +567,10 @@ public sealed partial class Zone : IDisposable
         Opaque = new Mesh(gl, _opaqueData!);
         Scenery = new Mesh(gl, _sceneryData!);
         if (_waterData != null) Water = new Mesh(gl, _waterData);
+        if (_glowData != null) Glow = new Mesh(gl, _glowData);
         _sceneryKeep = _sceneryData; // serve per staccare gli oggetti spostati
         _gl = gl;
-        _opaqueData = _sceneryData = _waterData = null;
+        _opaqueData = _sceneryData = _waterData = _glowData = null;
         Uploaded = true;
     }
 
@@ -521,6 +580,7 @@ public sealed partial class Zone : IDisposable
         Opaque.Dispose();
         Scenery.Dispose();
         Water?.Dispose();
+        Glow?.Dispose();
         DisposeMovables();
     }
 }

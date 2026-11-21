@@ -4,10 +4,11 @@ using Silk.NET.OpenGL;
 namespace Roads.World;
 
 /// <summary>
-/// Territorio unico e infinito, diviso in pezzi quadrati (<see cref="Zone"/>) che combaciano senza giunture.
-/// I pezzi attorno al giocatore si generano in background man mano che si avanza (sul thread principale
-/// resta solo il caricamento sulla GPU) e quelli lontani si liberano: se si torna indietro si rigenerano
-/// identici, perché tutto deriva da funzioni del mondo e da semi fissi.
+/// Il territorio dell'isola (la mappa in <see cref="GameMap"/>), diviso in pezzi quadrati (<see cref="Zone"/>) che
+/// combaciano senza giunture. I pezzi attorno al giocatore si generano in background man mano che si avanza (sul
+/// thread principale resta solo il caricamento sulla GPU) e quelli lontani si liberano: se si torna indietro si
+/// rigenerano identici, perché tutto deriva dalla mappa, da funzioni del mondo e da semi fissi.
+/// I punti di riferimento invece esistono sempre: si vedono da lontano, anche oltre la nebbia.
 /// </summary>
 public sealed class WorldMap : IDisposable
 {
@@ -28,6 +29,12 @@ public sealed class WorldMap : IDisposable
     public int Count => _explored.Count;
     public int LoadedCount => _zones.Count;
 
+    /// <summary>La cella (incrocio i, j) è già stata vista? (per la mappa: si scopre girando)</summary>
+    public bool IsExplored(int i, int j) => _explored.Contains((i, j));
+
+    private readonly List<LandmarkModel> _landmarks = new();
+    public IReadOnlyList<LandmarkModel> Landmarks => _landmarks;
+
     private static (int, int) CellOf(Vector3 p) => ((int)MathF.Round(p.X / Spacing), (int)MathF.Round(p.Z / Spacing));
 
     public WorldMap(GL gl, Vector3 start)
@@ -41,22 +48,17 @@ public sealed class WorldMap : IDisposable
                 if (CellDistance(x, z, start) < LoadDistance) cells.Add((x, z));
         foreach (var zone in cells.AsParallel().Select(c => new Zone(c.Item1, c.Item2)).ToList())
             Register(zone);
+        foreach (var site in GameMap.Current.Landmarks)
+            _landmarks.Add(new LandmarkModel(gl, site));
     }
 
-    // Tratto tra (x,z) e (x+1,z): la riga z = 0 è sempre aperta (via principale verso est/ovest)
-    private static bool HorizontalOpen(int x, int z) => z == 0 || Noise.Hash01(x, z, 101) < 0.5f;
-
-    // Tratto tra (x,z) e (x,z+1): attorno alla partenza niente strade nord-sud
-    private static bool VerticalOpen(int x, int z) =>
-        !(x == 0 && (z == 0 || z == -1)) && Noise.Hash01(x, z, 202) < 0.45f;
-
-    /// <summary>La strada dall'incrocio (x, z) verso la direzione data esiste?</summary>
+    /// <summary>La strada dall'incrocio (x, z) verso la direzione data esiste? (la disegna la mappa)</summary>
     public static bool EdgeOpen(int x, int z, Dir d) => d switch
     {
-        Dir.East => HorizontalOpen(x, z),
-        Dir.West => HorizontalOpen(x - 1, z),
-        Dir.South => VerticalOpen(x, z),
-        _ => VerticalOpen(x, z - 1),
+        Dir.East => GameMap.Current.East(x, z),
+        Dir.West => GameMap.Current.East(x - 1, z),
+        Dir.South => GameMap.Current.South(x, z),
+        _ => GameMap.Current.South(x, z - 1),
     };
 
     private void Register(Zone zone)
@@ -143,6 +145,8 @@ public sealed class WorldMap : IDisposable
         var zone = ZoneAt(p);
         if (zone == null || !zone.IsGround(p)) return false;
         if (zone.HitsObstacle(p, radius)) return false;
+        foreach (var l in GameMap.Current.Landmarks)
+            if (l.Hits(new Vector2(p.X, p.Z), radius)) return false;
 
         const float reach = 2f; // raggio massimo di un ostacolo + margine
         float lx = p.X - zone.Origin.X, lz = p.Z - zone.Origin.Z, edge = Zone.Half - radius - reach;
@@ -199,5 +203,6 @@ public sealed class WorldMap : IDisposable
     public void Dispose()
     {
         foreach (var z in _zones.Values) z.Dispose();
+        foreach (var l in _landmarks) l.Dispose();
     }
 }

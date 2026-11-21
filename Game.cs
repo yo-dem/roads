@@ -30,9 +30,11 @@ public sealed class DebugOptions
     public float? Zoom;            // distanza della visuale lontana (test; la rotella va da 8 a 32)
     public bool Far;               // parte con la visuale lontana
     public int PreSpawn;
+    public string? Map;            // file della mappa (di serie Assets/Maps/isola.txt)
+    public bool BigMap;            // parte con la mappa grande aperta (test)
 }
 
-public sealed class Game : IDisposable
+public sealed partial class Game : IDisposable
 {
     private const float StartHour = 8f;    // il gioco parte di mattina
     private DayCycle _day = null!;
@@ -100,6 +102,7 @@ public sealed class Game : IDisposable
             if (key is Key.Number2 or Key.Keypad2) _farView = true;
             if (key == Key.F && !_onFoot) _player.Headlights = !_player.Headlights; // i fari si comandano solo da dentro l'auto
             if (key is Key.Enter or Key.KeypadEnter) ToggleOnFoot();
+            if (key == Key.M) _bigMap = !_bigMap; // mappa dell'isola a tutto schermo
             if (key == Key.C) // cambia personaggio (con Shift: il precedente)
             {
                 _kid.CycleCharacter(_keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight) ? -1 : 1);
@@ -146,6 +149,12 @@ public sealed class Game : IDisposable
         _flame = Props.BuildFlame(_gl);
         _day = new DayCycle(_debug.Hour ?? StartHour);
 
+        // La mappa disegnata a mano va caricata prima di generare qualunque pezzo di territorio
+        var map = GameMap.Load(_debug.Map ?? Path.Combine(AppContext.BaseDirectory, "Assets", "Maps", "isola.txt"));
+        Console.WriteLine($"Mappa: {map.Name} ({map.MaxI - map.MinI + 1} x {map.MaxJ - map.MinJ + 1} celle, "
+                          + $"{map.Landmarks.Count} punti di riferimento)");
+        _bigMap = _debug.BigMap;
+
         var start = new Vector3(-2.5f, 0f, 0.3f);
         if (_debug.Start is { } s) start = new Vector3(s.X, 0f, Terrain.RoadZ((int)MathF.Round(s.Y / Terrain.ChunkSize), s.X)); // test: sulla strada est-ovest
         _world = new WorldMap(_gl, start);
@@ -165,8 +174,9 @@ public sealed class Game : IDisposable
 
     private const float FieldOfView = MathF.PI / 180f * 40f;
 
+    // Lontano abbastanza da vedere i punti di riferimento all'altro capo dell'isola
     private Matrix4x4 Projection(float aspect) =>
-        Matrix4x4.CreatePerspectiveFieldOfView(FieldOfView, aspect, 0.3f, 300f);
+        Matrix4x4.CreatePerspectiveFieldOfView(FieldOfView, aspect, 0.3f, 1200f);
 
     private void OnUpdate(double deltaTime)
     {
@@ -251,7 +261,11 @@ public sealed class Game : IDisposable
             string perf = _frameTime > 0 ? $"{_frames / _frameTime:F0} FPS (max {_worstFrame * 1000:F0} ms)" : "";
             _frames = 0;
             _frameTime = _worstFrame = 0;
-            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}  |  territorio esplorato: {_world.Count}"
+            // Vicino a un punto di riferimento se ne legge il nome: così si impara la mappa
+            string near = "";
+            foreach (var l in GameMap.Current.Landmarks)
+                if (Vector2.Distance(l.Pos, new Vector2(ActivePos.X, ActivePos.Z)) < 45f) near = $"  ({l.Name})";
+            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}{near}  |  territorio esplorato: {_world.Count}"
                             + (_onFoot ? "  |  a piedi" : "") + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
@@ -261,6 +275,8 @@ public sealed class Game : IDisposable
         _viewProj = viewProj;
         _opaque.Clear();
         _water.Clear();
+        // Finestre, lampioni e lanterne: accesi col buio
+        float night = Noise.Smooth(0.3f, 0.75f, 1f - _day.Daylight);
 
         foreach (var zone in _world.Zones)
         {
@@ -273,6 +289,8 @@ public sealed class Game : IDisposable
             _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true, Area: area));
             zone.CollectMovables(_opaque, area); // rocce e cespugli spostati, disegnati a parte
             if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m, Area: area));
+            if (zone.Glow != null)
+                _opaque.Add(new DrawItem(zone.Glow, m, 0.1f + 0.9f * night, CastShadow: false, SeeThrough: true, Area: area));
 
             for (int i = 0; i < zone.Campfires.Count; i++)
             {
@@ -283,6 +301,9 @@ public sealed class Game : IDisposable
                                          0.9f, CastShadow: false));
             }
         }
+
+        // Punti di riferimento: sempre, anche lontanissimi (la nebbia non li copre del tutto)
+        foreach (var l in _world.Landmarks) l.Collect(_opaque, _time, night);
 
         _cloudItems.Clear();
         _clouds.Collect(_cloudItems, _camera.Target, _time);
@@ -375,8 +396,8 @@ public sealed class Game : IDisposable
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
 
-        _lit.SetFloat("uFogNear", _camera.EffectiveDistance + 14f);
-        _lit.SetFloat("uFogFar", ViewRange);
+        _farFog = null;
+        SetFog(false);
         _lit.SetFloat("uTime", _time);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, _shadow.Texture);
@@ -390,9 +411,11 @@ public sealed class Game : IDisposable
             _lit.SetInt("uSeeThrough", item.SeeThrough ? 1 : 0);
             _lit.SetInt("uSmooth", item.Smooth ? 1 : 0);
             _lit.SetFloat("uEmissive", item.Emissive);
+            SetFog(item.Far);
             item.Mesh.Draw();
         }
         _lit.SetInt("uSmooth", 0);
+        SetFog(false);
 
         _lit.SetInt("uSeeThrough", 0);
         _lit.SetInt("uCloud", 1);
@@ -438,8 +461,26 @@ public sealed class Game : IDisposable
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
 
+        SetFog(false);
+
         DrawMinimap(size);
+        if (_bigMap) DrawBigMap(size);
         TakeScreenshotIfDue(size);
+    }
+
+    private bool? _farFog;
+
+    /// <summary>
+    /// Nebbia normale, oppure quella "lunga" dei punti di riferimento: comincia oltre la vista normale e non
+    /// li copre mai del tutto, così si vedono stagliati nella foschia da un capo all'altro dell'isola.
+    /// </summary>
+    private void SetFog(bool far)
+    {
+        if (_farFog == far) return;
+        _farFog = far;
+        _lit.SetFloat("uFogNear", far ? ViewRange * 0.7f : _camera.EffectiveDistance + 14f);
+        _lit.SetFloat("uFogFar", far ? 900f : ViewRange);
+        _lit.SetFloat("uFogMax", far ? 0.8f : 1f);
     }
 
     /// <summary>Oltre questa distanza dalla camera la nebbia copre tutto (è la stessa uFogFar dello shader).</summary>
@@ -512,64 +553,6 @@ public sealed class Game : IDisposable
         shader.SetVector3("uSkyBelow", _day.SkyBelow);
     }
 
-    // ------------------------------------------------------------------ minimappa
-
-    // Dimensioni in punti della finestra (sugli schermi Retina vengono moltiplicate)
-    private const float MapRadius = 62f, MapMargin = 18f;
-    private static readonly Vector2 MapCenter = new(MapMargin + MapRadius, MapMargin + MapRadius);
-
-    /// <summary>
-    /// Minimappa in alto a sinistra: ruota con la camera (in alto c'è sempre la direzione in cui si guarda),
-    /// con i punti cardinali sul bordo e al centro una freccia con la direzione dell'auto.
-    /// Pronta per mostrare in futuro gli obiettivi.
-    /// </summary>
-    private void DrawMinimap(Vector2D<int> framebuffer)
-    {
-        float k = _window.Size.X > 0 ? (float)framebuffer.X / _window.Size.X : 1f; // pixel per punto
-        Vector2 c = MapCenter * k;
-        float r = MapRadius * k;
-
-        // Direzione del mondo → schermo: l'avanti della camera punta in alto
-        Vector3 right = _camera.Right, forward = _camera.Forward;
-        Vector2 ToMap(Vector3 world) => new(Vector3.Dot(world, right), -Vector3.Dot(world, forward));
-
-        var white = new Vector4(0.93f, 0.95f, 0.98f, 0.95f);
-        var north = new Vector4(0.98f, 0.38f, 0.32f, 1f);
-
-        _hud.Disc(c, r, 32, new Vector4(0.05f, 0.07f, 0.11f, 0.55f));
-        _hud.Ring(c, r - 2f * k, r, 32, new Vector4(0.93f, 0.95f, 0.98f, 0.8f));
-
-        // Tacche: lunghe sui punti cardinali, corte su quelli intermedi
-        for (int i = 0; i < 8; i++)
-        {
-            float a = MathF.Tau * i / 8f;
-            Vector2 d = ToMap(new Vector3(MathF.Sin(a), 0f, -MathF.Cos(a))); // i = 0 → nord (-Z), poi in senso orario
-            float inner = i % 2 == 0 ? r - 9f * k : r - 6f * k;
-            _hud.Line(c + d * inner, c + d * (r - 2f * k), 2f * k, i == 0 ? north : white with { W = 0.7f });
-        }
-
-        // Lettere sempre dritte, che girano lungo il bordo
-        foreach (var (letter, dir) in new[]
-                 { ('N', new Vector3(0, 0, -1)), ('E', new Vector3(1, 0, 0)), ('S', new Vector3(0, 0, 1)), ('O', new Vector3(-1, 0, 0)) })
-            _hud.Letter(letter, c + ToMap(dir) * (r - 20f * k), 12f * k, 2.2f * k, letter == 'N' ? north : white);
-
-        // Auto al centro: freccia a punta nella sua direzione, con un bordo scuro per staccarla dallo sfondo
-        Vector2 h = ToMap(new Vector3(MathF.Sin(ActiveYaw), 0f, MathF.Cos(ActiveYaw)));
-        if (h.LengthSquared() > 1e-6f) h = Vector2.Normalize(h);
-        Vector2 side = new(-h.Y, h.X);
-        void Arrow(float s, Vector4 color)
-        {
-            Vector2 tip = c + h * 11f * k * s, back = c - h * 3f * k * s;
-            Vector2 left = c - h * 8f * k * s + side * 7f * k * s, rightCorner = c - h * 8f * k * s - side * 7f * k * s;
-            _hud.Triangle(tip, left, back, color);
-            _hud.Triangle(tip, back, rightCorner, color);
-        }
-        Arrow(1.3f, new Vector4(0.05f, 0.07f, 0.11f, 0.9f));
-        Arrow(1f, new Vector4(1f, 0.84f, 0.38f, 1f));
-
-        _hud.Flush(framebuffer.X, framebuffer.Y);
-    }
-
     // ------------------------------------------------------------------ scendere e salire dall'auto
 
     /// <summary>
@@ -613,8 +596,10 @@ public sealed class Game : IDisposable
             if (!item.SeeThrough || (item.HasArea && !NearSightLine(item.Area))) continue;
             _lit.SetMatrix("uModel", item.Model);
             _lit.SetFloat("uEmissive", item.Emissive);
+            SetFog(item.Far);
             item.Mesh.Draw();
         }
+        SetFog(false);
     }
 
     private unsafe void TakeScreenshotIfDue(Vector2D<int> size)

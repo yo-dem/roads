@@ -23,6 +23,8 @@ public static class Program
     ///   --far                     parte con la visuale lontana dall'alto (tasto 2)
     ///   --prespawn R              crea subito le isole entro R celle (test di prestazioni)
     ///   --drive sterzo,gas[,finoA] guida con la visuale da dietro (come i tasti freccia); ripetibile, tratti in ordine
+    ///   --map file.txt            usa un'altra mappa (di serie Assets/Maps/isola.txt)
+    ///   --mappa-grande            parte con la mappa dell'isola aperta (tasto M)
     /// </summary>
     public static void Main(string[] args)
     {
@@ -97,6 +99,12 @@ public static class Program
                     break;
                 case "--mute":
                     d.Mute = true;
+                    break;
+                case "--map" when i + 1 < args.Length:
+                    d.Map = args[++i];
+                    break;
+                case "--mappa-grande":
+                    d.BigMap = true;
                     break;
             }
         }

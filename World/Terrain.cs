@@ -41,12 +41,22 @@ public static class Terrain
         return env * (sign * amp + 1.4f * MathF.Sin(MathF.Tau * 2f * t + Noise.Hash01(a, b, salt + 2) * 6f));
     }
 
+    /// <summary>
+    /// Quanto serpeggia il tratto tra due incroci: in campagna tutto, in paese meno, in città le strade sono dritte.
+    /// Dipende solo dai due incroci, quindi è uguale per tutti i pezzi che il tratto attraversa.
+    /// </summary>
+    private static float Winding(int i0, int j0, int i1, int j1)
+    {
+        var map = GameMap.Current;
+        return 1f - MathF.Max(GameMap.Density(map.At(i0, j0)), GameMap.Density(map.At(i1, j1)));
+    }
+
     /// <summary>Quota z della strada est-ovest senza tener conto dei ponti (solo l'ondulazione).</summary>
     private static float RawRoadZ(int j, float x)
     {
         int i = (int)MathF.Floor(x / ChunkSize);
         float t = x / ChunkSize - i;
-        return j * ChunkSize + Wobble(t, i, j, 501);
+        return j * ChunkSize + Wobble(t, i, j, 501) * Winding(i, j, i + 1, j);
     }
 
     // Vicino a un ponte la strada smette di serpeggiare: dritta e allineata al ponte (est-ovest)
@@ -85,7 +95,7 @@ public static class Terrain
     {
         int j = (int)MathF.Floor(z / ChunkSize);
         float t = z / ChunkSize - j;
-        return i * ChunkSize + Wobble(t, i, j, 701);
+        return i * ChunkSize + Wobble(t, i, j, 701) * Winding(i, j, i, j + 1);
     }
 
     /// <summary>All'incrocio (i, j) le strade si incontrano (o curvano): lì c'è uno slargo rotondo.</summary>
@@ -127,7 +137,7 @@ public static class Terrain
     // Fiumi nord-sud: alcune colonne hanno un fiume, spostato dalla strada nord-sud di 20-37 unità,
     // quindi non la incontra mai; attraversa invece le strade est-ovest, dove nasce un ponte.
 
-    public static bool HasRiver(int column) => column == 0 || Noise.Hash01(column, 0, 303) < 0.22f; // fiumi (e ponti) rari
+    public static bool HasRiver(int column) => GameMap.Current.HasRiver(column); // i fiumi li decide la mappa
 
     public static float RiverX(int column, float z)
     {
@@ -153,37 +163,64 @@ public static class Terrain
 
     // ------------------------------------------------------------------ altezza
 
-    /// <summary>Colline dolci, spianate lungo le strade e scavate dai fiumi.</summary>
+    private const float SeaFloor = -1.7f;
+
+    /// <summary>
+    /// Colline dolci (spianate in città), spianate lungo le strade e attorno ai punti di riferimento,
+    /// scavate dai fiumi; dove la mappa dice mare scendono sotto il pelo dell'acqua.
+    /// </summary>
     public static float Height(float x, float z)
     {
+        var s = GameMap.Current.Sample(x, z);
         float h = 0.55f * ValueNoise(x / 38f, z / 38f, 11)
                 + 0.25f * ValueNoise(x / 14f, z / 14f, 12)
                 + 0.10f * ValueNoise(x / 5f, z / 5f, 13)
                 + 0.05f;
+        h *= 1f - 0.85f * s.Urban;
         h *= Noise.Smooth(Zone.PathHalf + 0.2f, Zone.PathHalf + 1.8f, RoadDistance(x, z));
+        foreach (var l in GameMap.Current.Landmarks)
+        {
+            float d = Vector2.Distance(new Vector2(x, z), l.Pos);
+            if (d < l.Radius + 4f) h = Noise.Lerp(l.BaseY, h, Noise.Smooth(l.Radius, l.Radius + 4f, d));
+        }
+        h = Noise.Lerp(SeaFloor, h, Noise.Smooth(0.36f, 0.56f, s.Land));
         float river = 1f - Noise.Smooth(Zone.RiverHalf - 0.9f, Zone.RiverHalf + 0.3f, RiverDistance(x, z));
         return Noise.Lerp(h, -0.9f, river);
     }
 
     // ------------------------------------------------------------------ biomi
 
-    /// <summary>
-    /// Peso di ciascun bioma nel punto (somma 1): ricavati da "temperatura" e "umidità", due rumori
-    /// molto ampi, così i biomi sono regioni grandi che sfumano l'una nell'altra. Attorno alla partenza: prato.
-    /// </summary>
+    /// <summary>Peso di ciascun bioma nel punto (somma 1), dai quartieri della mappa sfumati tra le celle.</summary>
     public static (float Meadow, float Blossom, float Autumn, float Snowy) BiomeWeights(float x, float z)
     {
-        float t = ValueNoise(x / 230f + 17.3f, z / 230f - 4.1f, 21);
-        float m = ValueNoise(x / 180f - 8.7f, z / 180f + 2.9f, 22);
-        float home = 1f - Noise.Smooth(70f, 160f, MathF.Sqrt(x * x + z * z));
-        t = Noise.Lerp(t, 0.6f, home);
-        m = Noise.Lerp(m, 0.5f, home);
+        var s = GameMap.Current.Sample(x, z);
+        return (s.Meadow, s.Blossom, s.Autumn, s.Snowy);
+    }
 
-        float snowy = 1f - Noise.Smooth(0.28f, 0.36f, t);
-        float autumn = (1f - snowy) * (1f - Noise.Smooth(0.34f, 0.42f, m));
-        float blossom = (1f - snowy) * Noise.Smooth(0.58f, 0.66f, m);
-        float meadow = MathF.Max(0f, 1f - snowy - autumn - blossom);
-        return (meadow, blossom, autumn, snowy);
+    /// <summary>Quanto il punto è costruito (0 campagna, 1 centro città), sfumato tra le celle.</summary>
+    public static float Urban(float x, float z) => GameMap.Current.Sample(x, z).Urban;
+
+    // ------------------------------------------------------------------ marciapiedi
+
+    public const float WalkWidth = 1.0f;    // larghezza dei marciapiedi, oltre il bordo della carreggiata
+    public const float WalkRaise = 0.08f;   // gradino del cordolo sopra la carreggiata
+    public const float WalkFrom = 0.35f;    // da questa densità urbana in su ci sono i marciapiedi
+
+    /// <summary>Vicino al centro di uno slargo i marciapiedi si interrompono (lì si incrociano le carreggiate).</summary>
+    public static bool NearHub(float x, float z)
+    {
+        int i = (int)MathF.Round(x / ChunkSize), j = (int)MathF.Round(z / ChunkSize);
+        if (!HasHub(i, j)) return false;
+        float dx = x - i * ChunkSize, dz = z - j * ChunkSize;
+        return dx * dx + dz * dz < (Zone.HubRadius + WalkWidth + 0.4f) * (Zone.HubRadius + WalkWidth + 0.4f);
+    }
+
+    /// <summary>Il punto è su un marciapiede (fascia lungo le strade dei centri abitati)?</summary>
+    public static bool OnSidewalk(float x, float z)
+    {
+        float d = RoadDistance(x, z);
+        if (d < Zone.PathHalf || d > Zone.PathHalf + WalkWidth) return false;
+        return Urban(x, z) >= WalkFrom && !NearHub(x, z);
     }
 
     public static Biome BiomeAt(float x, float z)
@@ -216,11 +253,23 @@ public static class Terrain
     private static readonly Palette AutumnPal = new(new(0.58f, 0.66f, 0.22f), new(0.90f, 0.78f, 0.52f), new(0.55f, 0.48f, 0.32f));
     private static readonly Palette SnowyPal = new(new(0.90f, 0.93f, 0.97f), new(0.78f, 0.72f, 0.62f), new(0.62f, 0.66f, 0.72f));
 
-    /// <summary>Colori del terreno nel punto, mescolati secondo i pesi dei biomi.</summary>
+    private static readonly Vector3 Asphalt = new(0.36f, 0.36f, 0.39f);
+    private static readonly Vector3 Lawn = new(0.40f, 0.62f, 0.24f);
+    private static readonly Vector3 Sand = new(0.90f, 0.83f, 0.60f);
+
+    /// <summary>
+    /// Colori del terreno nel punto, mescolati secondo i pesi dei biomi: in città le strade diventano asfalto e
+    /// l'erba un prato curato; sulla costa c'è la spiaggia.
+    /// </summary>
     public static Palette PaletteAt(float x, float z)
     {
-        var (m, b, a, s) = BiomeWeights(x, z);
-        Vector3 Mix(Func<Palette, Vector3> f) => f(MeadowPal) * m + f(BlossomPal) * b + f(AutumnPal) * a + f(SnowyPal) * s;
-        return new Palette(Mix(p => p.Grass), Mix(p => p.Path), Mix(p => p.Bank));
+        var s = GameMap.Current.Sample(x, z);
+        Vector3 Mix(Func<Palette, Vector3> f) =>
+            f(MeadowPal) * s.Meadow + f(BlossomPal) * s.Blossom + f(AutumnPal) * s.Autumn + f(SnowyPal) * s.Snowy;
+        float town = Noise.Smooth(0.2f, 0.6f, s.Urban), beach = 1f - Noise.Smooth(0.56f, 0.68f, s.Land);
+        Vector3 grass = Vector3.Lerp(Vector3.Lerp(Mix(p => p.Grass), Lawn, town * 0.6f), Sand, beach);
+        Vector3 path = Vector3.Lerp(Mix(p => p.Path), Asphalt, town);
+        Vector3 bank = Vector3.Lerp(Mix(p => p.Bank), Sand, beach);
+        return new Palette(grass, path, bank);
     }
 }

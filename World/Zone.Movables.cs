@@ -90,6 +90,7 @@ public sealed partial class Zone
     /// <summary>Un cerchio (coordinate locali) tocca un ostacolo fisso (albero, falò)?</summary>
     private bool HitsStatic(float x, float z, float radius)
     {
+        if (HitsBox(x, z, radius)) return true; // muri degli edifici
         var bucket = _buckets[BucketIndex(x), BucketIndex(z)];
         if (bucket == null) return false;
         foreach (var c in bucket)

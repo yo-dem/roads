@@ -1,0 +1,65 @@
+# ==========================================================================================
+#  Mappa di Roads — si modifica con un editor di testo (in futuro: con l'editor apposito)
+# ==========================================================================================
+#
+#  Sotto [mappa] c'è la griglia. Ogni cella è un incrocio con il territorio attorno (96 x 96
+#  unità). Le celle stanno nelle colonne e righe PARI del testo; in mezzo ci sono le strade:
+#
+#     p-p      il trattino tra due celle = strada est-ovest
+#     |        la barra sotto una cella  = strada nord-sud (verso la cella di sotto)
+#     p F p    una lettera MAIUSCOLA tra quattro celle = punto di riferimento (vedi legenda)
+#
+#  Quartieri (lettera della cella):
+#     ~  mare            p  prato          f  bosco fiorito
+#     a  bosco d'autunno n  valle innevata
+#     s  paese (case basse col tetto a falde, marciapiedi, lampioni)
+#     c  città (palazzi alti, strade dritte e asfaltate)
+#  I quartieri sfumano l'uno nell'altro a metà strada tra le celle; il mare forma la costa.
+#  Le strade che finiscono in mare vengono ignorate. In alto c'è il nord.
+#
+#  Voci:
+#     partenza: colonna, riga   la cella dove si parte (contate da 0 in alto a sinistra);
+#                               l'auto parte verso est, quindi lì serve una strada verso est
+#     fiumi: colonna, ...       colonne con un fiume nord-sud (scorre accanto alla strada
+#                               nord-sud della colonna; sulle strade est-ovest nasce un ponte)
+#     X = tipo : Nome           legenda dei punti di riferimento
+#                               tipi: faro, mulino, castello, torre, antenna, campanile
+# ==========================================================================================
+
+nome: Isola di Roads
+partenza: 4, 6
+fiumi: 4, 8
+
+A = antenna : Ripetitore del Monte Nevoso
+K = castello : Castello d'Autunno
+M = mulino : Mulino dei Prati
+T = torre : Torre dell'acqua di Borgo Est
+B = campanile : Campanile di Piazza Grande
+F = faro : Faro di Capo Sud
+
+[mappa]
+~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+~ ~ ~ n n n n a a ~ ~ ~ ~ ~ ~
+      |A        |
+~ ~ n-n-n-n-a-a-a-a ~ ~ ~ ~ ~
+    |     |    K
+~ ~ n n n p a a a a-a-s ~ ~ ~
+    |     |       | |
+~ p-p-p-p-p-p-a-a-s-s-s-s ~ ~
+          |   |   | |  T|
+~ p p p p p p p s s-c-c s ~ ~
+     M    |   |   | | | |
+~ ~ p-p-p-p-p-p-s-c-c-c-s-s ~
+    |     |   |   | |B| |
+~ ~ f p p p p p s c-c-c-s ~ ~
+    |     |   |   | | | |
+~ ~ f-f-f-p p p s s-c-s s ~ ~
+    |   | |   |   |   |
+~ ~ f-f-f-f-p-p-p-s-s-s ~ ~ ~
+        | |   |
+~ ~ ~ f f-s-s-p-p p ~ ~ ~ ~ ~
+        |F
+~ ~ ~ ~ s-s ~ ~ ~ ~ ~ ~ ~ ~ ~
+
+~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~

@@ -67,19 +67,38 @@ public sealed class MeshBuilder
     /// Chiude l'oggetto e scrive nei suoi vertici il suo ingombro (cilindro verticale), usato dallo shader
     /// per renderlo trasparente per intero quando copre il giocatore.
     /// </summary>
-    public void EndObject()
+    public void EndObject() => EndObject(null);
+
+    /// <summary>
+    /// Come <see cref="EndObject()"/>, ma con un ingombro dato (coordinate prima di <see cref="Transform"/>): serve a
+    /// parti staccate di un oggetto (le finestre accese di un palazzo) che devono sfumare insieme a lui.
+    /// </summary>
+    public void EndObject(Vector3 boundsMin, Vector3 boundsMax) => EndObject((boundsMin, boundsMax));
+
+    private void EndObject((Vector3 Min, Vector3 Max)? bounds)
     {
         int start = _objectStart, end = (int)VertexCount;
         _objectStart = -1;
         if (start < 0 || end <= start) return;
 
         Vector3 min = new(float.MaxValue), max = new(float.MinValue);
-        for (int v = start; v < end; v++)
+        if (bounds is { } b)
         {
-            var p = new Vector3(_vertices[v * BaseFloats], _vertices[v * BaseFloats + 1], _vertices[v * BaseFloats + 2]);
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
+            for (int k = 0; k < 8; k++)
+            {
+                var corner = new Vector3((k & 1) == 0 ? b.Min.X : b.Max.X, (k & 2) == 0 ? b.Min.Y : b.Max.Y, (k & 4) == 0 ? b.Min.Z : b.Max.Z);
+                var p = Vector3.Transform(corner, Transform);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
         }
+        else
+            for (int v = start; v < end; v++)
+            {
+                var p = new Vector3(_vertices[v * BaseFloats], _vertices[v * BaseFloats + 1], _vertices[v * BaseFloats + 2]);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
         float cx = (min.X + max.X) * 0.5f, cz = (min.Z + max.Z) * 0.5f;
         float radius = MathF.Max(max.X - min.X, max.Z - min.Z) * 0.5f;
         for (int v = start; v < end; v++)

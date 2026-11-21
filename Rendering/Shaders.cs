@@ -95,6 +95,7 @@ public static class Shaders
         uniform vec3 uCameraPos;
         uniform float uFogNear;
         uniform float uFogFar;
+        uniform float uFogMax;       // nebbia massima: 1 di solito, meno per i punti di riferimento (si vedono da lontano)
         uniform float uEmissive;
         uniform float uTime;
         uniform int uWater;
@@ -213,6 +214,7 @@ public static class Shaders
                 fog *= 0.7; // le nuvole restano visibili anche lontano
             else
                 fog = max(fog, 1.0 - smoothstep(-12.0, -2.5, vWorld.y)); // ciò che sta sotto le isole sfuma
+            fog = min(fog, uFogMax);
             FragColor = vec4(mix(col, skyColor(toFrag / d), fog), alpha);
         }
         """.Replace("//SKY", SkyGlsl);
