@@ -186,6 +186,7 @@ public sealed partial class Game : IDisposable
                     Console.WriteLine($"  cucitura scoperta in fondo al tratto {e.Id} ({e.Kind}) da s={reached:F2} a {e.Length:F2}, a {e.At(reached)}");
             }
             Console.WriteLine($"Verifica cuciture: {seams} tratti di strada non disegnati da nessun pezzo");
+            VerifyAvenueUTurns();
             var defects = RoadNetwork.Current.FindDefects();
             Console.WriteLine($"Verifica geometria: {defects.Count} difetti");
             foreach (var d in defects.Take(30)) Console.WriteLine("  " + d);
@@ -768,6 +769,72 @@ public sealed partial class Game : IDisposable
             _kid.HopIn(door);
             _boarding = true;
         }
+    }
+
+    /// <summary>
+    /// Verifica (test): su ogni viale, da ogni corsia e in entrambi i versi, l'inversione a U guidata resta nella propria
+    /// metà carreggiata, e dopo essersi girati (anche con una derapata libera vicino agli incroci) l'aiuto in corsia
+    /// tiene l'auto dalla stessa parte dello spartitraffico.
+    /// </summary>
+    private static void VerifyAvenueUTurns()
+    {
+        var net = RoadNetwork.Current;
+        int tried = 0, turns = 0, crossTurn = 0, crossAfter = 0, intoHub = 0;
+        // Da che parte dello spartitraffico sta un punto, rispetto al viale e al suo verso A→B (0 se non è su un viale)
+        float SideOf(Vector2 p, RoadEdge e)
+        {
+            if (net.HubAt(p, 0f) != null) return 0f; // dentro un incrocio o la piazza non c'è spartitraffico
+            if (!net.Nearest(p, e.HalfWidth + 0.5f, out var h) || h.Edge.Layout != RoadLayout.Avenue) return 0f;
+            Vector2 t = h.Edge.Tangent(h.S);
+            // Lo stesso viale può proseguire in un altro tratto con verso opposto: si confronta col verso di e
+            if (Vector2.Dot(t, e.Tangent(e.Length * 0.5f)) < 0f) t = -t;
+            return MathF.Sign(Vector2.Dot(p - h.Point, new Vector2(-t.Y, t.X)));
+        }
+        foreach (var e in net.Edges.Where(e => e.Layout == RoadLayout.Avenue))
+            for (float s = 1f; s < e.Length - 1f; s += 1f)
+                foreach (float dir in new[] { 1f, -1f })
+                    foreach (float lane in e.TravelLanes(dir))
+                    {
+                        Vector2 t = e.Tangent(s) * dir, right = new(-t.Y, t.X);
+                        Vector2 p = e.At(s) + right * lane;
+                        float side = MathF.Sign(lane * dir); // nel verso A→B
+                        tried++;
+                        var travel = new Vector3(t.X, 0f, t.Y);
+                        if (Characters.DriftLine.AlongRoad(new Vector3(p.X, 0f, p.Y), travel, 6f) is { } line)
+                        {
+                            turns++;
+                            bool crossed = false, inHub = false;
+                            for (float u = 0f; u <= line.Length; u += 0.25f)
+                            {
+                                var q = line.At(u);
+                                float sd = SideOf(new Vector2(q.X, q.Z), e);
+                                if (sd != 0f && sd != side) crossed = true;
+                                // Dentro un incrocio (o una piazza): oltre l'imbocco della strada su cui si è; il viale può
+                                // proseguire in un altro tratto attraverso un semplice raccordo, e lì non è un incrocio
+                                if (!net.NearestAligned(new Vector2(q.X, q.Z), Vector2.Zero, e.HalfWidth + 0.5f, out var hq)) inHub = true;
+                                else
+                                {
+                                    var g = hq.Edge;
+                                    bool junA = g.A.Degree >= 3 || g.A.Piazza, junB = g.B.Degree >= 3 || g.B.Piazza;
+                                    if ((junA && hq.S < g.A.TrimFor(g)) || (junB && hq.S > g.Length - g.B.TrimFor(g))) inHub = true;
+                                }
+                            }
+                            if (crossed && crossTurn++ < 5)
+                                Console.WriteLine($"  inversione oltre lo spartitraffico: viale {e.Id} a {p.X:F1}, {p.Y:F1}");
+                            if (inHub && intoHub++ < 5)
+                                Console.WriteLine($"  inversione che entra nell'incrocio: viale {e.Id} a {p.X:F1}, {p.Y:F1}");
+                        }
+                        // Dopo essersi girati (stessa corsia, verso opposto): dove porta l'aiuto in corsia?
+                        if (Characters.DriftLine.RoadFrame(new Vector3(p.X, 0f, p.Y), -travel, 5f, out var center, out _, out var aim, out _))
+                        {
+                            float sc = SideOf(new Vector2(center.X, center.Z), e), sa = SideOf(new Vector2(aim.X, aim.Z), e);
+                            if ((sc != 0f && sc != side) || (sa != 0f && sa != side))
+                                if (crossAfter++ < 5)
+                                    Console.WriteLine($"  dopo l'inversione l'aiuto porta oltre lo spartitraffico: viale {e.Id} a {p.X:F1}, {p.Y:F1}");
+                        }
+                    }
+        Console.WriteLine($"Verifica inversioni sui viali: {tried} prove, {turns} inversioni guidate, "
+                          + $"{crossTurn} oltre lo spartitraffico, {intoHub} dentro un incrocio, {crossAfter} con l'aiuto in corsia che porta di là");
     }
 
     // ------------------------------------------------------------------ a bordo del treno
