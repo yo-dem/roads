@@ -420,6 +420,35 @@ public sealed class RoadNetwork
         return found;
     }
 
+    /// <summary>Altezza del cordolo dello spartitraffico dei viali (l'aiuola rialzata al centro).</summary>
+    public const float MedianHeight = 0.14f;
+    /// <summary>Lo spartitraffico si interrompe a questa distanza dagli incroci (oltre il bordo degli slarghi).</summary>
+    public const float MedianGap = 2.0f;
+
+    /// <summary>
+    /// Rialzo del terreno sullo spartitraffico di un viale (0 altrove): chi ci finisce sopra ci sale, non ci sbatte.
+    /// Il bordo è una rampa cortissima, così auto e personaggi lo scavalcano come un gradino.
+    /// </summary>
+    public float MedianLift(Vector2 p)
+    {
+        const float half = RoadEdge.AvenueMedian * 0.5f - 0.05f;
+        if (!Nearest(p, half + 0.1f, out var hit) || hit.Edge.Layout != RoadLayout.Avenue) return 0f;
+        var e = hit.Edge;
+        float from = e.A.TrimFor(e) + MedianGap, to = e.Length - e.B.TrimFor(e) - MedianGap;
+        if (hit.S < from || hit.S > to) return 0f;
+        // Dove la ferrovia attraversa il viale l'aiuola non c'è (vedi Zone.Stripe): niente gradino invisibile
+        if (Railway.Current.Distance(p.X, p.Y) <= Railway.BallastHalf + 1f) return 0f;
+        float across = 1f - Smooth(half - 0.08f, half + 0.05f, hit.Distance);
+        float along = Smooth(from, from + 0.1f, hit.S) * (1f - Smooth(to - 0.1f, to, hit.S));
+        return MedianHeight * across * along;
+    }
+
+    private static float Smooth(float a, float b, float x)
+    {
+        float t = Math.Clamp((x - a) / (b - a), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
     /// <summary>Lo slargo (incrocio, fine strada, piazza) più vicino entro il suo raggio più <paramref name="extra"/>.</summary>
     public RoadNode? HubAt(Vector2 p, float extra)
     {

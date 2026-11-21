@@ -104,6 +104,7 @@ public sealed class Car : IDisposable
 
     /// <summary>Motore acceso: spento quando il personaggio è sceso (niente sbuffi dallo scarico).</summary>
     public bool EngineOn = true;
+    private float _idleShake = 1f; // vibrazione del motore al minimo: sfuma a zero quando si spegne
 
     /// <summary>Posizione di un faro (side = -1 sinistro, +1 destro), sul muso dell'auto.</summary>
     public Vector3 HeadlightPos(float side) => Vector3.Transform(new Vector3(side * 0.29f, 0.41f, 0.86f), RootMatrix);
@@ -498,6 +499,7 @@ public sealed class Car : IDisposable
     public void Update(float dt, Vector2 drive, bool slow, WorldMap world, Particles fx)
     {
         _time += dt;
+        _idleShake = Noise.Lerp(_idleShake, EngineOn ? 1f : 0f, Noise.Damp(6f, dt));
         float maxSpeed = slow ? SlowSpeed : FastSpeed;
 
         // --- Sterzo e velocità desiderati
@@ -876,7 +878,7 @@ public sealed class Car : IDisposable
     {
         Matrix4x4 root = RootMatrix;
         // Motore al minimo: leggera vibrazione; in movimento piccoli sobbalzi
-        float bounce = MathF.Sin(_time * 38f) * 0.006f
+        float bounce = MathF.Sin(_time * 38f) * 0.006f * _idleShake // a motore spento l'auto sta ferma
                        + MathF.Abs(MathF.Sin(_spin * 0.7f)) * 0.012f * MathF.Min(MathF.Abs(_speed) / FastSpeed, 1f);
         Matrix4x4 body = Matrix4x4.CreateRotationZ(_roll) * Matrix4x4.CreateRotationX(-_tilt)
                          * Matrix4x4.CreateTranslation(0, bounce, 0) * root;
