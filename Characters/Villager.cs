@@ -143,6 +143,27 @@ public sealed class Villager : IDisposable
         if (d.LengthSquared() > 1e-4f) Yaw = MathF.Atan2(d.X, d.Z);
     }
 
+    /// <summary>
+    /// A bordo del treno: posizione e direzione (mondo) le decide chi lo porta, senza collisioni col mondo; qui si
+    /// tiene solo l'animazione, camminata o ferma secondo <paramref name="speed"/>.
+    /// </summary>
+    public void Ride(float dt, Vector3 pos, float yaw, float speed)
+    {
+        Hidden = false;
+        _hop = 1f;
+        _time += dt;
+        Position = pos;
+        Yaw = yaw;
+        _velocity = Vector3.Zero;
+        _move = Noise.Lerp(_move, speed, Noise.Damp(10f, dt));
+        _walkWeight = Noise.Lerp(_walkWeight, Math.Clamp(speed / 0.6f, 0f, 1f), Noise.Damp(12f, dt));
+        _sprintWeight = Noise.Lerp(_sprintWeight, 0f, Noise.Damp(8f, dt));
+        _walkTime += dt * MathF.Min(MathF.Max(_move, 0.5f) * 0.95f, 2.1f);
+    }
+
+    /// <summary>Non si disegna (seduto in treno: la visuale è dai suoi occhi).</summary>
+    public void Hide() => Hidden = true;
+
     /// <summary>Arriva oltre 1 e torna indietro: il "pop" quando salta fuori.</summary>
     private static float EaseOutBack(float t)
     {

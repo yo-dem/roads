@@ -35,16 +35,58 @@ public sealed class IsoCamera
 
     public float EffectiveYaw => Yaw + Noise.WrapAngle(_chaseYaw - Yaw) * Chase;
     public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, WalkPitch, Walk), Chase);
-    public float EffectiveDistance => Noise.Lerp(Distance, Noise.Lerp(ChaseDistance, WalkDistance, Walk), Chase);
+    public float EffectiveDistance => _eye is { } eye
+        ? Vector3.Distance(eye, Target)
+        : Noise.Lerp(Distance, Noise.Lerp(ChaseDistance, WalkDistance, Walk), Chase);
 
-    public Vector3 Position => Target + new Vector3(
+    // Visuale fissa (dentro il vagone): occhio e punto guardato li decide il gioco, fotogramma per fotogramma
+    private Vector3? _eye;
+
+    /// <summary>Visuale fissa: la camera sta in <paramref name="eye"/> e guarda <paramref name="look"/>.</summary>
+    public void Fix(Vector3 eye, Vector3 look)
+    {
+        _eye = eye;
+        Target = look;
+    }
+
+    /// <summary>Si torna alla visuale normale: riparte dalla direzione in cui si guardava, senza scatti.</summary>
+    public void Unfix()
+    {
+        if (_eye is not { } eye) return;
+        Vector3 d = eye - Target;
+        _chaseYaw = Yaw = MathF.Atan2(d.X, d.Z);
+        _eye = null;
+    }
+
+    public bool Fixed => _eye != null;
+
+    public Vector3 Position => _eye ?? Target + new Vector3(
         MathF.Sin(EffectiveYaw) * MathF.Cos(EffectivePitch),
         MathF.Sin(EffectivePitch),
         MathF.Cos(EffectiveYaw) * MathF.Cos(EffectivePitch)) * EffectiveDistance;
 
     /// <summary>Direzioni sul piano orizzontale, usate per il movimento relativo alla camera.</summary>
-    public Vector3 Forward => new(-MathF.Sin(EffectiveYaw), 0, -MathF.Cos(EffectiveYaw));
-    public Vector3 Right => new(MathF.Cos(EffectiveYaw), 0, -MathF.Sin(EffectiveYaw));
+    public Vector3 Forward
+    {
+        get
+        {
+            if (_eye is { } eye)
+            {
+                var d = new Vector3(Target.X - eye.X, 0f, Target.Z - eye.Z);
+                if (d.LengthSquared() > 1e-6f) return Vector3.Normalize(d);
+            }
+            return new(-MathF.Sin(EffectiveYaw), 0, -MathF.Cos(EffectiveYaw));
+        }
+    }
+
+    public Vector3 Right
+    {
+        get
+        {
+            var f = Forward;
+            return new(-f.Z, 0, f.X);
+        }
+    }
 
     /// <summary>Posiziona la camera subito, senza transizione (all'avvio).</summary>
     public void Snap(Vector3 follow, bool chase, float heading)

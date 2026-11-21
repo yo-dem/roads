@@ -20,7 +20,7 @@ public sealed class Trains : IDisposable
     private const float ArmSpeed = 1.3f;      // radianti al secondo
 
     private readonly Railway _rail;
-    private readonly Mesh _loco, _car, _carGlow, _locoGlow, _post, _arm, _lamp;
+    private readonly Mesh _loco, _car, _carGlow, _locoGlow, _post, _arm, _lamp, _interior, _interiorGlow;
     private float _head;          // distanza del muso lungo l'anello
     private float _speed;
     private float _dwell;
@@ -55,6 +55,37 @@ public sealed class Trains : IDisposable
         }
         return false;
     }
+
+    // ------------------------------------------------------------------ dentro la carrozza
+
+    /// <summary>Chi viaggia è dentro la prima carrozza: la si disegna dall'interno (senza le pareti esterne).</summary>
+    public bool Inside;
+
+    /// <summary>Quota del pavimento della carrozza (locale, sopra il ferro).</summary>
+    public const float Floor = 0.62f;
+    /// <summary>Corridoio e capi della carrozza dove si cammina (locale: x di lato, z verso la marcia).</summary>
+    public const float AisleHalf = 0.32f;
+    public static float CabinEnd => CarLength * 0.5f - 0.45f;
+    /// <summary>Le porte stanno in fondo alla carrozza, verso la locomotiva (+Z).</summary>
+    public static float DoorZ => CarLength * 0.5f - 0.75f;
+
+    /// <summary>I posti a sedere (locale): centro del sedile e lato del finestrino (+1 destra, -1 sinistra).</summary>
+    public static readonly (float X, float Z, float Side)[] Seats =
+        new[] { -2.3f, -1.15f, 0f, 1.15f }.SelectMany(z => new[] { (0.58f, z, 1f), (-0.58f, z, -1f) }).ToArray();
+
+    /// <summary>Trasformazione della prima carrozza (locale → mondo): +Z verso la marcia, y = 0 sul ferro.</summary>
+    public Matrix4x4 RideMatrix
+    {
+        get
+        {
+            var (c, d, _, _) = Cars().ElementAt(1);
+            return Matrix4x4.CreateRotationY(MathF.Atan2(d.X, d.Y))
+                   * Matrix4x4.CreateTranslation(c.X, Terrain.Height(c.X, c.Y) + Railway.RailTop, c.Y);
+        }
+    }
+
+    /// <summary>Lato della banchina rispetto alla carrozza (+1 destra della marcia), se il treno è fermo.</summary>
+    public float PlatformSide => StoppedAt?.Side ?? 1f;
 
     /// <summary>Dove sta chi viaggia: in mezzo alla prima carrozza, e la direzione di marcia (yaw).</summary>
     public (Vector3 Pos, float Yaw) Seat
@@ -96,6 +127,7 @@ public sealed class Trains : IDisposable
         _closed = new bool[rail.Crossings.Count];
         (_loco, _locoGlow) = BuildLoco(gl);
         (_car, _carGlow) = BuildCarriage(gl);
+        (_interior, _interiorGlow) = BuildInterior(gl);
         _post = BuildPost(gl);
         _arm = BuildArm(gl);
         var lb = new MeshBuilder();
@@ -233,13 +265,22 @@ public sealed class Trains : IDisposable
     public void Collect(List<DrawItem> items, float night, Func<Vector2, bool> visible)
     {
         if (!_rail.Exists) return;
+        int index = 0;
         foreach (var (c, d, len, loco) in Cars())
         {
-            if (!visible(c)) continue;
+            bool inside = Inside && index++ == 1;
+            if (!visible(c) && !inside) continue;
             float yaw = MathF.Atan2(d.X, d.Y);
             float y = Terrain.Height(c.X, c.Y) + Railway.RailTop;
             var m = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(c.X, y, c.Y);
             var area = new Vector4(c.X - len, c.Y - len, c.X + len, c.Y + len);
+            if (inside)
+            {
+                // Vista da dentro: interno con i finestrini aperti (le pareti esterne coprirebbero tutto)
+                items.Add(new DrawItem(_interior, m));
+                items.Add(new DrawItem(_interiorGlow, m, 0.35f + 0.9f * night, CastShadow: false));
+                continue;
+            }
             items.Add(new DrawItem(loco ? _loco : _car, m, Area: area));
             items.Add(new DrawItem(loco ? _locoGlow : _carGlow, m, 0.2f + 1.0f * night, CastShadow: false, Area: area));
         }
@@ -334,6 +375,66 @@ public sealed class Trains : IDisposable
         return (mb.Build(gl), glow.Build(gl));
     }
 
+    /// <summary>
+    /// L'interno della carrozza: pavimento, soffitto con la plafoniera, pareti di fondo (con la porta verso la
+    /// locomotiva), pareti laterali con quattro finestrini APERTI per lato (si vede fuori) e otto sedili rossi rivolti
+    /// verso la marcia. Sotto, carrello e telaio come fuori.
+    /// </summary>
+    private static (Mesh, Mesh) BuildInterior(GL gl)
+    {
+        var mb = new MeshBuilder();
+        var glow = new MeshBuilder();
+        var wall = new Vector3(0.90f, 0.86f, 0.74f);
+        var floor = new Vector3(0.42f, 0.36f, 0.30f);
+        var seat = new Vector3(0.70f, 0.18f, 0.16f);
+        var green = new Vector3(0.18f, 0.46f, 0.32f);
+        const float L = CarLength, X = 0.93f, T = 0.05f;            // pareti a ±X, spesse T
+        const float Low = 1.3f, High = 2.02f, Top = 2.38f;         // davanzale, architrave, soffitto
+        Bogies(mb, L);
+        mb.AddBox(new Vector3(0, Floor - 0.06f, 0), new Vector3(X * 2f, 0.12f, L - 0.1f), floor);
+        mb.AddBox(new Vector3(0, Top, 0), new Vector3(X * 2f + T, 0.08f, L), wall * 0.95f);
+        mb.AddBox(new Vector3(0, Top + 0.07f, 0), new Vector3(X * 2f + 0.1f, 0.06f, L + 0.05f), new Vector3(0.45f, 0.47f, 0.5f));
+        // Pareti di fondo: dietro piena, davanti con la porta verso la locomotiva
+        mb.AddBox(new Vector3(0, (Floor + Top) * 0.5f, -L * 0.5f + T), new Vector3(X * 2f, Top - Floor, T), wall);
+        foreach (float s in new[] { -1f, 1f })
+            mb.AddBox(new Vector3(s * (X + 0.32f) * 0.5f, (Floor + Top) * 0.5f, L * 0.5f - T), new Vector3(X - 0.32f, Top - Floor, T), wall);
+        mb.AddBox(new Vector3(0, (Floor + 1.95f) * 0.5f, L * 0.5f - T * 0.5f), new Vector3(0.64f, 1.95f - Floor, T * 0.6f), green);
+        // Pareti laterali: fascia sotto e sopra piene, in mezzo montanti tra i finestrini (aperti)
+        float[] windows = [-2.3f, -1.15f, 0f, 1.15f];
+        const float W = 0.8f;
+        foreach (float s in new[] { -1f, 1f })
+        {
+            float x = s * X;
+            mb.AddBox(new Vector3(x, (Floor + Low) * 0.5f, 0), new Vector3(T, Low - Floor, L), wall);
+            mb.AddBox(new Vector3(x, (High + Top) * 0.5f, 0), new Vector3(T, Top - High, L), wall);
+            mb.AddBox(new Vector3(x, (Floor + 0.9f) * 0.5f, 0), new Vector3(T * 1.4f, 0.9f - Floor, L), green); // zoccolo
+            float z0 = -L * 0.5f;
+            foreach (float wz in windows.Append(L * 0.5f + W * 0.5f))
+            {
+                float a = z0, b = wz - W * 0.5f;
+                if (b > a + 0.01f) mb.AddBox(new Vector3(x, (Low + High) * 0.5f, (a + b) * 0.5f), new Vector3(T, High - Low, b - a), wall);
+                // Cornice del finestrino
+                if (wz < L * 0.5f)
+                {
+                    mb.AddBox(new Vector3(x, Low, wz), new Vector3(T * 3f, 0.05f, W), Dark);
+                    mb.AddBox(new Vector3(x, High, wz), new Vector3(T * 3f, 0.05f, W), Dark);
+                }
+                z0 = wz + W * 0.5f;
+            }
+        }
+        // Sedili: cuscino, schienale (dietro, verso -Z) e braccioli
+        foreach (var (sx, sz, side) in Seats)
+        {
+            mb.AddBox(new Vector3(sx, Floor + 0.32f, sz), new Vector3(0.6f, 0.12f, 0.5f), seat);
+            mb.AddBox(new Vector3(sx, Floor + 0.62f, sz - 0.27f), new Vector3(0.6f, 0.6f, 0.08f), seat * 0.9f);
+            mb.AddBox(new Vector3(sx, Floor + 0.13f, sz), new Vector3(0.5f, 0.26f, 0.4f), Dark);
+            mb.AddBox(new Vector3(sx - side * 0.31f, Floor + 0.45f, sz), new Vector3(0.04f, 0.14f, 0.45f), Dark);
+        }
+        // Plafoniera lungo il soffitto
+        glow.AddBox(new Vector3(0, Top - 0.06f, 0), new Vector3(0.18f, 0.04f, L - 0.8f), Lit);
+        return (mb.Build(gl), glow.Build(gl));
+    }
+
     /// <summary>Palo del passaggio a livello: croce di Sant'Andrea, due luci, base della sbarra. Guarda verso -Z.</summary>
     private static Mesh BuildPost(GL gl)
     {
@@ -368,7 +469,7 @@ public sealed class Trains : IDisposable
     public void Dispose()
     {
         _loco.Dispose(); _locoGlow.Dispose(); _car.Dispose(); _carGlow.Dispose();
-        _post.Dispose(); _arm.Dispose(); _lamp.Dispose();
+        _post.Dispose(); _arm.Dispose(); _lamp.Dispose(); _interior.Dispose(); _interiorGlow.Dispose();
         if (Current == this) Current = null;
     }
 }
