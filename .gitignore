@@ -9,3 +9,6 @@ obj/
 *.user
 *.suo
 .vs/
+
+# Copie di lavoro temporanee di Claude Code
+.claude/worktrees/
