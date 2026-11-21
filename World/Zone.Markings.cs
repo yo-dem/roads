@@ -46,7 +46,7 @@ public sealed partial class Zone
     {
         if (s1 - s0 < 0.05f) return;
         int n = Math.Max(1, (int)MathF.Ceiling((s1 - s0) / 0.7f));
-        Vector3 prevR = default, prevL = default;
+        Vector3 prevR = default, prevL = default, prevC = default;
         bool prevOk = false;
         float lift = PathRaise + PaintLift + height;
         for (int k = 0; k <= n; k++)
@@ -55,10 +55,12 @@ public sealed partial class Zone
             Vector3 c = EdgeLocal(e, s, offset);
             Vector3 right = EdgeLocal(e, s, offset + width * 0.5f), left = EdgeLocal(e, s, offset - width * 0.5f);
             float y = HeightLocal(c.X, c.Z);
-            bool ok = InZone(c, 0f) && y > WaterY + 0.2f
-                      && (height <= 0f || Railway.Current.Distance(WX(c.X), WZ(c.Z)) > Railway.BallastHalf + 1f); // lo spartitraffico si apre sui binari
+            // Asciutto e, per lo spartitraffico, non sui binari (lì si apre); il pezzo di bordo si decide dopo
+            bool ok = y > WaterY + 0.2f
+                      && (height <= 0f || Railway.Current.Distance(WX(c.X), WZ(c.Z)) > Railway.BallastHalf + 1f);
             right.Y = left.Y = y + lift;
-            if (k > 0 && ok && prevOk)
+            // Ogni pezzetto lo disegna il pezzo di territorio in cui cade il suo punto di mezzo (niente buchi sui bordi)
+            if (k > 0 && ok && prevOk && InZone((prevC + c) * 0.5f, 0f))
             {
                 mb.AddQuad(prevR, right, left, prevL, color);
                 if (height > 0f)
@@ -69,7 +71,7 @@ public sealed partial class Zone
                     mb.AddQuad(left - down, prevL - down, prevL, left, side);
                 }
             }
-            if (height > 0f && ok && (k == 0 || k == n))
+            if (height > 0f && ok && InZone(c, 0f) && (k == 0 || k == n))
             {
                 // Testate dello spartitraffico
                 var down = new Vector3(0, height + 0.02f, 0);
@@ -77,7 +79,7 @@ public sealed partial class Zone
                 if (k == 0) mb.AddQuad(left - down, right - down, right, left, side);
                 else mb.AddQuad(right - down, left - down, left, right, side);
             }
-            prevR = right; prevL = left; prevOk = ok;
+            prevR = right; prevL = left; prevC = c; prevOk = ok;
         }
     }
 
@@ -87,7 +89,7 @@ public sealed partial class Zone
         for (float d = MathF.Floor(from / 6f) * 6f; d < to; d += 6f)
         {
             float a = MathF.Max(d, from), b = MathF.Min(d + 3f, to);
-            if (b > a) Stripe(mb, e, a, b, offset, width, Paint);
+            if (b - a > 1f) Stripe(mb, e, a, b, offset, width, Paint); // niente frammenti di trattino ai capi
         }
     }
 

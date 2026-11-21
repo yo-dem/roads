@@ -128,6 +128,24 @@ public sealed partial class Zone : IDisposable
     }
 
     /// <summary>Altezza del terreno (locale), interpolata esattamente come i triangoli della mesh.</summary>
+    /// <summary>
+    /// Verifica (test): i punti dei tratti di strada che passano in questo pezzo dove la carreggiata NON verrebbe
+    /// disegnata e nessun ponte la copre. Usa esattamente il criterio di <see cref="Strip"/>.
+    /// </summary>
+    public IEnumerable<(Vector2 Point, RoadEdge Edge)> RoadHoles()
+    {
+        foreach (var e in RoadNetwork.Current.EdgesNear(X, Z))
+            for (float s = 0f; s <= e.Length; s += 0.5f)
+            {
+                Vector2 w = e.At(s);
+                float x = w.X - Origin.X, z = w.Y - Origin.Z;
+                if (MathF.Abs(x) > Half || MathF.Abs(z) > Half) continue;
+                if (HeightLocal(x, z) > WaterY + 0.2f) continue;
+                if (Bridges.Any(b => b.TryGetHeight(new Vector3(w.X, 0f, w.Y), 0f, out _))) continue;
+                yield return (w, e);
+            }
+    }
+
     public float HeightLocal(float x, float z)
     {
         float fx = (x + Half) / Cell, fz = (z + Half) / Cell;
@@ -347,6 +365,16 @@ public sealed partial class Zone : IDisposable
     /// <summary>I pezzi del tratto che stanno dentro il pezzo di territorio, con i punti di taglio esatti sul bordo.</summary>
     private void BuildRoad(MeshBuilder mb, RoadEdge e)
     {
+        foreach (var r in RoadRuns(e))
+            if (r.Count >= 2) Strip(mb, e, r);
+    }
+
+    /// <summary>
+    /// Le distanze lungo il tratto (griglia globale più i punti di taglio sul bordo) dei pezzi di strada dentro questo
+    /// pezzo di territorio: ogni lista è un tratto continuo da disegnare.
+    /// </summary>
+    public List<List<float>> RoadRuns(RoadEdge e)
+    {
         bool In(float s)
         {
             var p = e.At(s);
@@ -358,25 +386,47 @@ public sealed partial class Zone : IDisposable
         int n = Math.Max(1, (int)MathF.Ceiling(e.Length / RoadStep));
         bool prevIn = false;
         float prevS = 0f;
+        // Quanto il punto è lontano dal quadrato del pezzo (0 dentro)
+        float Outside(float s)
+        {
+            var p = e.At(s);
+            return MathF.Max(MathF.Max(MathF.Abs(p.X - Origin.X), MathF.Abs(p.Y - Origin.Z)) - Half, 0f);
+        }
+
         for (int k = 0; k <= n; k++)
         {
             float s = MathF.Min(k * RoadStep, e.Length);
             bool inside = In(s);
-            if (k > 0 && inside != prevIn)
+            if (k > 0)
             {
-                // Bisezione: il punto in cui la strada attraversa il bordo (identico per i due pezzi)
-                float a = prevS, b = s;
-                for (int it = 0; it < 24; it++)
+                // Vicino al bordo si guarda anche tra un campione e l'altro: una strada che taglia di sbieco l'angolo
+                // del pezzo ci può entrare e uscire tra due campioni (e nessun pezzo la disegnerebbe)
+                int sub = Outside(prevS) < 1.5f || Outside(s) < 1.5f ? 8 : 1;
+                float sp = prevS;
+                bool ip = prevIn;
+                for (int j = 1; j <= sub; j++)
                 {
-                    float m = (a + b) * 0.5f;
-                    if (In(m) == prevIn) a = m; else b = m;
-                }
-                float edge = (a + b) * 0.5f;
-                if (inside) runs.Add(run = new List<float> { edge });
-                else
-                {
-                    run?.Add(edge);
-                    run = null;
+                    float sj = j == sub ? s : prevS + (s - prevS) * j / sub;
+                    bool ij = j == sub ? inside : In(sj);
+                    if (ij != ip)
+                    {
+                        // Bisezione: il punto in cui la strada attraversa il bordo (identico per i due pezzi)
+                        float a = sp, b = sj;
+                        for (int it = 0; it < 24; it++)
+                        {
+                            float m = (a + b) * 0.5f;
+                            if (In(m) == ip) a = m; else b = m;
+                        }
+                        float edge = (a + b) * 0.5f;
+                        if (ij) runs.Add(run = new List<float> { edge });
+                        else
+                        {
+                            run?.Add(edge);
+                            run = null;
+                        }
+                    }
+                    sp = sj;
+                    ip = ij;
                 }
             }
             if (inside)
@@ -387,8 +437,7 @@ public sealed partial class Zone : IDisposable
             prevIn = inside;
             prevS = s;
         }
-        foreach (var r in runs)
-            if (r.Count >= 2) Strip(mb, e, r);
+        return runs;
     }
 
     /// <summary>

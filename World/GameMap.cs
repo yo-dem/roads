@@ -201,6 +201,14 @@ public sealed class GameMap
         // 3. Le strade, tracciate dal gioco
         RoadBuilder.Build(net, map);
         Railway.Current = Railway.Build(net, map); // la ferrovia della città, dopo le strade
+        var gaps = net.FindGaps();
+        if (gaps.Count > 0)
+        {
+            Console.WriteLine($"ATTENZIONE: {gaps.Count} punti di strada senza fondo (strada spezzata):");
+            foreach (var (p, e, s) in gaps.Take(40))
+                Console.WriteLine($"  {p.X:F1}, {p.Y:F1}  ({e.Kind}, tratto {e.Id}, s={s:F1}/{e.Length:F0}, "
+                                  + $"fiume a {Terrain.RiverDistance(p.X, p.Y):F1})");
+        }
         return map;
     }
 

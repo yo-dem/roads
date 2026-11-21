@@ -420,6 +420,73 @@ public sealed class RoadNetwork
         return found;
     }
 
+    /// <summary>
+    /// Verifica: i punti delle strade dove la carreggiata non verrebbe disegnata (terreno a livello dell'acqua) e
+    /// nessun ponte la copre. Dovrebbe essere sempre vuota: un punto qui è una strada spezzata.
+    /// </summary>
+    public List<(Vector2 Point, RoadEdge Edge, float S)> FindGaps()
+    {
+        var gaps = new List<(Vector2, RoadEdge, float)>();
+        foreach (var e in Edges)
+            for (float s = 0f; s <= e.Length; s += 0.5f)
+            {
+                Vector2 p = e.At(s);
+                // Il terreno è una griglia di passo Zone.Cell: sotto la strada conta anche il punto di griglia vicino
+                // (un argine scavato a un passo di distanza abbassa il triangolo su cui poggia la strada)
+                const float g = Zone.Cell;
+                float low = MathF.Min(Terrain.Height(p.X, p.Y),
+                            MathF.Min(MathF.Min(Terrain.Height(p.X + g, p.Y), Terrain.Height(p.X - g, p.Y)),
+                                      MathF.Min(Terrain.Height(p.X, p.Y + g), Terrain.Height(p.X, p.Y - g))));
+                if (low > Zone.WaterY + 0.2f) continue;
+                bool bridged = Bridges.Any(b =>
+                {
+                    Vector2 d = p - b.Center;
+                    return MathF.Abs(Vector2.Dot(d, b.Dir)) <= b.Span * 0.5f + 0.3f
+                           && MathF.Abs(Vector2.Dot(d, new Vector2(-b.Dir.Y, b.Dir.X))) <= b.HalfWidth + 0.3f;
+                });
+                if (!bridged) gaps.Add((p, e, s));
+            }
+        return gaps;
+    }
+
+    /// <summary>
+    /// Verifica geometrica: difetti che fanno sembrare una strada spezzata o sdoppiata. Elenca: tratti di strade
+    /// diverse che corrono affiancati e accavallati (lontano dagli incroci), capi dei tratti che non coincidono con il
+    /// loro nodo, salti tra punti consecutivi.
+    /// </summary>
+    public List<string> FindDefects()
+    {
+        var found = new List<string>();
+        foreach (var e in Edges)
+        {
+            if (Vector2.Distance(e.Points[0], e.A.Pos) > 0.05f || Vector2.Distance(e.Points[^1], e.B.Pos) > 0.05f)
+                found.Add($"capo staccato dal nodo: tratto {e.Id} vicino a {e.Points[0]}");
+            for (int k = 1; k < e.Count; k++)
+                if (Vector2.Distance(e.Points[k - 1], e.Points[k]) > 3.5f)
+                    found.Add($"salto di {Vector2.Distance(e.Points[k - 1], e.Points[k]):F1} nel tratto {e.Id} a {e.Points[k]}");
+        }
+        // Accavallamenti: un punto di un tratto dentro la carreggiata di un altro tratto, lontano dai nodi
+        foreach (var e in Edges)
+            for (int k = 2; k < e.Count - 2; k += 2)
+            {
+                Vector2 p = e.Points[k];
+                if (Nodes.Any(n => n.Degree > 0 && Vector2.Distance(n.Pos, p) < n.HubRadius + 4f)) continue;
+                foreach (int si in CellSegs(p.X, p.Y))
+                {
+                    var g = _segs[si];
+                    if (g.Edge == null || g.Edge == e) continue;
+                    float d = SegDistance(p, g.A, g.B, out _);
+                    if (d < e.HalfWidth + g.HalfWidth - 0.2f)
+                    {
+                        found.Add($"strade accavallate: tratto {e.Id} ({e.Kind}) e {g.Edge.Id} ({g.Edge.Kind}) a {p.X:F0}, {p.Y:F0} (distanza {d:F1})");
+                        k += 30; // un avviso per tratto basta
+                        break;
+                    }
+                }
+            }
+        return found;
+    }
+
     /// <summary>Altezza del cordolo dello spartitraffico dei viali (l'aiuola rialzata al centro).</summary>
     public const float MedianHeight = 0.14f;
     /// <summary>Lo spartitraffico si interrompe a questa distanza dagli incroci (oltre il bordo degli slarghi).</summary>

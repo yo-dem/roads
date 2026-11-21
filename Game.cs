@@ -33,6 +33,7 @@ public sealed class DebugOptions
     public string? Map;            // file della mappa (di serie Assets/Maps/isola.txt)
     public bool BigMap;            // parte con la mappa grande aperta (test)
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
+    public bool VerifyRoads;       // controlla tutte le strade e esce (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -158,6 +159,44 @@ public sealed partial class Game : IDisposable
                           + $"{map.Landmarks.Count} punti di riferimento)");
         _bigMap = _debug.BigMap;
         _waypoint = _debug.Waypoint;
+        if (_debug.VerifyRoads)
+        {
+            // Si generano (in parallelo, senza scheda grafica) tutti i pezzi attraversati da strade
+            var cells = RoadNetwork.Current.Edges.SelectMany(e => e.Points)
+                .Select(p => ((int)MathF.Round(p.X / Terrain.ChunkSize), (int)MathF.Round(p.Y / Terrain.ChunkSize)))
+                .Distinct().ToList();
+            var zones = cells.AsParallel().Select(c => new Zone(c.Item1, c.Item2)).ToList();
+            var holes = zones.SelectMany(z => z.RoadHoles()).ToList();
+            Console.WriteLine($"Verifica strade: {cells.Count} pezzi, {holes.Count} punti di strada mancanti");
+            // Cuciture: per ogni tratto, i pezzi che lo disegnano devono coprirlo tutto, da un capo all'altro
+            int seams = 0;
+            foreach (var e in RoadNetwork.Current.Edges)
+            {
+                var spans = zones.SelectMany(z => z.RoadRuns(e)).Where(r => r.Count >= 2).Select(r => (A: r[0], B: r[^1]))
+                                 .OrderBy(r => r.A).ToList();
+                float reached = 0f;
+                foreach (var (a, b) in spans)
+                {
+                    if (a > reached + 0.05f && seams++ < 30)
+                        Console.WriteLine($"  cucitura scoperta nel tratto {e.Id} ({e.Kind}) da s={reached:F2} a {a:F2}, a {e.At(reached)}");
+                    reached = MathF.Max(reached, b);
+                }
+                if (reached < e.Length - 0.05f && seams++ < 30)
+                    Console.WriteLine($"  cucitura scoperta in fondo al tratto {e.Id} ({e.Kind}) da s={reached:F2} a {e.Length:F2}, a {e.At(reached)}");
+            }
+            Console.WriteLine($"Verifica cuciture: {seams} tratti di strada non disegnati da nessun pezzo");
+            var defects = RoadNetwork.Current.FindDefects();
+            Console.WriteLine($"Verifica geometria: {defects.Count} difetti");
+            foreach (var d in defects.Take(30)) Console.WriteLine("  " + d);
+            foreach (var g in holes.GroupBy(h => (h.Edge.Id, (int)(h.Point.X / 8f), (int)(h.Point.Y / 8f))).Take(40))
+            {
+                var h = g.First();
+                Console.WriteLine($"  buco a {h.Point.X:F1}, {h.Point.Y:F1} ({h.Edge.Kind}, tratto {h.Edge.Id}, {g.Count()} punti, "
+                                  + $"fiume a {Terrain.RiverDistance(h.Point.X, h.Point.Y):F1}, quota {Terrain.Height(h.Point.X, h.Point.Y):F2})");
+            }
+            _window.Close();
+            return;
+        }
 
         // Si parte sulla strada più vicina alla cella di partenza (o al punto chiesto dai test), rivolti verso la città
         var (start, startYaw) = StartOnRoad(_debug.Start ?? Vector2.Zero);

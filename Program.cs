@@ -26,6 +26,7 @@ public static class Program
     ///   --map file.txt            usa un'altra mappa (di serie Assets/Maps/isola.txt)
     ///   --mappa-grande            parte con la mappa dell'isola aperta (tasto M)
     ///   --punto x,z               punto da raggiungere già scelto (come un clic sulla mappa)
+    ///   --verifica-strade         genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
     /// </summary>
     public static void Main(string[] args)
     {
@@ -106,6 +107,9 @@ public static class Program
                     break;
                 case "--mappa-grande":
                     d.BigMap = true;
+                    break;
+                case "--verifica-strade":
+                    d.VerifyRoads = true;
                     break;
                 case "--punto" when i + 1 < args.Length:
                     var wp = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
