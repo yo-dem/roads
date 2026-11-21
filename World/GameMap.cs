@@ -2,17 +2,17 @@ using System.Numerics;
 
 namespace Roads.World;
 
-/// <summary>Carattere di una cella della mappa (un incrocio e il territorio attorno, 96 x 96).</summary>
-public enum District { Sea, Meadow, Blossom, Autumn, Snowy, Town, City }
+/// <summary>Carattere di una cella della mappa (96 x 96): mare o uno dei biomi.</summary>
+public enum District { Sea, Meadow, Blossom, Autumn, Snowy }
 
 /// <summary>Valori del territorio in un punto, sfumati tra le celle vicine.</summary>
 public readonly record struct MapSample(float Meadow, float Blossom, float Autumn, float Snowy, float Land, float Urban);
 
 /// <summary>
-/// La mappa disegnata a mano (file di testo in Assets/Maps): quali celle sono terra o mare e di che quartiere,
-/// quali strade collegano gli incroci, dove scorrono i fiumi e dove stanno i punti di riferimento.
-/// Il formato è descritto in testa al file della mappa. Fuori dalla mappa c'è il mare.
-/// Gli indici (i, j) sono quelli degli incroci nel mondo: l'incrocio (0, 0) è quello della partenza.
+/// La mappa disegnata a mano (file di testo in Assets/Maps): quali celle sono terra o mare e di che bioma, dove
+/// stanno la città, i paesi e i punti di riferimento, dove scorrono i fiumi. Le strade NON si disegnano: le traccia
+/// il gioco (<see cref="RoadBuilder"/>) partendo da dove stanno città e paesi. Il formato è descritto in testa al
+/// file. Fuori dalla mappa c'è il mare. Gli indici (i, j) delle celle sono relativi alla partenza (cella 0, 0).
 /// </summary>
 public sealed class GameMap
 {
@@ -27,10 +27,10 @@ public sealed class GameMap
 
     private int _w, _h;
     private District[,] _cells = new District[0, 0];
-    private bool[,] _east = new bool[0, 0], _south = new bool[0, 0];
-    private readonly HashSet<int> _rivers = new();
+    private readonly List<int> _rivers = new();
     private readonly List<LandmarkSite> _landmarks = new();
     public IReadOnlyList<LandmarkSite> Landmarks => _landmarks;
+    public IReadOnlyList<int> RiverColumns => _rivers;
 
     // ------------------------------------------------------------------ interrogazioni
 
@@ -40,16 +40,7 @@ public sealed class GameMap
 
     public bool IsLand(int i, int j) => At(i, j) != District.Sea;
 
-    /// <summary>La strada dall'incrocio (i, j) verso est esiste?</summary>
-    public bool East(int i, int j) => Inside(i, j) && _east[i - MinI, j - MinJ];
-
-    /// <summary>La strada dall'incrocio (i, j) verso sud esiste?</summary>
-    public bool South(int i, int j) => Inside(i, j) && _south[i - MinI, j - MinJ];
-
     public bool HasRiver(int column) => _rivers.Contains(column);
-
-    /// <summary>Quanto è costruita una cella: 0 campagna, circa 0.5 paese, 1 città.</summary>
-    public static float Density(District d) => d switch { District.City => 1f, District.Town => 0.55f, _ => 0f };
 
     public static string DistrictName(District d) => d switch
     {
@@ -57,14 +48,13 @@ public sealed class GameMap
         District.Blossom => "Bosco fiorito",
         District.Autumn => "Bosco d'autunno",
         District.Snowy => "Valle innevata",
-        District.Town => "Paese",
-        District.City => "Città",
         _ => "Mare",
     };
 
     /// <summary>
-    /// Pesi di biomi, terra e città nel punto. Ogni cella è "pura" vicino al suo incrocio e sfuma nelle vicine
-    /// a metà strada; le coordinate sono un po' deformate dal rumore, così i confini (e la costa) non sono dritti.
+    /// Pesi di biomi e terra nel punto (più la densità urbana dei centri abitati). Ogni cella è "pura" vicino al suo
+    /// centro e sfuma nelle vicine a metà strada; le coordinate sono un po' deformate dal rumore, così i confini (e la
+    /// costa) non sono dritti.
     /// </summary>
     public MapSample Sample(float x, float z)
     {
@@ -75,7 +65,7 @@ public sealed class GameMap
         int i0 = (int)MathF.Floor(u), j0 = (int)MathF.Floor(v);
         float fx = Noise.Smooth(0.22f, 0.78f, u - i0), fz = Noise.Smooth(0.22f, 0.78f, v - j0);
 
-        float meadow = 0f, blossom = 0f, autumn = 0f, snowy = 0f, land = 0f, urban = 0f;
+        float meadow = 0f, blossom = 0f, autumn = 0f, snowy = 0f, land = 0f;
         for (int k = 0; k < 4; k++)
         {
             int di = k & 1, dj = k >> 1;
@@ -83,26 +73,27 @@ public sealed class GameMap
             if (w <= 0f) continue;
             District d = At(i0 + di, j0 + dj);
             if (d != District.Sea) land += w;
-            urban += w * Density(d);
             switch (d)
             {
                 case District.Blossom: blossom += w; break;
                 case District.Autumn: autumn += w; break;
                 case District.Snowy: snowy += w; break;
-                default: meadow += w; break; // prato, paese, città (e il mare, che non si vede)
+                default: meadow += w; break; // prato (e il mare, che non si vede)
             }
         }
-        return new MapSample(meadow, blossom, autumn, snowy, land, urban);
+        return new MapSample(meadow, blossom, autumn, snowy, land, RoadNetwork.Current.Urban(x, z));
     }
 
     // ------------------------------------------------------------------ caricamento
+
+    private enum SymbolKind { Landmark, City, Town }
 
     /// <summary>Carica la mappa dal file e la rende quella in uso. Gli errori di formato fermano il gioco con un messaggio chiaro.</summary>
     public static GameMap Load(string path)
     {
         if (!File.Exists(path)) throw new FileNotFoundException($"Mappa non trovata: {path}");
         var map = new GameMap();
-        var legend = new Dictionary<char, (LandmarkKind Kind, string Name)>();
+        var legend = new Dictionary<char, (SymbolKind Symbol, LandmarkKind Kind, string Name)>();
         int startCol = -1, startRow = -1;
         var riverCols = new List<int>();
         var grid = new List<string>();
@@ -117,14 +108,19 @@ public sealed class GameMap
                 if (t.Length == 0 || t.StartsWith('#')) continue;
                 if (t == "[mappa]") { inGrid = true; continue; }
                 int colon = t.IndexOf(':');
-                if (t.Length > 2 && char.IsUpper(t[0]) && t[1..].TrimStart().StartsWith('='))
+                if (t.Length > 2 && !char.IsWhiteSpace(t[0]) && t[1..].TrimStart().StartsWith('='))
                 {
-                    // Legenda dei punti di riferimento:  F = faro : Faro di Capo Sud
+                    // Legenda:  F = faro : Faro di Capo Sud     1 = paese : Borgo Est     C = città : Roda
                     string rest = t[(t.IndexOf('=') + 1)..];
                     int sep = rest.IndexOf(':');
                     string kind = (sep >= 0 ? rest[..sep] : rest).Trim().ToLowerInvariant();
                     string name = sep >= 0 ? rest[(sep + 1)..].Trim() : kind;
-                    legend[t[0]] = (ParseKind(kind, path), name);
+                    legend[t[0]] = kind switch
+                    {
+                        "città" or "citta" => (SymbolKind.City, default, name),
+                        "paese" or "borgo" => (SymbolKind.Town, default, name),
+                        _ => (SymbolKind.Landmark, ParseKind(kind, path), name),
+                    };
                 }
                 else if (colon > 0)
                 {
@@ -151,70 +147,96 @@ public sealed class GameMap
         if (grid.Count == 0) throw new InvalidDataException($"{path}: manca la griglia dopo [mappa]");
         if (startCol < 0) throw new InvalidDataException($"{path}: manca 'partenza: colonna, riga'");
 
-        char Ch(int x, int y) => y < grid.Count && x < grid[y].Length ? grid[y][x] : ' ';
-
         map._w = (grid.Max(l => l.Length) + 1) / 2;
         map._h = (grid.Count + 1) / 2;
         map.MinI = -startCol;
         map.MinJ = -startRow;
         map._cells = new District[map._w, map._h];
-        map._east = new bool[map._w, map._h];
-        map._south = new bool[map._w, map._h];
 
-        for (int c = 0; c < map._w; c++)
-            for (int r = 0; r < map._h; r++)
-                map._cells[c, r] = ParseDistrict(Ch(2 * c, 2 * r), path, c, r);
-
-        for (int c = 0; c < map._w; c++)
-            for (int r = 0; r < map._h; r++)
+        // Le celle stanno nelle posizioni pari; un simbolo della legenda può stare ovunque (anche tra le celle)
+        var symbols = new List<(char Key, float Col, float Row)>();
+        for (int y = 0; y < grid.Count; y++)
+            for (int x = 0; x < grid[y].Length; x++)
             {
-                bool land = map._cells[c, r] != District.Sea;
-                if (Ch(2 * c + 1, 2 * r) == '-')
+                char ch = grid[y][x];
+                if (legend.ContainsKey(ch))
                 {
-                    if (land && c + 1 < map._w && map._cells[c + 1, r] != District.Sea) map._east[c, r] = true;
-                    else Console.WriteLine($"Mappa: strada verso est dalla cella ({c},{r}) finisce in mare, ignorata");
+                    symbols.Add((ch, x / 2f, y / 2f));
+                    if (x % 2 == 0 && y % 2 == 0) map._cells[x / 2, y / 2] = District.Meadow; // sopra una cella: prato
+                    continue;
                 }
-                if (Ch(2 * c, 2 * r + 1) == '|')
-                {
-                    if (land && r + 1 < map._h && map._cells[c, r + 1] != District.Sea) map._south[c, r] = true;
-                    else Console.WriteLine($"Mappa: strada verso sud dalla cella ({c},{r}) finisce in mare, ignorata");
-                }
+                if (x % 2 == 0 && y % 2 == 0) map._cells[x / 2, y / 2] = ParseDistrict(ch, path, x / 2, y / 2);
+                else if (ch is not (' ' or '-' or '|' or '.'))
+                    Console.WriteLine($"Mappa: simbolo '{ch}' (riga {y + 1}) non è nella legenda, ignorato");
             }
 
         if (map.At(0, 0) == District.Sea) throw new InvalidDataException($"{path}: la partenza ({startCol},{startRow}) è in mare");
-        if (!map.East(0, 0)) Console.WriteLine("Mappa: attenzione, dalla partenza non c'è una strada verso est (l'auto parte verso est)");
         foreach (int col in riverCols) map._rivers.Add(col - startCol);
 
         Current = map;
+        const float C = Terrain.ChunkSize;
+        Vector2 World(float col, float row) => new((col - startCol) * C, (row - startRow) * C);
 
-        // Punti di riferimento: al centro dell'isolato tra quattro incroci (lontano da strade e fiumi).
-        // Le posizioni si calcolano adesso perché dipendono da strade e fiumi della mappa appena impostata.
-        for (int c = 0; c < map._w; c++)
-            for (int r = 0; r < map._h; r++)
-            {
-                char key = Ch(2 * c + 1, 2 * r + 1);
-                if (key == ' ' || key == '.') continue;
-                if (!legend.TryGetValue(key, out var def))
-                {
-                    Console.WriteLine($"Mappa: il punto di riferimento '{key}' non è nella legenda, ignorato");
-                    continue;
-                }
-                var site = LandmarkSite.Place(key, def.Kind, def.Name, c - startCol, r - startRow);
-                if (site != null) map._landmarks.Add(site);
-                else Console.WriteLine($"Mappa: nessun posto libero per '{def.Name}', ignorato");
-            }
+        // 1. Centri abitati: la loro densità serve già per l'altezza del terreno (le città sono spianate)
+        var net = new RoadNetwork();
+        RoadNetwork.Current = net;
+        foreach (var (key, col, row) in symbols)
+        {
+            var def = legend[key];
+            if (def.Symbol == SymbolKind.Landmark) continue;
+            net.Settlements.Add(new Settlement { Name = def.Name, City = def.Symbol == SymbolKind.City, Pos = World(col, row) });
+        }
+        foreach (var s in net.Settlements) s.Pos = FitSettlement(s);
+
+        // 2. Punti di riferimento: attorno a dove li mette la mappa, su terra asciutta lontana dai fiumi
+        foreach (var (key, col, row) in symbols)
+        {
+            var def = legend[key];
+            if (def.Symbol != SymbolKind.Landmark) continue;
+            var site = LandmarkSite.Place(key, def.Kind, def.Name, World(col, row), (int)(col * 2), (int)(row * 2));
+            if (site != null) map._landmarks.Add(site);
+            else Console.WriteLine($"Mappa: nessun posto libero per '{def.Name}', ignorato");
+        }
+
+        // 3. Le strade, tracciate dal gioco
+        RoadBuilder.Build(net, map);
         return map;
+    }
+
+    /// <summary>
+    /// Sposta un centro abitato (di poco) dove c'è spazio: terra tutto attorno e niente fiume nel mezzo del paese.
+    /// La città invece resta dov'è: un fiume che la attraversa è bello (ci saranno i ponti).
+    /// </summary>
+    private static Vector2 FitSettlement(Settlement s)
+    {
+        if (s.City) return s.Pos;
+        Vector2 best = s.Pos;
+        float bestScore = float.MinValue;
+        for (int k = 0; k < 160; k++)
+        {
+            float a = k * 2.39996f, d = MathF.Sqrt(k) * 6f;
+            var p = s.Pos + new Vector2(MathF.Cos(a), MathF.Sin(a)) * d;
+            float land = 1f;
+            for (int m = 0; m < 12; m++)
+            {
+                float b = m * MathF.Tau / 12f;
+                var q = p + new Vector2(MathF.Cos(b), MathF.Sin(b)) * 58f;
+                land = MathF.Min(land, Current.Sample(q.X, q.Y).Land);
+            }
+            float river = MathF.Min(Terrain.RiverDistance(p.X, p.Y), 70f);
+            float score = (land >= 0.97f ? 100f : land * 50f) + river - d * 0.4f;
+            if (score > bestScore) { bestScore = score; best = p; }
+        }
+        return best;
     }
 
     private static District ParseDistrict(char ch, string path, int c, int r) => ch switch
     {
         '~' or ' ' => District.Sea,
-        'p' => District.Meadow,
+        'p' or 's' or 'c' => District.Meadow, // s/c: i vecchi paese/città, ora si mettono con la legenda
         'f' => District.Blossom,
         'a' => District.Autumn,
         'n' => District.Snowy,
-        's' => District.Town,
-        'c' => District.City,
         _ => throw new InvalidDataException($"{path}: carattere '{ch}' non valido nella cella ({c},{r})"),
     };
 
@@ -226,7 +248,7 @@ public sealed class GameMap
         "torre" or "torre dell'acqua" or "acquedotto" => LandmarkKind.WaterTower,
         "antenna" or "ripetitore" => LandmarkKind.Antenna,
         "campanile" => LandmarkKind.BellTower,
-        _ => throw new InvalidDataException($"{path}: tipo di punto di riferimento sconosciuto '{kind}' "
-                                            + "(validi: faro, mulino, castello, torre, antenna, campanile)"),
+        _ => throw new InvalidDataException($"{path}: tipo sconosciuto '{kind}' nella legenda "
+                                            + "(validi: città, paese, faro, mulino, castello, torre, antenna, campanile)"),
     };
 }

@@ -52,14 +52,13 @@ public sealed class WorldMap : IDisposable
             _landmarks.Add(new LandmarkModel(gl, site));
     }
 
-    /// <summary>La strada dall'incrocio (x, z) verso la direzione data esiste? (la disegna la mappa)</summary>
-    public static bool EdgeOpen(int x, int z, Dir d) => d switch
+    /// <summary>Il fondo della strada nel punto (null fuori strada o su un ponte): sugli sterrati le gomme alzano polvere.</summary>
+    public RoadKind? SurfaceAt(Vector3 p)
     {
-        Dir.East => GameMap.Current.East(x, z),
-        Dir.West => GameMap.Current.East(x - 1, z),
-        Dir.South => GameMap.Current.South(x, z),
-        _ => GameMap.Current.South(x, z - 1),
-    };
+        foreach (var b in ZoneAt(p)?.Bridges ?? [])
+            if (b.TryGetHeight(p, 0f, out _)) return null;
+        return RoadNetwork.Current.KindAt(new Vector2(p.X, p.Z));
+    }
 
     private void Register(Zone zone)
     {

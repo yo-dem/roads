@@ -152,7 +152,7 @@ public sealed class Car : IDisposable
     }
 
     private float _speed, _yawRate, _spin, _steer, _time, _accel;
-    private float _travelYaw, _grip = GripFull, _smokeTimer;
+    private float _travelYaw, _grip = GripFull, _smokeTimer, _dirtTimer;
     private bool _drifting;
     private float _driftTime, _steerIn, _gasIn, _lineU, _flickSign, _lastHeading;
     private DriftLine? _line;
@@ -822,6 +822,18 @@ public sealed class Car : IDisposable
             foreach (float sx in new[] { -0.42f, 0.42f })
                 foreach (float sz in new[] { -0.5f, 0.5f })
                     fx.Dust(Vector3.Transform(new Vector3(sx, 0.05f, sz), RootMatrix), 1);
+        }
+
+        // Sullo sterrato le gomme posteriori alzano polvere: più fitta e lunga con la velocità e in derapata
+        _dirtTimer -= dt;
+        float pace = MathF.Abs(_speed);
+        if (pace > 1.2f && _dirtTimer <= 0f && world.SurfaceAt(Position) == RoadKind.Dirt)
+        {
+            float strength = Math.Clamp(pace / 9f, 0.2f, 1f) * (Sliding ? 1.4f : 1f);
+            _dirtTimer = Noise.Lerp(0.16f, 0.06f, Math.Clamp(pace / 9f, 0f, 1f));
+            Vector3 back = -Forward * MathF.Sign(_speed);
+            foreach (float sx in new[] { -0.42f, 0.42f })
+                fx.RoadDust(Vector3.Transform(new Vector3(sx, 0.05f, -0.5f), RootMatrix), back, strength);
         }
 
         // Sbuffi dallo scarico, più fitti in accelerazione

@@ -63,19 +63,17 @@ public sealed class LandmarkSite
     };
 
     /// <summary>
-    /// Cerca il posto nell'isolato tra gli incroci (i, j) e (i+1, j+1): parte dal centro e si allarga a spirale
-    /// finché non trova terra asciutta, lontana da strade e fiumi. Null se l'isolato non ha spazio.
+    /// Cerca il posto attorno al punto indicato dalla mappa (<paramref name="center"/>): parte da lì e si allarga a spirale
+    /// finché non trova terra asciutta, lontana dai fiumi e dalla piazza delle città. Null se non c'è spazio.
     /// </summary>
-    public static LandmarkSite? Place(char key, LandmarkKind kind, string name, int i, int j)
+    public static LandmarkSite? Place(char key, LandmarkKind kind, string name, Vector2 center, int i, int j)
     {
-        const float C = Terrain.ChunkSize;
         float r = RadiusOf(kind);
-        var center = new Vector2((i + 0.5f) * C, (j + 0.5f) * C);
         for (int k = 0; k < 400; k++)
         {
             float a = k * 2.39996f, dist = MathF.Sqrt(k) * 2.2f; // spirale di Fermat: copre l'area in modo uniforme
             var p = center + new Vector2(MathF.Cos(a), MathF.Sin(a)) * dist;
-            if (Terrain.RoadDistance(p.X, p.Y) < r + 4f) continue;
+            if (RoadNetwork.Current.Settlements.Any(s => Vector2.Distance(p, s.Pos) < (s.City ? 20f : 12f) + r)) continue;
             if (Terrain.RiverDistance(p.X, p.Y) < r + Zone.RiverHalf + 3f) continue;
             if (GameMap.Current.Sample(p.X, p.Y).Land < 0.9f) continue;
             float yaw = kind == LandmarkKind.Castle

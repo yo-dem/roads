@@ -27,115 +27,18 @@ public static class Terrain
 
     // ------------------------------------------------------------------ strade
 
-    // La rete stradale segue una griglia di passo ChunkSize: incroci al centro di ogni pezzo, tratti
-    // est-ovest e nord-sud tra incroci vicini (se aperti, come prima tra le isole). Ogni tratto serpeggia
-    // con un'ondulazione che si annulla agli incroci, così le strade si incontrano sempre.
-
-    private const float RoadWobble = 6f;
-
-    private static float Wobble(float t, int a, int b, int salt)
-    {
-        float env = MathF.Sin(MathF.PI * t); // 0 agli incroci
-        float sign = Noise.Hash01(a, b, salt) < 0.5f ? -1f : 1f;
-        float amp = RoadWobble * (0.4f + 0.6f * Noise.Hash01(a, b, salt + 1));
-        return env * (sign * amp + 1.4f * MathF.Sin(MathF.Tau * 2f * t + Noise.Hash01(a, b, salt + 2) * 6f));
-    }
+    // Le strade sono quelle della rete (RoadNetwork): una spezzata per tratto, con slarghi agli incroci.
 
     /// <summary>
-    /// Quanto serpeggia il tratto tra due incroci: in campagna tutto, in paese meno, in città le strade sono dritte.
-    /// Dipende solo dai due incroci, quindi è uguale per tutti i pezzi che il tratto attraversa.
+    /// Distanza dalla strada più vicina riportata alla larghezza di riferimento: vale <see cref="Zone.PathHalf"/> sul
+    /// bordo della carreggiata qualunque sia la larghezza della strada (meno dentro, di più fuori).
     /// </summary>
-    private static float Winding(int i0, int j0, int i1, int j1)
-    {
-        var map = GameMap.Current;
-        return 1f - MathF.Max(GameMap.Density(map.At(i0, j0)), GameMap.Density(map.At(i1, j1)));
-    }
-
-    /// <summary>Quota z della strada est-ovest senza tener conto dei ponti (solo l'ondulazione).</summary>
-    private static float RawRoadZ(int j, float x)
-    {
-        int i = (int)MathF.Floor(x / ChunkSize);
-        float t = x / ChunkSize - i;
-        return j * ChunkSize + Wobble(t, i, j, 501) * Winding(i, j, i + 1, j);
-    }
-
-    // Vicino a un ponte la strada smette di serpeggiare: dritta e allineata al ponte (est-ovest)
-    private const float BridgeStraight = 7f;   // tratto perfettamente dritto per lato, dal centro del ponte
-    private const float BridgeBlend = 13f;     // da qui in poi torna a serpeggiare
-
-    /// <summary>Punto x in cui il fiume della colonna attraversa la strada della riga (dove sta il ponte).</summary>
-    public static float BridgeX(int column, int row)
-    {
-        float x = RiverX(column, row * ChunkSize);
-        for (int k = 0; k < 3; k++)
-            x = RiverX(column, RawRoadZ(row, x));
-        return x;
-    }
-
-    /// <summary>
-    /// Quota z della strada est-ovest della riga <paramref name="j"/> nel punto x: serpeggia tra gli incroci,
-    /// ma attorno a ogni attraversamento di fiume si raddrizza, così entra ed esce dal ponte in linea retta.
-    /// </summary>
-    public static float RoadZ(int j, float x)
-    {
-        float z = RawRoadZ(j, x);
-        int c = (int)MathF.Round(x / ChunkSize);
-        for (int k = c - 1; k <= c + 1; k++)
-        {
-            if (!HasRiver(k)) continue;
-            float xc = BridgeX(k, j), d = MathF.Abs(x - xc);
-            if (d >= BridgeBlend) continue;
-            z = Noise.Lerp(z, RawRoadZ(j, xc), 1f - Noise.Smooth(BridgeStraight, BridgeBlend, d));
-        }
-        return z;
-    }
-
-    /// <summary>Quota x della strada nord-sud della colonna <paramref name="i"/> nel punto z.</summary>
-    public static float RoadX(int i, float z)
-    {
-        int j = (int)MathF.Floor(z / ChunkSize);
-        float t = z / ChunkSize - j;
-        return i * ChunkSize + Wobble(t, i, j, 701) * Winding(i, j, i, j + 1);
-    }
-
-    /// <summary>All'incrocio (i, j) le strade si incontrano (o curvano): lì c'è uno slargo rotondo.</summary>
-    public static bool HasHub(int i, int j)
-    {
-        bool e = WorldMap.EdgeOpen(i, j, Dir.East), w = WorldMap.EdgeOpen(i, j, Dir.West);
-        bool n = WorldMap.EdgeOpen(i, j, Dir.North), s = WorldMap.EdgeOpen(i, j, Dir.South);
-        int count = (e ? 1 : 0) + (w ? 1 : 0) + (n ? 1 : 0) + (s ? 1 : 0);
-        bool straight = count == 2 && ((e && w) || (n && s));
-        return count > 0 && !straight;
-    }
-
-    /// <summary>Distanza (approssimata) dalla strada più vicina.</summary>
-    public static float RoadDistance(float x, float z)
-    {
-        float best = float.MaxValue;
-
-        // Tratto est-ovest della riga più vicina
-        int j = (int)MathF.Round(z / ChunkSize), i = (int)MathF.Floor(x / ChunkSize);
-        if (WorldMap.EdgeOpen(i, j, Dir.East))
-            best = MathF.Abs(z - RoadZ(j, x));
-
-        // Tratto nord-sud della colonna più vicina
-        int ci = (int)MathF.Round(x / ChunkSize), cj = (int)MathF.Floor(z / ChunkSize);
-        if (WorldMap.EdgeOpen(ci, cj, Dir.South))
-            best = MathF.Min(best, MathF.Abs(x - RoadX(ci, z)));
-
-        // Slargo all'incrocio più vicino
-        if (HasHub(ci, j))
-        {
-            float dx = x - ci * ChunkSize, dz = z - j * ChunkSize;
-            best = MathF.Min(best, MathF.Max(0f, MathF.Sqrt(dx * dx + dz * dz) - Zone.HubRadius + Zone.PathHalf));
-        }
-        return best;
-    }
+    public static float RoadDistance(float x, float z) => RoadNetwork.Current.Distance(x, z);
 
     // ------------------------------------------------------------------ fiumi
 
-    // Fiumi nord-sud: alcune colonne hanno un fiume, spostato dalla strada nord-sud di 20-37 unità,
-    // quindi non la incontra mai; attraversa invece le strade est-ovest, dove nasce un ponte.
+    // Fiumi nord-sud: le colonne indicate dalla mappa hanno un fiume, spostato dal centro della colonna di
+    // 20-37 unità e un po' serpeggiante. Le strade lo attraversano solo di traverso, su un ponte.
 
     public static bool HasRiver(int column) => GameMap.Current.HasRiver(column); // i fiumi li decide la mappa
 
@@ -176,7 +79,7 @@ public static class Terrain
                 + 0.25f * ValueNoise(x / 14f, z / 14f, 12)
                 + 0.10f * ValueNoise(x / 5f, z / 5f, 13)
                 + 0.05f;
-        h *= 1f - 0.85f * s.Urban;
+        h *= 1f - 0.85f * Noise.Smooth(0f, 0.5f, s.Urban);
         h *= Noise.Smooth(Zone.PathHalf + 0.2f, Zone.PathHalf + 1.8f, RoadDistance(x, z));
         foreach (var l in GameMap.Current.Landmarks)
         {
@@ -197,8 +100,11 @@ public static class Terrain
         return (s.Meadow, s.Blossom, s.Autumn, s.Snowy);
     }
 
-    /// <summary>Quanto il punto è costruito (0 campagna, 1 centro città), sfumato tra le celle.</summary>
-    public static float Urban(float x, float z) => GameMap.Current.Sample(x, z).Urban;
+    /// <summary>Quanto il punto è costruito (0 campagna, 1 centro città): dai centri abitati della rete.</summary>
+    public static float Urban(float x, float z) => RoadNetwork.Current.Urban(x, z);
+
+    /// <summary>Quanto il punto è bosco fitto (macchie e fasce tra i paesi).</summary>
+    public static float Forest(float x, float z) => RoadNetwork.Current.Forest(x, z);
 
     // ------------------------------------------------------------------ marciapiedi
 
@@ -206,20 +112,17 @@ public static class Terrain
     public const float WalkRaise = 0.08f;   // gradino del cordolo sopra la carreggiata
     public const float WalkFrom = 0.35f;    // da questa densità urbana in su ci sono i marciapiedi
 
-    /// <summary>Vicino al centro di uno slargo i marciapiedi si interrompono (lì si incrociano le carreggiate).</summary>
-    public static bool NearHub(float x, float z)
-    {
-        int i = (int)MathF.Round(x / ChunkSize), j = (int)MathF.Round(z / ChunkSize);
-        if (!HasHub(i, j)) return false;
-        float dx = x - i * ChunkSize, dz = z - j * ChunkSize;
-        return dx * dx + dz * dz < (Zone.HubRadius + WalkWidth + 0.4f) * (Zone.HubRadius + WalkWidth + 0.4f);
-    }
+    /// <summary>Vicino a uno slargo (incrocio, piazza) i marciapiedi si interrompono: lì si incrociano le carreggiate.</summary>
+    public static bool NearHub(float x, float z) => RoadNetwork.Current.HubAt(new Vector2(x, z), WalkWidth + 0.4f) != null;
 
-    /// <summary>Il punto è su un marciapiede (fascia lungo le strade dei centri abitati)?</summary>
+    /// <summary>Il punto è su un marciapiede (fascia lungo le strade asfaltate dei centri abitati)?</summary>
     public static bool OnSidewalk(float x, float z)
     {
-        float d = RoadDistance(x, z);
-        if (d < Zone.PathHalf || d > Zone.PathHalf + WalkWidth) return false;
+        var p = new Vector2(x, z);
+        if (!RoadNetwork.Current.Nearest(p, 6f, out var hit) || !hit.Edge.Paved) return false;
+        float d = hit.Distance - hit.Edge.HalfWidth;
+        if (d < 0f || d > WalkWidth) return false;
+        if (RoadDistance(x, z) < Zone.PathHalf) return false; // sulla carreggiata di un'altra strada
         return Urban(x, z) >= WalkFrom && !NearHub(x, z);
     }
 
@@ -253,13 +156,15 @@ public static class Terrain
     private static readonly Palette AutumnPal = new(new(0.58f, 0.66f, 0.22f), new(0.90f, 0.78f, 0.52f), new(0.55f, 0.48f, 0.32f));
     private static readonly Palette SnowyPal = new(new(0.90f, 0.93f, 0.97f), new(0.78f, 0.72f, 0.62f), new(0.62f, 0.66f, 0.72f));
 
-    private static readonly Vector3 Asphalt = new(0.36f, 0.36f, 0.39f);
+    public static readonly Vector3 Asphalt = new(0.36f, 0.36f, 0.39f);
+    public static readonly Vector3 Paving = new(0.70f, 0.64f, 0.56f); // lastricato delle piazze
     private static readonly Vector3 Lawn = new(0.40f, 0.62f, 0.24f);
+    private static readonly Vector3 Concrete = new(0.60f, 0.59f, 0.56f);
     private static readonly Vector3 Sand = new(0.90f, 0.83f, 0.60f);
 
     /// <summary>
-    /// Colori del terreno nel punto, mescolati secondo i pesi dei biomi: in città le strade diventano asfalto e
-    /// l'erba un prato curato; sulla costa c'è la spiaggia.
+    /// Colori del terreno nel punto, mescolati secondo i pesi dei biomi: in città l'erba è un prato curato, sulla
+    /// costa c'è la spiaggia. Path è la terra battuta degli sterrati (le strade asfaltate hanno il loro colore).
     /// </summary>
     public static Palette PaletteAt(float x, float z)
     {
@@ -267,9 +172,10 @@ public static class Terrain
         Vector3 Mix(Func<Palette, Vector3> f) =>
             f(MeadowPal) * s.Meadow + f(BlossomPal) * s.Blossom + f(AutumnPal) * s.Autumn + f(SnowyPal) * s.Snowy;
         float town = Noise.Smooth(0.2f, 0.6f, s.Urban), beach = 1f - Noise.Smooth(0.56f, 0.68f, s.Land);
-        Vector3 grass = Vector3.Lerp(Vector3.Lerp(Mix(p => p.Grass), Lawn, town * 0.6f), Sand, beach);
-        Vector3 path = Vector3.Lerp(Mix(p => p.Path), Asphalt, town);
+        // Nel cuore della città niente prati: cortili e slarghi lastricati tra i palazzi
+        float core = Noise.Smooth(0.68f, 0.86f, s.Urban);
+        Vector3 grass = Vector3.Lerp(Vector3.Lerp(Vector3.Lerp(Mix(p => p.Grass), Lawn, town * 0.6f), Concrete, core), Sand, beach);
         Vector3 bank = Vector3.Lerp(Mix(p => p.Bank), Sand, beach);
-        return new Palette(grass, path, bank);
+        return new Palette(grass, Mix(p => p.Path), bank);
     }
 }

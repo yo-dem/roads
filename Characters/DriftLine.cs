@@ -7,15 +7,17 @@ namespace Roads.Characters;
 /// Traiettoria della derapata assistita: la mezzeria della strada su cui si viaggia fino al prossimo incrocio,
 /// una curva morbida dentro lo slargo verso la strada scelta (a sinistra, a destra o dritto), poi la mezzeria
 /// della nuova strada. L'auto la segue come su una rotaia: in derapata resta sempre in corsia.
+/// Le strade sono quelle della rete (<see cref="RoadNetwork"/>): agli incroci le uscite hanno angoli qualsiasi.
 /// </summary>
 public sealed class DriftLine
 {
     private const float Step = 0.5f;          // passo dei punti lungo la linea
-    private const float CornerReach = 3f;     // la curva parte e finisce a questa distanza dal centro dell'incrocio
     private const float TurnWindow = 24f;     // l'aiuto si attiva solo entro questa distanza da un incrocio
     private const float ExitLength = 26f;     // tratto di strada dopo la curva
-    private const float MaxOffRoad = 2.8f;
-    private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo    // oltre questa distanza dalla mezzeria non si è "in strada"
+    private const float MaxOffRoad = 2.8f;    // oltre questa distanza dalla mezzeria non si è "in strada"
+    private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo
+    private const float StraightDot = 0.8f;   // un'uscita è "dritto" se devia meno di ~37°
+    private const float SideDot = 0.3f;       // un'uscita è a destra/sinistra se ci punta almeno così
 
     private readonly List<Vector3> _points = new();
     private readonly List<float> _cum = new();
@@ -30,19 +32,97 @@ public sealed class DriftLine
     /// <summary>Lato della svolta scelta: +1 destra, -1 sinistra (come lo sterzo).</summary>
     public float TurnSign { get; private set; }
 
-    private enum Axis { EastWest, NorthSouth }
+    private static RoadNetwork Net => RoadNetwork.Current;
 
-    private static float C => Terrain.ChunkSize;
-
-    private static Vector3 Center(Axis axis, int index, float s) => axis == Axis.EastWest
-        ? new Vector3(s, 0f, Terrain.RoadZ(index, s))
-        : new Vector3(Terrain.RoadX(index, s), 0f, s);
+    private static Vector3 To3(Vector2 p) => new(p.X, 0f, p.Y);
 
     private void Add(Vector3 p)
     {
         if (_points.Count > 0 && Vector3.Distance(_points[^1], p) < 1e-3f) return;
         _cum.Add(_points.Count == 0 ? 0f : _cum[^1] + Vector3.Distance(_points[^1], p));
         _points.Add(p);
+    }
+
+    /// <summary>Un punto su un tratto e il verso di marcia (+1 da A verso B, -1 al contrario).</summary>
+    private readonly record struct Cursor(RoadEdge Edge, float S, float Dir)
+    {
+        public RoadNode Ahead => Dir > 0f ? Edge.B : Edge.A;
+        public float ToAhead => Dir > 0f ? Edge.Length - S : S;
+        public Vector2 Heading => Edge.Tangent(S) * Dir;
+    }
+
+    /// <summary>Destra della direzione d sul piano (x est, z sud; vista dall'alto col nord in alto).</summary>
+    private static Vector2 RightOf(Vector2 d) => new(-d.Y, d.X);
+
+    /// <summary>
+    /// Le uscite da un nodo per chi ci arriva da <paramref name="from"/> viaggiando in direzione <paramref name="travel"/>:
+    /// tratto, direzione con cui lascia il nodo e quanto punta dritto / a destra.
+    /// </summary>
+    private static IEnumerable<(RoadEdge Edge, Vector2 Dir, float Ahead, float Right)> Exits(RoadNode node, RoadEdge from, Vector2 travel)
+    {
+        foreach (var e in node.Edges)
+        {
+            if (e == from) continue;
+            Vector2 d = e.LeaveDir(node, 5f);
+            yield return (e, d, Vector2.Dot(d, travel), Vector2.Dot(d, RightOf(travel)));
+        }
+    }
+
+    /// <summary>
+    /// Cammina lungo la rete da <paramref name="c"/> per <paramref name="length"/> aggiungendo i punti: ai nodi dove la
+    /// via prosegue soltanto (2 tratti) va avanti, agli incroci prosegue dritto se si può. Restituisce dove si è fermata
+    /// e se si è fermata a un vicolo cieco o a un incrocio senza uscita dritta.
+    /// </summary>
+    private float Follow(Cursor c, float length, bool stopAtJunction, out Cursor end, out bool blocked)
+    {
+        float done = 0f;
+        blocked = false;
+        while (true)
+        {
+            float left = length - done;
+            if (c.ToAhead >= left)
+            {
+                for (float t = 0f; t < left; t += Step) Add(To3(c.Edge.At(c.S + c.Dir * t)));
+                c = c with { S = c.S + c.Dir * left };
+                Add(To3(c.Edge.At(c.S)));
+                end = c;
+                return length;
+            }
+            for (float t = 0f; t < c.ToAhead; t += Step) Add(To3(c.Edge.At(c.S + c.Dir * t)));
+            done += c.ToAhead;
+            var node = c.Ahead;
+            Add(To3(node.Pos));
+            Vector2 travel = c.Edge.Tangent(c.Dir > 0f ? c.Edge.Length : 0f) * c.Dir;
+            RoadEdge? next = null;
+            if (node.Degree == 2 && !node.Piazza) next = node.Edges.First(e => e != c.Edge);
+            else if (!stopAtJunction)
+            {
+                var straight = Exits(node, c.Edge, travel).Where(x => x.Ahead > StraightDot).OrderByDescending(x => x.Ahead).FirstOrDefault();
+                next = straight.Edge;
+            }
+            if (next == null)
+            {
+                end = new Cursor(c.Edge, c.Dir > 0f ? c.Edge.Length : 0f, c.Dir);
+                blocked = node.Degree == 1 || !stopAtJunction;
+                return done;
+            }
+            c = new Cursor(next, next.A == node ? 0f : next.Length, next.A == node ? 1f : -1f);
+        }
+    }
+
+    /// <summary>
+    /// Su quale strada è l'auto? (Si preferisce quella allineata alla direzione di marcia.) False se non è in strada.
+    /// </summary>
+    private static bool Locate(Vector3 pos, Vector3 travel, out Cursor cursor)
+    {
+        cursor = default;
+        var t = new Vector2(travel.X, travel.Z);
+        if (t.LengthSquared() < 1e-8f) return false;
+        t = Vector2.Normalize(t);
+        if (!Net.NearestAligned(new Vector2(pos.X, pos.Z), t, MaxOffRoad, out var hit)) return false;
+        float dir = Vector2.Dot(hit.Edge.Tangent(hit.S), t) >= 0f ? 1f : -1f;
+        cursor = new Cursor(hit.Edge, hit.S, dir);
+        return true;
     }
 
     /// <summary>
@@ -53,92 +133,46 @@ public sealed class DriftLine
     /// </summary>
     public static DriftLine? Plan(Vector3 pos, Vector3 travel, float steer)
     {
-        travel = Vector3.Normalize(new Vector3(travel.X, 0f, travel.Z));
+        if (!Locate(pos, travel, out var c)) return null;
 
-        if (!Locate(pos, travel, out var axis, out int index, out float s, out float dir)) return null;
+        // Prossimo incrocio davanti (attraverso i nodi dove la via prosegue soltanto)
+        var probe = new DriftLine();
+        probe.Follow(c, TurnWindow, stopAtJunction: true, out var atHub, out _);
+        var hub = atHub.Ahead;
+        if (atHub.ToAhead > 0.01f || hub.Degree < 2 || (hub.Degree == 2 && !hub.Piazza)) return null;
+        float hubDist = probe.Length;
+        if (hubDist >= TurnWindow) return null;
 
-        var line = new DriftLine();
+        Vector2 travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
+        var exits = Exits(hub, atHub.Edge, travelIn).ToList();
+        (RoadEdge Edge, Vector2 Dir, float Ahead, float Right)? exit = null;
+        if (steer > 0.3f) exit = exits.Where(x => x.Right > SideDot).OrderByDescending(x => x.Right).Cast<(RoadEdge, Vector2, float, float)?>().FirstOrDefault();
+        else if (steer < -0.3f) exit = exits.Where(x => -x.Right > SideDot).OrderByDescending(x => -x.Right).Cast<(RoadEdge, Vector2, float, float)?>().FirstOrDefault();
+        else if (!exits.Any(x => x.Ahead > StraightDot) && exits.Count > 0)
+            exit = exits.OrderByDescending(x => x.Ahead).First(); // senza direzione, se la strada curva per forza si segue la curva
+        if (exit is not { } turn) return null; // nessuna svolta: niente aiuto, il freno a mano fa una scivolata libera
 
-        // Prossimo incrocio davanti
-        int hub = dir > 0f ? (int)MathF.Floor(s / C) + 1 : (int)MathF.Ceiling(s / C) - 1;
-        float hubS = hub * C;
-        float hubDist = MathF.Abs(hubS - s);
-        int hx = axis == Axis.EastWest ? hub : index, hz = axis == Axis.EastWest ? index : hub;
-        Dir forward = axis == Axis.EastWest ? (dir > 0f ? Dir.East : Dir.West) : (dir > 0f ? Dir.South : Dir.North);
+        var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
+        float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
+        line.Follow(c, MathF.Max(hubDist - reach, 0f), stopAtJunction: true, out _, out _);
+        Vector3 p0 = line._points.Count > 0 ? line._points[^1] : To3(c.Edge.At(c.S));
+        Vector3 h = To3(hub.Pos);
+        var exitC = new Cursor(turn.Edge, turn.Edge.A == hub ? 0f : turn.Edge.Length, turn.Edge.A == hub ? 1f : -1f);
+        float outS = MathF.Min(reach, turn.Edge.Length * 0.5f);
+        exitC = exitC with { S = exitC.S + exitC.Dir * outS };
+        Vector3 p2 = To3(exitC.Edge.At(exitC.S));
 
-        // Uscita scelta all'incrocio: il lato dello sterzo se c'è la strada, altrimenti dritto, altrimenti la curva obbligata
-        Dir? exit = null;
-        if (hubDist < TurnWindow)
+        // Curva: Bézier quadratica con il centro dell'incrocio come punto di controllo (resta dentro lo slargo)
+        line.Add(p0);
+        line.CornerStart = line.Length;
+        for (int k = 1; k <= 16; k++)
         {
-            line.HubAhead = true;
-            Dir left = TurnLeft(forward), right = left.Opposite();
-            Dir? wanted = steer > 0.3f ? right : steer < -0.3f ? left : null;
-            if (wanted is { } w && WorldMap.EdgeOpen(hx, hz, w)) exit = w;
-            else if (wanted == null && !WorldMap.EdgeOpen(hx, hz, forward))
-            {
-                // Senza direzione, se la strada all'incrocio curva per forza si segue la curva
-                if (WorldMap.EdgeOpen(hx, hz, left)) exit = left;
-                else if (WorldMap.EdgeOpen(hx, hz, right)) exit = right;
-            }
+            float u = k / 16f;
+            line.Add((1 - u) * (1 - u) * p0 + 2 * (1 - u) * u * h + u * u * p2);
         }
-
-        if (exit is { } turn)
-        {
-            line.TurnSign = turn == TurnLeft(forward) ? -1f : 1f;
-            // Mezzeria fino all'inizio della curva
-            float until = hubS - dir * CornerReach;
-            for (float t = s; dir * (until - t) > 0f; t += dir * Step) line.Add(Center(axis, index, t));
-            Vector3 p0 = Center(axis, index, until);
-            Vector3 h = new(hx * C, 0f, hz * C);
-
-            Axis newAxis = turn is Dir.East or Dir.West ? Axis.EastWest : Axis.NorthSouth;
-            int newIndex = newAxis == Axis.EastWest ? hz : hx;
-            float newDir = turn is Dir.East or Dir.South ? 1f : -1f;
-            float newHubS = newAxis == Axis.EastWest ? hx * C : hz * C;
-            Vector3 p2 = Center(newAxis, newIndex, newHubS + newDir * CornerReach);
-
-            // Curva: Bézier quadratica con il centro dell'incrocio come punto di controllo (resta dentro lo slargo)
-            line.Add(p0);
-            line.CornerStart = line.Length;
-            for (int k = 1; k <= 16; k++)
-            {
-                float u = k / 16f;
-                line.Add((1 - u) * (1 - u) * p0 + 2 * (1 - u) * u * h + u * u * p2);
-            }
-            line.CornerEnd = line.Length;
-            for (float t = newHubS + newDir * (CornerReach + Step); MathF.Abs(t - newHubS) < CornerReach + ExitLength; t += newDir * Step)
-                line.Add(Center(newAxis, newIndex, t));
-        }
-        else return null; // nessuna svolta vicina: niente aiuto, il freno a mano fa una scivolata libera
+        line.CornerEnd = line.Length;
+        line.Follow(exitC, ExitLength, stopAtJunction: false, out _, out _);
         return line._points.Count >= 4 ? line : null;
-    }
-
-    /// <summary>
-    /// Su quale strada è l'auto? (Si preferisce quella allineata alla direzione di marcia.) Restituisce l'asse,
-    /// l'indice della strada, la coordinata lungo di essa e il verso di marcia (+1 / -1); false se non è in strada.
-    /// </summary>
-    private static bool Locate(Vector3 pos, Vector3 travel, out Axis axis, out int index, out float s, out float dir)
-    {
-        axis = MathF.Abs(travel.X) >= MathF.Abs(travel.Z) ? Axis.EastWest : Axis.NorthSouth;
-        float off;
-        bool open;
-        if (axis == Axis.EastWest)
-        {
-            index = (int)MathF.Round(pos.Z / C);
-            s = pos.X;
-            off = MathF.Abs(pos.Z - Terrain.RoadZ(index, s));
-            open = WorldMap.EdgeOpen((int)MathF.Floor(s / C), index, Dir.East);
-        }
-        else
-        {
-            index = (int)MathF.Round(pos.X / C);
-            s = pos.Z;
-            off = MathF.Abs(pos.X - Terrain.RoadX(index, s));
-            open = WorldMap.EdgeOpen(index, (int)MathF.Floor(s / C), Dir.South);
-        }
-        dir = axis == Axis.EastWest ? MathF.Sign(travel.X) : MathF.Sign(travel.Z);
-        if (dir == 0f) dir = 1f;
-        return (open || NearHub(pos)) && off <= MaxOffRoad;
     }
 
     /// <summary>
@@ -147,26 +181,16 @@ public sealed class DriftLine
     /// </summary>
     public static DriftLine? AlongRoad(Vector3 pos, Vector3 travel, float length)
     {
-        travel = Vector3.Normalize(new Vector3(travel.X, 0f, travel.Z));
-        if (!Locate(pos, travel, out var axis, out int index, out float s, out float dir)) return null;
+        if (!Locate(pos, travel, out var c)) return null;
         var line = new DriftLine();
-        // In un vicolo cieco la strada finisce allo slargo: la scivolata non deve andare oltre, nel nulla
-        float end = s + dir * (length + Step);
-        // Incrocio più vicino (davanti o appena passato) e, se da lì si prosegue, quello successivo:
-        // la scivolata si ferma al primo dei due che sia la fine di un vicolo cieco
-        Dir forward = axis == Axis.EastWest ? (dir > 0f ? Dir.East : Dir.West) : (dir > 0f ? Dir.South : Dir.North);
-        int near = (int)MathF.Round(s / C);
-        for (int hub = near; dir * (hub * C - s) <= length + DeadEndOverrun + Step; hub += (int)dir)
+        float went = line.Follow(c, length, stopAtJunction: false, out var end, out bool blocked);
+        if (blocked)
         {
-            int hx = axis == Axis.EastWest ? hub : index, hz = axis == Axis.EastWest ? index : hub;
-            if (WorldMap.EdgeOpen(hx, hz, forward)) continue;
-            float stop = hub * C + dir * DeadEndOverrun;
-            if (dir * (stop - end) < 0f) end = stop;
-            break;
+            // In fondo a un vicolo cieco (o a un incrocio senza uscita dritta) la scivolata va appena oltre il centro
+            Vector2 dir = end.Edge.Tangent(end.S) * end.Dir;
+            line.Add(To3(end.Edge.At(end.S) + dir * DeadEndOverrun));
+            if (went < 0.5f) return null; // oltre la fine della strada: niente inversione guidata
         }
-        if (dir * (end - s) < 0.5f) return null; // oltre la fine della strada: niente inversione guidata
-        for (float t = s; dir * (end - t) > 0f; t += dir * Step) line.Add(Center(axis, index, t));
-        line.Add(Center(axis, index, end));
         return line._points.Count >= 2 ? line : null;
     }
 
@@ -178,31 +202,21 @@ public sealed class DriftLine
     public static bool RoadFrame(Vector3 pos, Vector3 travel, float lookahead, out Vector3 center, out Vector3 tangent, out Vector3 aim)
     {
         center = tangent = aim = default;
-        travel = new Vector3(travel.X, 0f, travel.Z);
-        if (travel.LengthSquared() < 1e-6f || NearHub(pos)) return false;
-        travel = Vector3.Normalize(travel);
-        if (!Locate(pos, travel, out var axis, out int index, out float s, out float dir)) return false;
-        center = Center(axis, index, s);
-        Vector3 d = Center(axis, index, s + dir * Step) - center;
-        tangent = Vector3.Normalize(new Vector3(d.X, 0f, d.Z));
-        aim = Center(axis, index, s + dir * lookahead);
+        if (NearHub(pos) || !Locate(pos, travel, out var c)) return false;
+        center = To3(c.Edge.At(c.S));
+        Vector2 t = c.Heading;
+        tangent = new Vector3(t.X, 0f, t.Y);
+        var probe = new DriftLine();
+        probe.Follow(c, lookahead, stopAtJunction: false, out _, out _);
+        aim = probe._points.Count > 0 ? probe._points[^1] : center + tangent * lookahead;
         return true;
     }
 
     private static bool NearHub(Vector3 p)
     {
-        float hx = MathF.Round(p.X / C) * C, hz = MathF.Round(p.Z / C) * C;
-        return new Vector2(p.X - hx, p.Z - hz).Length() < Zone.HubRadius + 1.5f;
+        var hub = Net.HubAt(new Vector2(p.X, p.Z), 1.5f);
+        return hub != null && (hub.Degree != 2 || hub.Piazza);
     }
-
-    private static Dir TurnLeft(Dir d) => d switch
-    {
-        // Sinistra rispetto alla marcia (vista dall'alto, nord = -Z): verso est la sinistra è nord
-        Dir.East => Dir.North,
-        Dir.North => Dir.West,
-        Dir.West => Dir.South,
-        _ => Dir.East,
-    };
 
     /// <summary>Punto della linea alla lunghezza <paramref name="u"/> (oltre la fine prosegue dritto).</summary>
     public Vector3 At(float u)

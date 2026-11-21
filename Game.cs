@@ -32,6 +32,7 @@ public sealed class DebugOptions
     public int PreSpawn;
     public string? Map;            // file della mappa (di serie Assets/Maps/isola.txt)
     public bool BigMap;            // parte con la mappa grande aperta (test)
+    public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -126,6 +127,7 @@ public sealed partial class Game : IDisposable
             };
             mouse.MouseDown += (m, button) =>
             {
+                if (button == MouseButton.Left && _bigMap) MapClick(m.Position); // sulla mappa: punto da seguire
                 if (button != MouseButton.Right) return;
                 _rightHeld = true;
                 _lastMouse = m.Position;
@@ -154,15 +156,16 @@ public sealed partial class Game : IDisposable
         Console.WriteLine($"Mappa: {map.Name} ({map.MaxI - map.MinI + 1} x {map.MaxJ - map.MinJ + 1} celle, "
                           + $"{map.Landmarks.Count} punti di riferimento)");
         _bigMap = _debug.BigMap;
+        _waypoint = _debug.Waypoint;
 
-        var start = new Vector3(-2.5f, 0f, 0.3f);
-        if (_debug.Start is { } s) start = new Vector3(s.X, 0f, Terrain.RoadZ((int)MathF.Round(s.Y / Terrain.ChunkSize), s.X)); // test: sulla strada est-ovest
+        // Si parte sulla strada più vicina alla cella di partenza (o al punto chiesto dai test), rivolti verso la città
+        var (start, startYaw) = StartOnRoad(_debug.Start ?? Vector2.Zero);
         _world = new WorldMap(_gl, start);
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _skids = new SkidMarks(_gl);
         start.Y = _world.GroundHeight(start);
-        _player = new Car(_gl, start, MathF.PI / 2f);
+        _player = new Car(_gl, start, startYaw);
         _kid = new Villager(_gl, start, 0f, _debug.Character ?? Villager.DefaultCharacter); // seduto in auto finché non si scende
         _farView = _debug.Far;
         if (_debug.Zoom is { } zoom) _camera.Distance = Math.Clamp(zoom, 8f, 32f);
@@ -208,11 +211,28 @@ public sealed partial class Game : IDisposable
 
         if (_onFoot)
         {
-            // A piedi: frecce rispetto alla camera; l'auto resta parcheggiata a motore spento
-            if (input == Vector3.Zero) input = _camera.Right * steerIn + _camera.Forward * throttleIn;
+            // A piedi, con la visuale da dietro, il personaggio si guida come una mini auto: destra/sinistra lo girano,
+            // su va avanti, giù arretra senza voltarsi. Con la visuale lontana le frecce restano rispetto alla camera.
+            // L'auto resta parcheggiata a motore spento.
+            float? face = null;
+            if (input == Vector3.Zero)
+            {
+                if (_farView)
+                {
+                    input = _camera.Right * steerIn + _camera.Forward * throttleIn;
+                    _footYaw = _kid.Yaw;
+                }
+                else
+                {
+                    _footYaw -= steerIn * FootTurnRate * dt;
+                    input = new Vector3(MathF.Sin(_footYaw), 0f, MathF.Cos(_footYaw)) * throttleIn;
+                    if (throttleIn < 0f) slow = true; // all'indietro piano
+                    face = _footYaw;
+                }
+            }
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
-            _kid.Update(dt, input, slow, _world, _particles, _player.Blocks);
+            _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, face);
             if (_kid.Hidden)
             {
                 // Il saltello per rientrare è finito: si torna a guidare
@@ -245,8 +265,10 @@ public sealed partial class Game : IDisposable
         _skids.Update(dt, _player);
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
         // In derapata la camera da dietro segue la direzione di marcia, così si vede l'auto di traverso
-        _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView && !_onFoot, _player.TravelYaw,
-                       walk: !_farView && _onFoot);
+        // A piedi la visuale da dietro segue il personaggio come se fosse una mini auto
+        _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, _onFoot ? _kid.Yaw : _player.TravelYaw,
+                       walk: _onFoot);
+        UpdateMap(dt);
         if (_engine != null) _engine.Horn = !_onFoot && _keyboard.IsKeyPressed(Key.E); // clacson (solo in auto)
         _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
 
@@ -265,7 +287,9 @@ public sealed partial class Game : IDisposable
             string near = "";
             foreach (var l in GameMap.Current.Landmarks)
                 if (Vector2.Distance(l.Pos, new Vector2(ActivePos.X, ActivePos.Z)) < 45f) near = $"  ({l.Name})";
-            _window.Title = $"Roads  |  {_day.Clock}  |  {here?.Name ?? "..."}{near}  |  territorio esplorato: {_world.Count}"
+            string place = RoadNetwork.Current.SettlementAt(ActivePos.X, ActivePos.Z)?.Name
+                           ?? (here != null ? GameMap.DistrictName(GameMap.Current.At(here.X, here.Z)) : "...");
+            _window.Title = $"Roads  |  {_day.Clock}  |  {place}{near}  |  territorio esplorato: {_world.Count}"
                             + (_onFoot ? "  |  a piedi" : "") + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
@@ -463,8 +487,8 @@ public sealed partial class Game : IDisposable
 
         SetFog(false);
 
-        DrawMinimap(size);
-        if (_bigMap) DrawBigMap(size);
+        if (_mapReveal > 0f) DrawBigMap(size);
+        DrawCompass(size);
         TakeScreenshotIfDue(size);
     }
 
@@ -501,6 +525,35 @@ public sealed partial class Game : IDisposable
     }
 
     private Matrix4x4 _viewProj;
+
+    private const float FootTurnRate = 2.8f; // radianti al secondo: quanto gira il personaggio a piedi con le frecce
+    private float _footYaw;
+
+    /// <summary>
+    /// Punto di partenza: sulla strada più vicina a <paramref name="near"/> (le asfaltate valgono un po' di più), con
+    /// l'auto rivolta lungo la strada verso la città.
+    /// </summary>
+    private static (Vector3 Pos, float Yaw) StartOnRoad(Vector2 near)
+    {
+        var net = RoadNetwork.Current;
+        RoadEdge? best = null;
+        float bestScore = float.MaxValue, bestS = 0f;
+        foreach (var e in net.Edges)
+            for (int i = 0; i < e.Count; i++)
+            {
+                float score = Vector2.Distance(e.Points[i], near) + (e.Paved ? 0f : 25f);
+                // Non proprio su un incrocio: lì l'auto partirebbe di traverso
+                if (i < 4 || i > e.Count - 5) score += 15f;
+                if (score < bestScore) { bestScore = score; best = e; bestS = e.CumAt(i); }
+            }
+        if (best == null) return (new Vector3(near.X, 0f, near.Y), MathF.PI / 2f);
+        Vector2 p = best.At(bestS), t = best.Tangent(bestS);
+        Vector2 goal = net.Settlements.FirstOrDefault(s => s.City)?.Pos ?? Vector2.Zero;
+        if (Vector2.Dot(t, goal - p) < 0f) t = -t;
+        // Sulla destra della carreggiata, non sulla mezzeria
+        p += new Vector2(-t.Y, t.X) * (best.HalfWidth * 0.45f);
+        return (new Vector3(p.X, 0f, p.Y), MathF.Atan2(t.X, t.Y));
+    }
 
     /// <summary>Margine sui lati: un albero appena fuori inquadratura può ancora proiettare l'ombra dentro.</summary>
     private const float FrustumMargin = 8f;
@@ -571,6 +624,7 @@ public sealed partial class Game : IDisposable
                 spot.Y = _world.GroundHeight(spot);
                 Vector3 outward = Vector3.Normalize(new Vector3(spot.X - _player.Position.X, 0, spot.Z - _player.Position.Z));
                 _kid.HopOut(_player.SeatPoint(side), spot, MathF.Atan2(outward.X, outward.Z));
+                _footYaw = _player.Yaw; // appena a terra si gira nel verso dell'auto: la camera sta alle sue spalle, non dietro l'auto
                 _onFoot = true;
                 _player.EngineOn = false;
                 return;
@@ -619,7 +673,7 @@ public sealed partial class Game : IDisposable
         for (int i = 3; i < flipped.Length; i += 4) flipped[i] = 255;
 
         PngWriter.Save(_debug.Shots[_shotIndex].Path, w, h, flipped);
-        Console.WriteLine($"Screenshot salvato: {_debug.Shots[_shotIndex].Path}");
+        Console.WriteLine($"Screenshot salvato: {_debug.Shots[_shotIndex].Path}  ({_window.Title})");
         _shotIndex++;
         if (_shotIndex >= _debug.Shots.Count) _window.Close();
     }

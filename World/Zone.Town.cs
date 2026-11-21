@@ -57,21 +57,20 @@ public sealed partial class Zone
     private static readonly Vector3 Pole = new(0.26f, 0.27f, 0.30f);
     private static readonly Vector3 Sidewalk = new(0.74f, 0.73f, 0.70f);
     private static readonly Vector3 Curb = new(0.86f, 0.86f, 0.83f);
+    private static readonly Vector3 BarnRed = new(0.66f, 0.24f, 0.18f);
+    private static readonly Vector3 Hay = new(0.90f, 0.76f, 0.34f);
 
-    /// <summary>Una strada del pezzo: punto sulla mezzeria (locale) al parametro s ∈ [-Half, Half] e tratto aperto.</summary>
-    private delegate (Vector3 Center, bool Open) RoadAt(float s);
+    /// <summary>Il punto locale sta dentro il pezzo, con un margine?</summary>
+    private static bool InZone(Vector3 p, float margin) => MathF.Abs(p.X) <= Half - margin && MathF.Abs(p.Z) <= Half - margin;
 
-    private IEnumerable<RoadAt> TownRoads()
+    /// <summary>Punto della mezzeria (coordinate locali del pezzo) e direzione del tratto alla distanza s.</summary>
+    private (Vector3 Center, Vector3 Dir) RoadPoint(RoadEdge e, float s)
     {
-        bool west = WorldMap.EdgeOpen(X, Z, Dir.West), east = WorldMap.EdgeOpen(X, Z, Dir.East);
-        if (west || east)
-            yield return s => (new Vector3(s, 0, Terrain.RoadZ(Z, WX(s)) - Origin.Z), s < 0f ? west : east);
-        bool north = WorldMap.EdgeOpen(X, Z, Dir.North), south = WorldMap.EdgeOpen(X, Z, Dir.South);
-        if (north || south)
-            yield return s => (new Vector3(Terrain.RoadX(X, WZ(s)) - Origin.X, 0, s), s < 0f ? north : south);
+        Vector2 p = e.At(s), t = e.Tangent(s);
+        return (new Vector3(p.X - Origin.X, 0, p.Y - Origin.Z), new Vector3(t.X, 0, t.Y));
     }
 
-    /// <summary>Case, palazzi e lampioni lungo le strade del pezzo, se è in un centro abitato.</summary>
+    /// <summary>Case, palazzi e lampioni lungo le strade asfaltate del pezzo, dove si è in un centro abitato.</summary>
     private void BuildTown(MeshBuilder mb, MeshBuilder glow, Random rng, List<(float X, float Z, float R)> placed)
     {
         float most = 0f;
@@ -80,46 +79,46 @@ public sealed partial class Zone
                 most = MathF.Max(most, Terrain.Urban(Origin.X + a * Half * 0.9f, Origin.Z + b * Half * 0.9f));
         if (most < 0.15f) return;
 
-        foreach (var road in TownRoads())
+        foreach (var e in RoadNetwork.Current.EdgesNear(X, Z))
         {
-            Lamps(mb, glow, road, placed);
-            foreach (float side in new[] { 1f, -1f })
-                for (int row = 0; row < 4; row++)
-                    BuildingRow(mb, glow, rng, road, side, row, placed);
+            if (!e.Paved) continue; // lungo gli sterrati niente case: ci sono le cascine, in fondo
+            Lamps(mb, glow, e, placed);
+            for (int row = 0; row < 4; row++)
+                foreach (float side in new[] { 1f, -1f })
+                    BuildingRow(mb, glow, rng, e, side, row, placed);
         }
     }
 
-    /// <summary>Una fila di edifici affacciati sulla strada da un lato (row 1 = seconda fila, solo in città).</summary>
-    private void BuildingRow(MeshBuilder mb, MeshBuilder glow, Random rng, RoadAt road, float side, int row,
+    /// <summary>
+    /// Una fila di edifici affacciati sul tratto da un lato. In paese una fila di case basse coi giardini; in città
+    /// palazzi uno accanto all'altro e altre file dietro, fin dentro gli isolati, più alti verso il centro.
+    /// </summary>
+    private void BuildingRow(MeshBuilder mb, MeshBuilder glow, Random rng, RoadEdge e, float side, int row,
                              List<(float X, float Z, float R)> placed)
     {
-        float s = -Half + 1.5f + rng.NextSingle() * 3f;
-        while (s < Half - 2f)
+        float s = 1.5f + rng.NextSingle() * 3f;
+        while (s < e.Length - 2f)
         {
-            var (c, open) = road(s);
-            Vector3 ahead = road(MathF.Min(s + 0.5f, Half)).Center - road(MathF.Max(s - 0.5f, -Half)).Center;
-            if (!open || ahead.LengthSquared() < 1e-6f) { s += 2f; continue; }
-            Vector3 dir = Vector3.Normalize(ahead);
-            Vector3 perp = new Vector3(-dir.Z, 0, dir.X) * side;
+            var (c, dir) = RoadPoint(e, s);
+            if (!InZone(c, -8f)) { s += 3f; continue; }
+            var perp = new Vector3(-dir.Z, 0, dir.X) * side;
 
             float u = Terrain.Urban(WX(c.X), WZ(c.Z));
-            // In paese una fila di case sulla strada; in città più file, fin dentro gli isolati
             float chance = row switch
             {
-                0 => 0.95f * Noise.Smooth(0.18f, 0.55f, u),
-                1 => 0.9f * Noise.Smooth(0.7f, 0.95f, u),
-                _ => (row == 2 ? 0.8f : 0.6f) * Noise.Smooth(0.82f, 0.98f, u),
+                0 => 0.95f * Noise.Smooth(0.18f, 0.5f, u),
+                1 => 0.9f * Noise.Smooth(0.62f, 0.9f, u),
+                _ => (row == 2 ? 0.8f : 0.6f) * Noise.Smooth(0.8f, 0.97f, u),
             };
             if (rng.NextSingle() > chance) { s += 2.5f + rng.NextSingle() * 3f; continue; }
 
-            bool city = u > 0.72f;
+            bool city = u > 0.66f;
             float w = city ? 4.5f + rng.NextSingle() * 3.5f : 3.2f + rng.NextSingle() * 2f;     // lungo la strada
             float d = city ? 5f + rng.NextSingle() * 4f : 3.2f + rng.NextSingle() * 1.6f;       // in profondità
             float h = city
-                ? 2.8f + rng.NextSingle() * (3f + 9f * Noise.Smooth(0.75f, 1f, u))
+                ? 2.8f + rng.NextSingle() * (2.5f + 10f * Noise.Smooth(0.7f, 1f, u))
                 : 1.7f + rng.NextSingle() * 1.1f;
-            float setback = Zone.PathHalf + Terrain.WalkWidth + (city ? 0.3f : 0.8f + rng.NextSingle() * 1.2f)
-                            + row * 11f;
+            float setback = e.HalfWidth + Terrain.WalkWidth + (city ? 0.3f : 0.8f + rng.NextSingle() * 1.6f) + row * 11f;
             Vector3 center = c + dir * (w * 0.5f) + perp * (setback + d * 0.5f);
             float yaw = MathF.Atan2(-perp.X, -perp.Z); // il lato +Z dell'edificio guarda la strada
             var foot = Footprint.Box(new Vector2(center.X, center.Z), new Vector2(w * 0.5f, d * 0.5f), yaw);
@@ -132,7 +131,88 @@ public sealed partial class Zone
             AddBoxCollider(foot);
             _buildings.Add(foot);
             placed.Add((center.X, center.Z, foot.Reach));
-            s += w + (city ? 0.2f + rng.NextSingle() * 0.8f : 1.2f + rng.NextSingle() * 2.5f);
+            s += w + (city ? 0.2f + rng.NextSingle() * 0.8f : 1.2f + rng.NextSingle() * 3f);
+        }
+    }
+
+    // ------------------------------------------------------------------ cascine
+
+    /// <summary>
+    /// Le cascine del pezzo: in fondo allo sterrato c'è l'aia, con la casa di fronte a chi arriva, il fienile rosso
+    /// di fianco e qualche covone. Le cascine stanno ben dentro il pezzo (vedi la scelta dei posti nella rete).
+    /// </summary>
+    private void BuildFarms(MeshBuilder mb, MeshBuilder glow, Random rng, List<(float X, float Z, float R)> placed)
+    {
+        foreach (var farm in RoadNetwork.Current.Farms)
+        {
+            var yard = new Vector3(farm.Yard.X - Origin.X, 0, farm.Yard.Y - Origin.Z);
+            if (!InZone(yard, 0f)) continue;
+            var toRoad = new Vector3(farm.Approach.X, 0, farm.Approach.Y);
+            var across = new Vector3(-toRoad.Z, 0, toRoad.X);
+            const float yardR = 3.4f;
+
+            // Casa: dietro l'aia, guarda verso lo sterrato
+            Place(yard - toRoad * (yardR + 3.8f), toRoad, 5.2f, 4.2f, 2.4f, null);
+            // Fienile: di lato, guarda l'aia
+            float side = Noise.Hash01((int)farm.Yard.X, (int)farm.Yard.Y, 9) < 0.5f ? 1f : -1f;
+            Place(yard + across * side * (yardR + 4.8f) - toRoad * 1.2f, -across * side, 6.4f, 5.4f, 3.0f, BarnRed);
+            // Covoni attorno
+            for (int k = 0; k < 3; k++)
+            {
+                var p = yard - across * side * (yardR + 2.2f + k * 1.6f) - toRoad * (1.5f + rng.NextSingle() * 2f);
+                if (!InZone(p, 1f) || PathDistance(p.X, p.Z) < PathHalf + 0.8f) continue;
+                p.Y = HeightLocal(p.X, p.Z) - 0.05f;
+                mb.BeginObject();
+                mb.AddPrism(p, 0.75f, 0.6f, 1.1f, 9, Hay);
+                mb.AddPrism(p + new Vector3(0, 1.1f, 0), 0.6f, 0.15f, 0.45f, 9, Hay * 0.92f);
+                mb.EndObject();
+                AddCollider(p.X, p.Z, 0.7f);
+                placed.Add((p.X, p.Z, 0.9f));
+            }
+        }
+
+        void Place(Vector3 center, Vector3 facing, float w, float d, float h, Vector3? walls)
+        {
+            float yaw = MathF.Atan2(facing.X, facing.Z);
+            var foot = Footprint.Box(new Vector2(center.X, center.Z), new Vector2(w * 0.5f, d * 0.5f), yaw);
+            if (!LotFree(foot, placed)) return;
+            float baseY = float.MaxValue;
+            foreach (var p in Corners(foot)) baseY = MathF.Min(baseY, HeightLocal(p.X, p.Y));
+            BuildBuilding(mb, glow, rng, new Vector3(center.X, baseY, center.Z), yaw, w, d, h, false, walls);
+            AddBoxCollider(foot);
+            _buildings.Add(foot);
+            placed.Add((center.X, center.Z, foot.Reach));
+        }
+    }
+
+    // ------------------------------------------------------------------ lampioni
+
+    /// <summary>Lampioni sul bordo esterno dei marciapiedi, alternati sui due lati; la lampada si accende di notte.</summary>
+    private void Lamps(MeshBuilder mb, MeshBuilder glow, RoadEdge e, List<(float X, float Z, float R)> placed)
+    {
+        const float Spacing = 13f;
+        for (int k = 0; k * Spacing + 4f < e.Length - 2f; k++)
+        {
+            float s = k * Spacing + 4f;
+            var (c, dir) = RoadPoint(e, s);
+            if (!InZone(c, 0.5f)) continue;
+            float wx = WX(c.X), wz = WZ(c.Z);
+            if (Terrain.Urban(wx, wz) < Terrain.WalkFrom || Terrain.NearHub(wx, wz)) continue;
+            float side = k % 2 == 0 ? 1f : -1f;
+            Vector3 perp = new Vector3(-dir.Z, 0, dir.X) * side;
+            Vector3 p = c + perp * (e.HalfWidth + Terrain.WalkWidth - 0.25f);
+            if (HeightLocal(p.X, p.Z) < WaterY + 0.12f || !InZone(p, 0.5f)) continue;
+            if (PathDistance(p.X, p.Z) < PathHalf + 0.2f) continue; // sulla carreggiata di un'altra via
+            p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
+
+            mb.AddPrism(p, 0.07f, 0.06f, 2.7f, 6, Pole);
+            Vector3 arm = p + new Vector3(0, 2.62f, 0) - perp * 0.35f;
+            mb.AddBox(arm, new Vector3(0.08f, 0.08f, 0.08f) + Abs(perp) * 0.62f, Pole);
+            Vector3 head = p + new Vector3(0, 2.5f, 0) - perp * 0.62f;
+            mb.AddBox(head + new Vector3(0, 0.1f, 0), new Vector3(0.34f, 0.08f, 0.34f), Pole);
+            glow.AddBox(head, new Vector3(0.24f, 0.12f, 0.24f), LitWindow);
+            AddCollider(p.X, p.Z, 0.12f);
+            placed.Add((p.X, p.Z, 0.4f));
         }
     }
 
@@ -176,14 +256,14 @@ public sealed partial class Zone
     /// piatto con parapetto in città). Coordinate locali del pezzo; il lato +Z dell'edificio guarda la strada.
     /// </summary>
     private static void BuildBuilding(MeshBuilder mb, MeshBuilder glow, Random rng, Vector3 basePos, float yaw,
-                                      float w, float d, float h, bool city)
+                                      float w, float d, float h, bool city, Vector3? wallColor = null)
     {
         Matrix4x4 old = mb.Transform, oldGlow = glow.Transform;
         mb.Transform = glow.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(basePos);
         mb.BeginObject();
         glow.BeginObject();
 
-        var walls = (city ? CityWalls : HouseWalls)[rng.Next(6)];
+        var walls = wallColor ?? (city ? CityWalls : HouseWalls)[rng.Next(6)];
         mb.AddBox(new Vector3(0, h * 0.5f - 0.3f, 0), new Vector3(w, h + 0.6f, d), walls);
         // Zoccolo un po' più scuro
         mb.AddBox(new Vector3(0, 0.12f, 0), new Vector3(w + 0.06f, 0.5f, d + 0.06f), walls * 0.78f);
@@ -258,39 +338,6 @@ public sealed partial class Zone
         mb.AddQuad(c, d, r0, r1, color);
         mb.AddTriangle(d, a, r0, color * 0.85f);
         mb.AddTriangle(b, c, r1, color * 0.85f);
-    }
-
-    // ------------------------------------------------------------------ lampioni
-
-    /// <summary>Lampioni sul bordo esterno dei marciapiedi, alternati sui due lati; la lampada si accende di notte.</summary>
-    private void Lamps(MeshBuilder mb, MeshBuilder glow, RoadAt road, List<(float X, float Z, float R)> placed)
-    {
-        const float Spacing = 13f;
-        int k = 0;
-        for (float s = -Half + 4f; s < Half - 2f; s += Spacing, k++)
-        {
-            var (c, open) = road(s);
-            if (!open) continue;
-            float wx = WX(c.X), wz = WZ(c.Z);
-            if (Terrain.Urban(wx, wz) < Terrain.WalkFrom || Terrain.NearHub(wx, wz)) continue;
-            Vector3 ahead = road(MathF.Min(s + 0.5f, Half)).Center - road(MathF.Max(s - 0.5f, -Half)).Center;
-            if (ahead.LengthSquared() < 1e-6f) continue;
-            Vector3 dir = Vector3.Normalize(ahead);
-            float side = k % 2 == 0 ? 1f : -1f;
-            Vector3 perp = new Vector3(-dir.Z, 0, dir.X) * side;
-            Vector3 p = c + perp * (PathHalf + Terrain.WalkWidth - 0.25f);
-            if (HeightLocal(p.X, p.Z) < WaterY + 0.12f || MathF.Abs(p.X) > Half - 0.5f || MathF.Abs(p.Z) > Half - 0.5f) continue;
-            p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
-
-            mb.AddPrism(p, 0.07f, 0.06f, 2.7f, 6, Pole);
-            Vector3 arm = p + new Vector3(0, 2.62f, 0) - perp * 0.35f;
-            mb.AddBox(arm, new Vector3(0.08f, 0.08f, 0.08f) + Abs(perp) * 0.62f, Pole);
-            Vector3 head = p + new Vector3(0, 2.5f, 0) - perp * 0.62f;
-            mb.AddBox(head + new Vector3(0, 0.1f, 0), new Vector3(0.34f, 0.08f, 0.34f), Pole);
-            glow.AddBox(head, new Vector3(0.24f, 0.12f, 0.24f), LitWindow);
-            AddCollider(p.X, p.Z, 0.12f);
-            placed.Add((p.X, p.Z, 0.4f));
-        }
     }
 
     private static Vector3 Abs(Vector3 v) => new(MathF.Abs(v.X), MathF.Abs(v.Y), MathF.Abs(v.Z));

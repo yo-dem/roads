@@ -50,7 +50,7 @@ public sealed partial class Zone : IDisposable
     public Matrix4x4 Model => Matrix4x4.CreateTranslation(Origin);
 
     /// <summary>Nome del quartiere della mappa in cui sta il pezzo.</summary>
-    public string Name => GameMap.DistrictName(GameMap.Current.At(X, Z));
+    public string Name => RoadNetwork.Current.SettlementAt(Origin.X, Origin.Z)?.Name ?? GameMap.DistrictName(GameMap.Current.At(X, Z));
 
     private readonly float[,] _h = new float[N + 1, N + 1];
     private readonly List<(float X, float Z, float R)> _clearings = new();
@@ -66,7 +66,7 @@ public sealed partial class Zone : IDisposable
         var rng = new Random((int)(Noise.Hash(x, z, 7) & 0x7FFFFFFF));
         bool home = x == 0 && z == 0;
 
-        if (home)
+        if (home && PathDistance(-5f, 5f) > PathHalf + 2.4f)
             _clearings.Add((-5f, 5f, 1.7f));
         for (int c = 0; c < 3; c++)
             if (rng.NextSingle() < 0.45f) TryAddClearing(rng);
@@ -82,7 +82,7 @@ public sealed partial class Zone : IDisposable
         var mb = new MeshBuilder { ColorRng = rng, ColorJitter = 0.05f };
         BuildTerrain(mb);
         BuildPaths(mb, rng);
-        foreach (var b in Bridges)
+        foreach (var b in _ownBridges)
             b.Build(mb, b.Center - Origin);
         _opaqueData = mb.BuildData();
 
@@ -159,23 +159,32 @@ public sealed partial class Zone : IDisposable
 
     // ------------------------------------------------------------------ geometria
 
-    /// <summary>Ponte dove il fiume della colonna attraversa la strada est-ovest del pezzo.</summary>
+    /// <summary>
+    /// I ponti della rete che toccano il pezzo (per camminarci e guidarci sopra anche a cavallo del bordo); la
+    /// geometria la costruisce solo il pezzo in cui sta il centro del ponte.
+    /// </summary>
     private void BuildRiverBridge()
     {
-        if (!Terrain.HasRiver(X)) return;
-        // Il ponte sta dove il fiume incrocia la strada, che lì è dritta e allineata a lui (vedi Terrain.RoadZ)
-        float x = Terrain.BridgeX(X, Z), z = Terrain.RoadZ(Z, x);
-        bool east = x > Origin.X;
-        if (!WorldMap.EdgeOpen(X, Z, east ? Dir.East : Dir.West)) return;
-        Bridges.Add(new Bridge
+        foreach (var b in RoadNetwork.Current.Bridges)
         {
-            Center = new Vector3(x, 0, z),
-            Dir = Vector3.UnitX,
-            Span = RiverHalf * 2f + 3.4f,
-            BaseY = PathRaise,
-            Arch = 0.4f,
-        });
+            float reach = b.Span * 0.5f + 2f;
+            float dx = MathF.Abs(b.Center.X - Origin.X), dz = MathF.Abs(b.Center.Y - Origin.Z);
+            if (dx > Half + reach || dz > Half + reach) continue;
+            var bridge = new Bridge
+            {
+                Center = new Vector3(b.Center.X, 0, b.Center.Y),
+                Dir = new Vector3(b.Dir.X, 0, b.Dir.Y),
+                Span = b.Span,
+                HalfWidth = b.HalfWidth,
+                BaseY = PathRaise,
+                Arch = 0.4f,
+            };
+            Bridges.Add(bridge);
+            if (dx <= Half && dz <= Half) _ownBridges.Add(bridge);
+        }
     }
+
+    private readonly List<Bridge> _ownBridges = new();
 
     private Vector3 GridPoint(int i, int j) => new(-Half + i * Cell, _h[i, j], -Half + j * Cell);
 
@@ -204,84 +213,138 @@ public sealed partial class Zone : IDisposable
         mb.AddTriangle(a, b, c, color);
     }
 
+    private const float RoadStep = 0.7f; // passo dei vertici lungo le strade
+
     /// <summary>
-    /// Sentieri come lastre di terra battuta con spessore: si seguono le strade globali (ondulate) dentro
-    /// il pezzo. Sul bordo del pezzo i vertici non hanno variazioni casuali, così il pezzo accanto riprende
-    /// la lastra esattamente da lì.
+    /// Le strade della rete che passano nel pezzo, come lastre con spessore (asfalto o terra battuta), più gli slarghi
+    /// agli incroci, le piazze, le aie e gli spiazzi dei falò. Ogni strada si campiona su una griglia globale di
+    /// distanze lungo il suo tratto e si taglia esattamente sul bordo del pezzo: il pezzo accanto la riprende da lì.
     /// </summary>
     private void BuildPaths(MeshBuilder mb, Random rng)
     {
-        const int steps = (int)(Half * 2f / 0.6f);
+        var net = RoadNetwork.Current;
+        foreach (var e in net.EdgesNear(X, Z)) BuildRoad(mb, e);
 
-        // Strada est-ovest della riga Z: metà ovest (tratto dall'incrocio precedente) e metà est
-        bool west = WorldMap.EdgeOpen(X, Z, Dir.West), east = WorldMap.EdgeOpen(X, Z, Dir.East);
-        if (west || east)
-            Strip(rng, steps, k =>
+        foreach (var n in net.NodesIn(X, Z))
+        {
+            if (n.Degree == 0) continue;
+            float x = n.Pos.X - Origin.X, z = n.Pos.Y - Origin.Z;
+            if (HeightLocal(x, z) < WaterY + 0.2f) continue;
+            Vector3 color = n.Piazza ? Terrain.Paving
+                          : n.Edges.Any(e => e.Paved) ? Terrain.Asphalt : Terrain.PaletteAt(n.Pos.X, n.Pos.Y).Path;
+            // Dove una via prosegue soltanto (cambia tipo) basta un piccolo disco a coprire la giunzione
+            float r = n.IsHub ? n.HubRadius : n.Edges.Max(e => e.HalfWidth) + 0.05f;
+            mb.AddDisc(new Vector3(x, HeightLocal(x, z) + PathRaise + 0.006f, z), r, n.IsHub ? 18 : 10, color, rng,
+                       n.Piazza ? 0f : 0.06f, PathRaise + PathDepth, color * 0.8f);
+            if (n.Piazza)
             {
-                float x = -Half + Half * 2f * k / steps;
-                bool open = x < 0f ? west : east;
-                return (new Vector3(x, 0, Terrain.RoadZ(Z, WX(x)) - Origin.Z), Vector3.UnitX, open);
-            }, mb);
-
-        // Strada nord-sud della colonna X
-        bool north = WorldMap.EdgeOpen(X, Z, Dir.North), south = WorldMap.EdgeOpen(X, Z, Dir.South);
-        if (north || south)
-            Strip(rng, steps, k =>
-            {
-                float z = -Half + Half * 2f * k / steps;
-                bool open = z < 0f ? north : south;
-                return (new Vector3(Terrain.RoadX(X, WZ(z)) - Origin.X, 0, z), Vector3.UnitZ, open);
-            }, mb);
+                // Lastricato a cerchi: una corona più scura e il centro più chiaro
+                float y = HeightLocal(x, z) + PathRaise + 0.012f;
+                mb.AddDisc(new Vector3(x, y, z), r * 0.72f, 18, color * 0.86f);
+                mb.AddDisc(new Vector3(x, y + 0.004f, z), r * 0.6f, 18, color * 1.04f);
+                mb.AddDisc(new Vector3(x, y + 0.008f, z), r * 0.18f, 12, color * 0.8f);
+            }
+        }
 
         var pal = Terrain.PaletteAt(Origin.X, Origin.Z);
         Vector3 side = pal.Path * 0.8f;
-        var raise = new Vector3(0, PathRaise, 0);
-        if (Terrain.HasHub(X, Z))
-            mb.AddDisc(raise + new Vector3(0, HeightLocal(0, 0) + 0.006f, 0), HubRadius, 11, pal.Path, rng, 0.08f, PathRaise + PathDepth, side);
         foreach (var c in _clearings)
             mb.AddDisc(new Vector3(c.X, HeightLocal(c.X, c.Z) + PathRaise + 0.005f, c.Z), c.R, 10, pal.Path, rng, 0.1f,
                        PathRaise + PathDepth, side);
     }
 
-    /// <summary>
-    /// Una striscia di sentiero lungo la linea data da <paramref name="at"/> (centro, direzione, tratto aperto).
-    /// Nei centri abitati la carreggiata ha bordi dritti e ai lati corrono i marciapiedi, col cordolo.
-    /// </summary>
-    private void Strip(Random rng, int steps, Func<int, (Vector3 Center, Vector3 Axis, bool Open)> at, MeshBuilder mb)
+    /// <summary>I pezzi del tratto che stanno dentro il pezzo di territorio, con i punti di taglio esatti sul bordo.</summary>
+    private void BuildRoad(MeshBuilder mb, RoadEdge e)
     {
+        bool In(float s)
+        {
+            var p = e.At(s);
+            return MathF.Abs(p.X - Origin.X) <= Half && MathF.Abs(p.Y - Origin.Z) <= Half;
+        }
+
+        var runs = new List<List<float>>();
+        List<float>? run = null;
+        int n = Math.Max(1, (int)MathF.Ceiling(e.Length / RoadStep));
+        bool prevIn = false;
+        float prevS = 0f;
+        for (int k = 0; k <= n; k++)
+        {
+            float s = MathF.Min(k * RoadStep, e.Length);
+            bool inside = In(s);
+            if (k > 0 && inside != prevIn)
+            {
+                // Bisezione: il punto in cui la strada attraversa il bordo (identico per i due pezzi)
+                float a = prevS, b = s;
+                for (int it = 0; it < 24; it++)
+                {
+                    float m = (a + b) * 0.5f;
+                    if (In(m) == prevIn) a = m; else b = m;
+                }
+                float edge = (a + b) * 0.5f;
+                if (inside) runs.Add(run = new List<float> { edge });
+                else
+                {
+                    run?.Add(edge);
+                    run = null;
+                }
+            }
+            if (inside)
+            {
+                if (run == null) runs.Add(run = new List<float>());
+                run.Add(s);
+            }
+            prevIn = inside;
+            prevS = s;
+        }
+        foreach (var r in runs)
+            if (r.Count >= 2) Strip(mb, e, r);
+    }
+
+    /// <summary>
+    /// Una striscia di strada per le distanze <paramref name="ss"/> lungo il tratto. Asfalto con bordi dritti (nei centri
+    /// abitati con i marciapiedi e il cordolo, sulle statali con la mezzeria tratteggiata) oppure terra battuta coi
+    /// bordi un po' irregolari. Sui tratti bagnati (sotto i ponti) la lastra si interrompe.
+    /// </summary>
+    private void Strip(MeshBuilder mb, RoadEdge e, List<float> ss)
+    {
+        float hw = e.HalfWidth;
+        bool dirt = e.Kind == RoadKind.Dirt;
         var raise = new Vector3(0, PathRaise, 0);
         var depth = new Vector3(0, PathRaise + PathDepth, 0);
         var curb = new Vector3(0, Terrain.WalkRaise, 0);
         var walkDepth = depth + curb;
-        Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default;
-        bool prevOk = false, prevWalk = false;
+        var lineUp = new Vector3(0, PathRaise + 0.012f, 0);
+        var lineColor = new Vector3(0.93f, 0.91f, 0.82f);
+        Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default, prevC = default, prevPerp = default;
+        bool prevOk = false, prevPrevOk = false, prevWalk = false;
+        float prevS = 0f;
 
-        bool Dry(Vector3 c) => HeightLocal(c.X, c.Z) > WaterY + 0.2f;
-
-        for (int k = 0; k <= steps; k++)
+        bool DryAt(float s)
         {
-            var (c, axis, open) = at(k);
-            // Direzione locale della strada (segue l'ondulazione) e sua perpendicolare
-            Vector3 next = at(Math.Min(k + 1, steps)).Center, prev = at(Math.Max(k - 1, 0)).Center;
-            Vector3 dir = next - prev;
-            dir = dir.LengthSquared() > 1e-6f ? Vector3.Normalize(dir) : axis;
-            var perp = new Vector3(-dir.Z, 0, dir.X);
+            var p = e.At(s);
+            return HeightLocal(p.X - Origin.X, p.Y - Origin.Z) > WaterY + 0.2f;
+        }
 
-            bool urban = Terrain.Urban(WX(c.X), WZ(c.Z)) >= Terrain.WalkFrom;
-            bool border = k == 0 || k == steps;
-            float jl = border || urban ? 0f : (rng.NextSingle() - 0.5f) * 0.24f;
-            float jr = border || urban ? 0f : (rng.NextSingle() - 0.5f) * 0.24f;
-            Vector3 l = c + perp * (PathHalf + jl), r = c - perp * (PathHalf + jr);
+        for (int k = 0; k < ss.Count; k++)
+        {
+            float s = ss[k];
+            Vector2 w = e.At(s), t = e.Tangent(s);
+            var c = new Vector3(w.X - Origin.X, 0f, w.Y - Origin.Z);
+            c.Y = HeightLocal(c.X, c.Z);
+            var perp = new Vector3(-t.Y, 0, t.X);
+            // Bordi irregolari degli sterrati: funzione continua della distanza lungo il tratto (uguale nei due pezzi)
+            float jl = dirt ? (Terrain.ValueNoise(s * 0.6f, e.Id * 7.3f, 51) - 0.5f) * 0.32f : 0f;
+            float jr = dirt ? (Terrain.ValueNoise(s * 0.6f, e.Id * 7.3f + 3.7f, 52) - 0.5f) * 0.32f : 0f;
+            Vector3 l = c + perp * (hw + jl), r = c - perp * (hw + jr);
             l.Y = HeightLocal(l.X, l.Z);
             r.Y = HeightLocal(r.X, r.Z);
             l += raise;
             r += raise;
-
-            bool ok = open && Dry(c);
+            bool ok = c.Y > WaterY + 0.2f;
 
             // Marciapiedi: dal bordo della carreggiata per WalkWidth, un gradino più su
-            bool walk = ok && urban && !Terrain.NearHub(WX(c.X), WZ(c.Z));
-            Vector3 ol = c + perp * (PathHalf + Terrain.WalkWidth), or = c - perp * (PathHalf + Terrain.WalkWidth);
+            bool walk = ok && !dirt && Terrain.Urban(w.X, w.Y) >= Terrain.WalkFrom && !Terrain.NearHub(w.X, w.Y);
+            Vector3 ol = c + perp * (hw + Terrain.WalkWidth), or = c - perp * (hw + Terrain.WalkWidth);
             ol.Y = HeightLocal(ol.X, ol.Z);
             or.Y = HeightLocal(or.X, or.Z);
             ol += raise + curb;
@@ -302,22 +365,28 @@ public sealed partial class Zone : IDisposable
                 mb.AddQuad(el + curb, eol, eol - walkDepth, el - depth, Curb);
                 mb.AddQuad(er + curb, eor, eor - walkDepth, er - depth, Curb);
             }
-            prevOL = ol; prevOR = or; prevWalk = walk;
+
             if (k > 0 && ok && prevOk)
             {
-                Vector3 color = Terrain.PaletteAt(WX(c.X), WZ(c.Z)).Path, side = color * 0.8f;
+                Vector3 color = dirt ? Terrain.PaletteAt(w.X, w.Y).Path : Terrain.Asphalt, side = color * 0.8f;
                 mb.AddQuad(prevL, l, r, prevR, color);
                 mb.AddQuad(prevL - depth, l - depth, l, prevL, side); // fianco sinistro
                 mb.AddQuad(prevR, r, r - depth, prevR - depth, side); // fianco destro
-                // Testate solo dove la lastra si interrompe (acqua, fine del tratto), non sul bordo del pezzo
-                var (pc, _, popen) = at(k - 2 < 0 ? 0 : k - 2);
-                if (k >= 2 && !(popen && Dry(pc)))
-                    mb.AddQuad(prevR - depth, prevL - depth, prevL, prevR, side);
-                var (nc, _, nopen) = at(Math.Min(k + 1, steps));
-                if (k < steps && !(nopen && Dry(nc)))
-                    mb.AddQuad(l - depth, r - depth, r, l, side);
+                // Testate solo dove la lastra si interrompe davvero (acqua), non sul bordo del pezzo
+                if (k >= 2 && !prevPrevOk) mb.AddQuad(prevR - depth, prevL - depth, prevL, prevR, side);
+                if (k + 1 < ss.Count && !DryAt(ss[k + 1])) mb.AddQuad(l - depth, r - depth, r, l, side);
+                // Mezzeria tratteggiata delle statali (3 unità sì, 3 no, sulla distanza lungo il tratto)
+                if (e.Kind == RoadKind.Main && ((int)MathF.Floor((prevS + s) * 0.5f / 3f) & 1) == 0
+                    && !Terrain.NearHub(w.X, w.Y))
+                {
+                    const float lw = 0.07f;
+                    mb.AddQuad(prevC + lineUp + prevPerp * lw, c + lineUp + perp * lw, c + lineUp - perp * lw,
+                               prevC + lineUp - prevPerp * lw, lineColor);
+                }
             }
-            prevL = l; prevR = r; prevOk = ok;
+            prevOL = ol; prevOR = or; prevWalk = walk;
+            prevL = l; prevR = r; prevC = c; prevPerp = perp;
+            prevPrevOk = prevOk; prevOk = ok; prevS = s;
         }
     }
 
@@ -387,18 +456,19 @@ public sealed partial class Zone : IDisposable
         // Prova a piazzare 'count' oggetti del bioma dato: un punto viene accettato con probabilità pari al
         // peso del bioma lì, così la vegetazione sfuma insieme ai colori del terreno.
         void Scatter(Biome? biome, int count, float minS, float maxS, float radius, float colliderR, float pathMargin,
-                     Action<Vector3, float> build, Push kind = Push.None)
+                     Action<Vector3, float> build, Push kind = Push.None, bool forest = false)
         {
             count = (int)(count * AreaFactor);
             for (int n = 0; n < count; n++)
             {
-                for (int t = 0; t < 30; t++)
+                for (int t = 0; t < (forest ? 6 : 30); t++)
                 {
                     float s = minS + rng.NextSingle() * (maxS - minS);
                     float x = rng.NextSingle() * Half * 2f - Half, z = rng.NextSingle() * Half * 2f - Half;
                     if (biome is { } b && rng.NextSingle() > Terrain.Weight(b, WX(x), WZ(z))) continue;
+                    if (forest && rng.NextSingle() > Terrain.Forest(WX(x), WZ(z))) continue;
                     // In paese restano giardini e alberi qua e là; in città pochissimi
-                    if (rng.NextSingle() < 0.98f * Noise.Smooth(0.15f, 0.9f, Terrain.Urban(WX(x), WZ(z)))) continue;
+                    if (rng.NextSingle() < Noise.Smooth(0.15f, 0.85f, Terrain.Urban(WX(x), WZ(z)))) continue;
                     if (!Free(x, z, radius * s, pathMargin)) continue;
                     placed.Add((x, z, radius * s));
                     if (colliderR > 0f && kind == Push.None) AddCollider(x, z, colliderR * s);
@@ -417,6 +487,7 @@ public sealed partial class Zone : IDisposable
 
         void Fixed(float x, float z, float radius, float colliderR, Action<Vector3> build, Push kind = Push.None, float size = 1f)
         {
+            if (!Free(x, z, radius, 0.6f)) return; // la rete stradale può passare proprio lì
             placed.Add((x, z, radius));
             if (colliderR > 0f && kind == Push.None) AddCollider(x, z, colliderR);
             if (kind == Push.None) mb.BeginObject(); // solo gli alberi diventano trasparenti
@@ -447,8 +518,30 @@ public sealed partial class Zone : IDisposable
             AddCollider(c.X, c.Z, 0.85f);
         }
 
-        // Prima le costruzioni (case, palazzi, lampioni): la vegetazione riempie quel che resta
+        // Prima le costruzioni (case, palazzi, lampioni, cascine): la vegetazione riempie quel che resta
         BuildTown(mb, glow, rng, placed);
+        BuildFarms(mb, glow, rng, placed);
+
+        // Boschi fitti (macchie in campagna e fasce tra un paese e l'altro): alberi del bioma del posto
+        Scatter(null, 16, 0.9f, 1.55f, 1.15f, 0.45f, 0.7f, (p, s) =>
+        {
+            switch (Terrain.BiomeAt(WX(p.X), WZ(p.Z)))
+            {
+                case Biome.Snowy: Props.Pine(mb, rng, p, s, new Vector3(0.12f, 0.36f, 0.24f), snowy: true); break;
+                case Biome.Autumn:
+                    if (rng.NextSingle() < 0.65f) Props.RoundTree(mb, rng, p, s, autumn);
+                    else Props.Pine(mb, rng, p, s, new Vector3(0.14f, 0.38f, 0.2f));
+                    break;
+                case Biome.Blossom:
+                    if (rng.NextSingle() < 0.6f) Props.RoundTree(mb, rng, p, s, blossom);
+                    else Props.Pine(mb, rng, p, s, pineGreen);
+                    break;
+                default:
+                    if (rng.NextSingle() < 0.55f) Props.Pine(mb, rng, p, s, pineGreen);
+                    else Props.ConeTree(mb, rng, p, s, coneGreen);
+                    break;
+            }
+        }, forest: true);
 
         if (home)
         {

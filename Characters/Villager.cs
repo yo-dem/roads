@@ -160,7 +160,10 @@ public sealed class Villager : IDisposable
     /// <param name="input">Direzione da tastiera nel mondo (XZ); lunghezza 0 = nessun input.</param>
     /// <param name="slow">Shift premuto: passo lento.</param>
     /// <param name="blocked">Ostacoli in più rispetto al mondo (l'auto parcheggiata).</param>
-    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Func<Vector3, float, bool>? blocked = null)
+    /// <param name="face">Se dato, il personaggio guarda in questa direzione (yaw) qualunque sia il movimento: guida
+    /// "da mini auto", dove le frecce laterali lo girano e quella indietro lo fa arretrare senza voltarsi.</param>
+    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Func<Vector3, float, bool>? blocked = null,
+                       float? face = null)
     {
         _time += dt;
 
@@ -186,7 +189,8 @@ public sealed class Villager : IDisposable
 
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;
         _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed : 0f), Noise.Damp(14f, dt));
-        if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
+        if (face is { } f) Yaw += Noise.WrapAngle(f - Yaw) * MathF.Min(1f, 20f * dt);
+        else if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
 
         // Movimento con "scivolamento" lungo gli ostacoli
         Vector3 step = new(_velocity.X * dt, 0, _velocity.Z * dt);
