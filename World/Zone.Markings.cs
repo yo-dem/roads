@@ -32,8 +32,8 @@ public sealed partial class Zone
     /// <summary>Distanza dal capo A (e dal capo B) da cui cominciano i segni: fuori dallo slargo dell'incrocio.</summary>
     private static (float From, float To) PaintRange(RoadEdge e, float margin)
     {
-        float from = (e.A.IsHub ? e.A.HubRadius : 0f) + margin;
-        float to = e.Length - (e.B.IsHub ? e.B.HubRadius : 0f) - margin;
+        float from = e.A.TrimFor(e) + margin;
+        float to = e.Length - e.B.TrimFor(e) - margin;
         return (from, to);
     }
 
@@ -146,7 +146,7 @@ public sealed partial class Zone
             Vector2 at = node.Pos;
             if (Terrain.Urban(at.X, at.Y) < Terrain.WalkFrom) continue;
             bool atA = node == e.A;
-            float z0 = node.HubRadius + 0.35f, z1 = z0 + 1.4f;
+            float z0 = node.TrimFor(e) + 0.35f, z1 = z0 + 1.4f;
             if (z1 + 1f > e.Length * 0.5f) continue; // tratto troppo corto
             float s0 = atA ? z0 : e.Length - z1, s1 = atA ? z1 : e.Length - z0;
             for (float o = -hw + 0.35f; o < hw - 0.2f; o += 0.62f)
@@ -194,11 +194,11 @@ public sealed partial class Zone
             float side = e.HalfWidth + Terrain.WalkWidth * 0.55f;
             // "Senso unico" all'inizio, sul marciapiede a destra di chi entra e rivolto verso di lui: freccia bianca
             // in su su fondo blu
-            float sIn = e.ToS(entry, entry.HubRadius + 2.2f);
+            float sIn = e.ToS(entry, entry.TrimFor(e) + 2.2f);
             if (sIn > 0f && sIn < e.Length)
                 Sign(mb, placed, EdgeLocal(e, sIn, dir * side), e.Tangent(sIn) * dir, oneWay: true);
             // "Divieto d'accesso" in fondo, per chi arriverebbe contromano: a destra del suo verso di marcia
-            float sOut = e.ToS(exit, exit.HubRadius + 2.2f);
+            float sOut = e.ToS(exit, exit.TrimFor(e) + 2.2f);
             if (sOut > 0f && sOut < e.Length)
                 Sign(mb, placed, EdgeLocal(e, sOut, -dir * side), -e.Tangent(sOut) * dir, oneWay: false);
         }

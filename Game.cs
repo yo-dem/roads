@@ -326,7 +326,7 @@ public sealed partial class Game : IDisposable
             }
         }
 
-        // Punti di riferimento: sempre, anche lontanissimi (la nebbia non li copre del tutto)
+        // Punti di riferimento: si disegnano sempre, ma la nebbia li copre come tutto il resto
         foreach (var l in _world.Landmarks) l.Collect(_opaque, _time, night);
 
         _cloudItems.Clear();

@@ -234,6 +234,11 @@ public sealed partial class Zone : IDisposable
             if (n.Degree == 0) continue;
             float x = n.Pos.X - Origin.X, z = n.Pos.Y - Origin.Z;
             if (HeightLocal(x, z) < WaterY + 0.2f) continue;
+            if (n.Junction)
+            {
+                BuildJunction(mb, n);
+                continue;
+            }
             Vector3 color = n.Piazza ? Terrain.Paving
                           : n.Edges.Any(e => e.Paved) ? Terrain.Asphalt : Terrain.PaletteAt(n.Pos.X, n.Pos.Y).Path;
             // Dove una via prosegue soltanto (cambia tipo) basta un piccolo disco a coprire la giunzione
@@ -256,6 +261,87 @@ public sealed partial class Zone : IDisposable
             mb.AddDisc(new Vector3(c.X, HeightLocal(c.X, c.Z) + PathRaise + 0.005f, c.Z), c.R, 10, pal.Path, rng, 0.1f,
                        PathRaise + PathDepth, side);
     }
+
+    /// <summary>Triangolo orizzontale con la normale verso l'alto, qualunque sia l'ordine dei vertici.</summary>
+    private static void UpTriangle(MeshBuilder mb, Vector3 a, Vector3 b, Vector3 c, Vector3 color)
+    {
+        if (Vector3.Cross(b - a, c - a).Y < 0f) (b, c) = (c, b);
+        mb.AddTriangle(a, b, c, color);
+    }
+
+    /// <summary>
+    /// Un incrocio: il poligono che unisce i bordi delle carreggiate là dove finiscono (vedi
+    /// <see cref="RoadNetwork"/>.TrimJunction), con lo spessore della lastra. Nei centri abitati, tra una strada e la
+    /// successiva il marciapiede gira l'angolo: un pezzo di marciapiede che va dal bordo dell'una a quello dell'altra,
+    /// col cordolo lungo l'incrocio, raccordato esattamente con i marciapiedi delle due vie.
+    /// </summary>
+    private void BuildJunction(MeshBuilder mb, RoadNode n)
+    {
+        Vector3 L(Vector2 p) => new(p.X - Origin.X, 0f, p.Y - Origin.Z);
+        var center = L(n.Pos);
+        float top = HeightLocal(center.X, center.Z) + PathRaise + 0.006f;
+        bool paved = n.Edges.Any(e => e.Paved);
+        Vector3 color = n.Piazza ? Terrain.Paving : paved ? Terrain.Asphalt : Terrain.PaletteAt(n.Pos.X, n.Pos.Y).Path;
+        Vector3 side = color * 0.8f;
+        var depth = new Vector3(0, PathRaise + PathDepth, 0);
+
+        // Per ogni strada: centro della carreggiata dove finisce, la sua destra (guardando fuori dall'incrocio), mezza larghezza
+        var arms = n.Edges.Select((e, i) =>
+        {
+            float s = e.ToS(n, n.Trim[i]);
+            Vector2 p = e.At(s), t = e.Tangent(s) * (e.A == n ? 1f : -1f);
+            return (P: p, Right: new Vector2(-t.Y, t.X), Hw: e.HalfWidth, Ang: MathF.Atan2(p.Y - n.Pos.Y, p.X - n.Pos.X));
+        }).OrderBy(a => a.Ang).ToArray();
+
+        // Poligono: per ogni strada il bordo sinistro e quello destro, girando attorno al centro
+        var ring = new List<Vector3>();
+        foreach (var a in arms)
+        {
+            ring.Add(L(a.P - a.Right * a.Hw) with { Y = top });
+            ring.Add(L(a.P + a.Right * a.Hw) with { Y = top });
+        }
+        var c = center with { Y = top };
+        for (int i = 0; i < ring.Count; i++)
+            UpTriangle(mb, c, ring[i], ring[(i + 1) % ring.Count], color);
+        if (n.Piazza)
+        {
+            // Lastricato a cerchi al centro della piazza (dentro il poligono)
+            float r0 = n.Trim.Min() * 0.62f;
+            mb.AddDisc(c + new Vector3(0, 0.006f, 0), r0, 18, color * 0.86f);
+            mb.AddDisc(c + new Vector3(0, 0.010f, 0), r0 * 0.82f, 18, color * 1.04f);
+            mb.AddDisc(c + new Vector3(0, 0.014f, 0), r0 * 0.25f, 12, color * 0.8f);
+        }
+
+        var curbUp = new Vector3(0, Terrain.WalkRaise, 0);
+        for (int q = 0; q < arms.Length; q++)
+        {
+            var a = arms[q];
+            var b = arms[(q + 1) % arms.Length];
+            Vector3 r = ring[2 * q + 1], l = ring[(2 * q + 2) % ring.Count]; // bordo destro di a, sinistro di b
+            if (!n.Sidewalks)
+            {
+                // Fianco della lastra lungo il bordo dell'incrocio (entrambe le facce: si vede da ogni lato)
+                mb.AddQuad(r - depth, l - depth, l, r, side);
+                mb.AddQuad(l - depth, r - depth, r, l, side);
+                continue;
+            }
+            // Angolo di marciapiede: dal bordo destro di a (e dal suo marciapiede) al bordo sinistro di b
+            Vector3 rc = r + curbUp, lc = l + curbUp;
+            Vector3 ro = L(a.P + a.Right * (a.Hw + Terrain.WalkWidth)) with { Y = rc.Y };
+            Vector3 lo = L(b.P - b.Right * (b.Hw + Terrain.WalkWidth)) with { Y = lc.Y };
+            UpTriangle(mb, rc, ro, lo, Sidewalk);
+            UpTriangle(mb, rc, lo, lc, Sidewalk);
+            mb.AddQuad(r, l, lc, rc, Curb);                 // cordolo verso l'incrocio
+            mb.AddQuad(l, r, rc, lc, Curb);
+            var down = depth + curbUp;
+            mb.AddQuad(ro - down, lo - down, lo, ro, Sidewalk * 0.8f); // fianco esterno
+            mb.AddQuad(lo - down, ro - down, ro, lo, Sidewalk * 0.8f);
+        }
+    }
+
+    /// <summary>Dove comincia il marciapiede del tratto venendo dal nodo: subito fuori dall'incrocio.</summary>
+    private static float WalkStart(RoadEdge e, RoadNode n) =>
+        n.Junction ? n.TrimFor(e) : n.IsHub ? n.HubRadius + Terrain.WalkWidth + 0.4f : 0f;
 
     /// <summary>I pezzi del tratto che stanno dentro il pezzo di territorio, con i punti di taglio esatti sul bordo.</summary>
     private void BuildRoad(MeshBuilder mb, RoadEdge e)
@@ -319,6 +405,11 @@ public sealed partial class Zone : IDisposable
         var walkDepth = depth + curb;
         Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default;
         bool prevOk = false, prevPrevOk = false, prevWalk = false;
+        // Il marciapiede va da dove finisce un incrocio a dove comincia l'altro: i suoi capi si aggiungono ai punti,
+        // così arriva esattamente all'angolo di marciapiede dell'incrocio
+        float walkFrom = WalkStart(e, e.A), walkTo = e.Length - WalkStart(e, e.B);
+        ss = ss.Concat(new[] { walkFrom, walkTo }.Where(v => v > ss[0] + 0.02f && v < ss[^1] - 0.02f))
+               .Distinct().Order().ToList();
 
         bool DryAt(float s)
         {
@@ -344,7 +435,8 @@ public sealed partial class Zone : IDisposable
             bool ok = c.Y > WaterY + 0.2f;
 
             // Marciapiedi: dal bordo della carreggiata per WalkWidth, un gradino più su
-            bool walk = ok && !dirt && Terrain.Urban(w.X, w.Y) >= Terrain.WalkFrom && !Terrain.NearHub(w.X, w.Y);
+            bool walk = ok && !dirt && Terrain.Urban(w.X, w.Y) >= Terrain.WalkFrom
+                        && s >= walkFrom - 0.01f && s <= walkTo + 0.01f;
             Vector3 ol = c + perp * (hw + Terrain.WalkWidth), or = c - perp * (hw + Terrain.WalkWidth);
             ol.Y = HeightLocal(ol.X, ol.Z);
             or.Y = HeightLocal(or.X, or.Z);

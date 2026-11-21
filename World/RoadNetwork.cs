@@ -68,6 +68,26 @@ public sealed class RoadNode
     public int Degree => Edges.Count;
     /// <summary>Incrocio, fine strada o piazza: lì c'è uno slargo (a 2 strade la via prosegue soltanto).</summary>
     public bool IsHub => Edges.Count != 2 || Piazza;
+    /// <summary>
+    /// Incrocio vero (o giunzione tra due vie): niente disco, le carreggiate finiscono a <see cref="Trim"/> dal centro
+    /// e lo spazio in mezzo è un poligono che ne unisce i bordi; agli angoli girano i marciapiedi.
+    /// </summary>
+    public bool Junction;
+    /// <summary>Per ogni tratto (stesso ordine di <see cref="Edges"/>): a che distanza dal centro finisce la sua carreggiata.</summary>
+    public float[] Trim = [];
+    /// <summary>Se gli angoli dell'incrocio hanno il marciapiede (centri abitati, vie asfaltate).</summary>
+    public bool Sidewalks;
+
+    /// <summary>Dove comincia la carreggiata del tratto <paramref name="e"/> partendo da questo nodo.</summary>
+    public float TrimFor(RoadEdge e)
+    {
+        if (Junction)
+        {
+            int i = Edges.IndexOf(e);
+            return i >= 0 ? Trim[i] : HubRadius;
+        }
+        return IsHub ? HubRadius : 0f;
+    }
 }
 
 /// <summary>Un tratto di strada tra due nodi: una spezzata fitta (un punto ogni ~2 unità) da A a B.</summary>
@@ -250,6 +270,8 @@ public sealed class RoadNetwork
         {
             float hw = n.Edges.Count > 0 ? n.Edges.Max(e => e.HalfWidth) : 1.3f;
             n.HubRadius = n.Piazza ? MathF.Max(5.5f, hw + 2.6f) : n.Destination ? hw + 2.2f : hw + 0.95f;
+            // Incroci e piazze sono poligoni che uniscono le strade; le piazze, più ampie e lastricate
+            if (!n.Destination && n.Degree >= 2) TrimJunction(n, n.Piazza ? MathF.Max(5.5f, hw + 2.6f) : 0.6f);
         }
 
         _segs.Clear();
@@ -258,7 +280,7 @@ public sealed class RoadNetwork
             for (int k = 0; k + 1 < e.Points.Count; k++)
                 _segs.Add(new Seg(e.Points[k], e.Points[k + 1], e.HalfWidth, e, k, null));
         foreach (var n in Nodes)
-            if (n.IsHub) _segs.Add(new Seg(n.Pos, n.Pos, n.HubRadius, null, 0, n));
+            if (n.IsHub || n.Junction) _segs.Add(new Seg(n.Pos, n.Pos, n.HubRadius, null, 0, n));
 
         for (int s = 0; s < _segs.Count; s++)
         {
@@ -298,6 +320,38 @@ public sealed class RoadNetwork
             if (!_nodesByZone.TryGetValue(cell, out var list)) _nodesByZone[cell] = list = new();
             list.Add(n);
         }
+    }
+
+    /// <summary>
+    /// Dove finiscono le carreggiate attorno all'incrocio. Per due strade vicine (in ordine attorno al nodo) i bordi
+    /// esterni (marciapiede compreso, nei centri abitati) si incontrano a una certa distanza dal centro lungo ciascuna:
+    /// lì finisce la carreggiata, così l'incrocio è il poligono che unisce i bordi, senza sporgenze rotonde.
+    /// Strade quasi opposte (giunzioni, il lato "dietro" di un incrocio a T) non impongono nulla.
+    /// </summary>
+    private void TrimJunction(RoadNode n, float minTrim)
+    {
+        n.Junction = true;
+        n.Sidewalks = Urban(n.Pos.X, n.Pos.Y) >= Terrain.WalkFrom && n.Edges.All(e => e.Paved);
+        int k = n.Degree;
+        var dirs = n.Edges.Select(e => e.LeaveDir(n, 3f)).ToArray();
+        var width = n.Edges.Select(e => e.HalfWidth + (n.Sidewalks ? Terrain.WalkWidth : 0.25f)).ToArray();
+        var order = Enumerable.Range(0, k).OrderBy(i => MathF.Atan2(dirs[i].Y, dirs[i].X)).ToArray();
+        var trim = new float[k];
+        for (int q = 0; q < k; q++)
+        {
+            int i = order[q], j = order[(q + 1) % k];
+            float ai = MathF.Atan2(dirs[i].Y, dirs[i].X), aj = MathF.Atan2(dirs[j].Y, dirs[j].X);
+            float gap = aj - ai;
+            if (gap <= 0f) gap += MathF.Tau;
+            if (gap > 2.6f) continue; // strade quasi opposte: i bordi corrono paralleli
+            float sin = MathF.Sin(gap), cos = MathF.Cos(gap);
+            trim[i] = MathF.Max(trim[i], (width[j] + width[i] * cos) / sin);
+            trim[j] = MathF.Max(trim[j], (width[i] + width[j] * cos) / sin);
+        }
+        for (int i = 0; i < k; i++)
+            trim[i] = Math.Clamp(MathF.Max(trim[i] + 0.25f, minTrim), 0.6f, MathF.Min(14f, n.Edges[i].Length * 0.45f));
+        n.Trim = trim;
+        n.HubRadius = trim.Max();
     }
 
     /// <summary>I tratti di strada che passano dentro (o appena attorno) al pezzo (i, j).</summary>

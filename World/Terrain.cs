@@ -113,7 +113,7 @@ public static class Terrain
     public const float WalkFrom = 0.35f;    // da questa densità urbana in su ci sono i marciapiedi
 
     /// <summary>Vicino a uno slargo (incrocio, piazza) i marciapiedi si interrompono: lì si incrociano le carreggiate.</summary>
-    public static bool NearHub(float x, float z) => RoadNetwork.Current.HubAt(new Vector2(x, z), WalkWidth + 0.4f) != null;
+    public static bool NearHub(float x, float z) => RoadNetwork.Current.HubAt(new Vector2(x, z), 0f) != null;
 
     /// <summary>Il punto è su un marciapiede (fascia lungo le strade asfaltate dei centri abitati)?</summary>
     public static bool OnSidewalk(float x, float z)

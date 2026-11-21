@@ -197,7 +197,8 @@ public sealed partial class Zone
             var (c, dir) = RoadPoint(e, s);
             if (!InZone(c, 0.5f)) continue;
             float wx = WX(c.X), wz = WZ(c.Z);
-            if (Terrain.Urban(wx, wz) < Terrain.WalkFrom || Terrain.NearHub(wx, wz)) continue;
+            if (Terrain.Urban(wx, wz) < Terrain.WalkFrom) continue;
+            if (s < WalkStart(e, e.A) + 0.8f || s > e.Length - WalkStart(e, e.B) - 0.8f) continue; // non dentro gli incroci
             float side = k % 2 == 0 ? 1f : -1f;
             Vector3 perp = new Vector3(-dir.Z, 0, dir.X) * side;
             Vector3 p = c + perp * (e.HalfWidth + Terrain.WalkWidth - 0.25f);
