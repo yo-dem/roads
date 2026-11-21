@@ -126,11 +126,16 @@ public sealed class RoadBuilder
         return n;
     }
 
-    private RoadEdge Connect(RoadNode a, RoadNode b, List<Vector2> pts, RoadKind kind, int comp)
+    private RoadEdge Connect(RoadNode a, RoadNode b, List<Vector2> pts, RoadKind kind, int comp,
+                             RoadLayout? layout = null, int oneWay = 0)
     {
         pts[0] = a.Pos;
         pts[^1] = b.Pos;
-        var e = new RoadEdge { A = a, B = b, Kind = kind, Points = pts };
+        var e = new RoadEdge
+        {
+            A = a, B = b, Kind = kind, Points = pts, OneWay = oneWay,
+            Layout = layout ?? (kind == RoadKind.Dirt ? RoadLayout.Single : RoadLayout.TwoWay),
+        };
         e.Measure();
         a.Edges.Add(e);
         b.Edges.Add(e);
@@ -162,8 +167,8 @@ public sealed class RoadBuilder
         int comp = _compOf.GetValueOrDefault(e.A, CityComp);
         var n = NewNode(at, comp);
         Remove(e);
-        Connect(e.A, n, first, e.Kind, comp);
-        Connect(n, e.B, second, e.Kind, comp);
+        Connect(e.A, n, first, e.Kind, comp, e.Layout, e.OneWay);
+        Connect(n, e.B, second, e.Kind, comp, e.Layout, e.OneWay);
         return n;
     }
 
@@ -189,7 +194,7 @@ public sealed class RoadBuilder
     /// Un tratto è costruibile? Asciutto, lontano dai punti di riferimento e, se attraversa un fiume, solo di traverso
     /// (quasi est-ovest, una volta sola) e non accanto ad altre strade già fatte (per i nuovi quartieri).
     /// </summary>
-    private bool Valid(List<Vector2> pts, bool avoidRoads, int ownComp = -1)
+    private bool Valid(List<Vector2> pts, bool avoidRoads, int ownComp = -1, float margin = 0f)
     {
         int crossings = 0;
         for (int k = 0; k < pts.Count; k++)
@@ -197,7 +202,7 @@ public sealed class RoadBuilder
             var p = pts[k];
             if (_map.Sample(p.X, p.Y).Land < 0.88f) return false;
             foreach (var l in _map.Landmarks)
-                if (Vector2.Distance(p, l.Pos) < l.Radius + 3.5f) return false;
+                if (Vector2.Distance(p, l.Pos) < l.Radius + 3.5f + margin) return false;
             if (avoidRoads && CellOf(p, out int i, out int j) && _occ[j * _w + i] >= 0 && _occ[j * _w + i] != ownComp) return false;
             if (k == 0) continue;
             if (RiverSide(pts[k - 1]) != RiverSide(p))
@@ -245,7 +250,7 @@ public sealed class RoadBuilder
             coords.Add(u);
             coords.Insert(0, -u);
         }
-        int n = coords.Count, mid = coords.IndexOf(0f);
+        int n = coords.Count, mid0 = coords.IndexOf(0f);
         var grid = new RoadNode?[n, n];
         for (int a = 0; a < n; a++)
             for (int b = 0; b < n; b++)
@@ -266,7 +271,19 @@ public sealed class RoadBuilder
                 grid[a, b] = new RoadNode { Pos = p };
             }
 
-        var links = new List<(RoadNode A, RoadNode B, List<Vector2> Pts)>();
+        // Tipi di via: le due linee che passano per il centro sono viali (2+2 corsie con lo spartitraffico); nel
+        // cuore della città le vie alternate sono sensi unici, una in un verso e la successiva nell'altro (come a
+        // Manhattan, così si arriva comunque dappertutto); le altre sono a doppio senso.
+        (RoadLayout Layout, int OneWay) StreetType(int line, Vector2 mid)
+        {
+            int off = line - mid0;
+            if (off == 0) return (RoadLayout.Avenue, 0);
+            if ((off & 1) != 0 && Vector2.Distance(mid, city.Pos) < R * 0.72f)
+                return (RoadLayout.OneWay, ((off % 4) + 4) % 4 == 1 ? 1 : -1);
+            return (RoadLayout.TwoWay, 0);
+        }
+
+        var links = new List<(RoadNode A, RoadNode B, List<Vector2> Pts, RoadLayout Layout, int OneWay)>();
         for (int a = 0; a < n; a++)
             for (int b = 0; b < n; b++)
             {
@@ -275,24 +292,30 @@ public sealed class RoadBuilder
                 {
                     if (a + da >= n || b + db >= n || grid[a + da, b + db] is not { } q) continue;
                     var pts = Line(p.Pos, q.Pos);
-                    if (!Valid(pts, avoidRoads: false)) continue;
-                    links.Add((p, q, pts));
+                    var (layout, oneWay) = StreetType(da == 1 ? b : a, (p.Pos + q.Pos) * 0.5f);
+                    float margin = layout == RoadLayout.Avenue ? 2f : 0f;
+                    if (!Valid(pts, avoidRoads: false, margin: margin))
+                    {
+                        if (layout != RoadLayout.Avenue || !Valid(pts, avoidRoads: false)) continue;
+                        layout = RoadLayout.TwoWay; // un viale che passerebbe troppo vicino a un monumento si restringe
+                    }
+                    links.Add((p, q, pts, layout, oneWay));
                 }
             }
 
         // Qualche via in meno lontano dal centro: isolati più grandi, ma senza creare vicoli ciechi
         var degree = new Dictionary<RoadNode, int>();
-        foreach (var (a, b, _) in links)
+        foreach (var (a, b, _, _, _) in links)
         {
             degree[a] = degree.GetValueOrDefault(a) + 1;
             degree[b] = degree.GetValueOrDefault(b) + 1;
         }
-        var kept = new List<(RoadNode A, RoadNode B, List<Vector2> Pts)>();
+        var kept = new List<(RoadNode A, RoadNode B, List<Vector2> Pts, RoadLayout Layout, int OneWay)>();
         foreach (var link in links.OrderBy(_ => rng.Next()))
         {
             Vector2 m = (link.A.Pos + link.B.Pos) * 0.5f;
             float far = Noise.Smooth(R * 0.2f, R * 0.9f, Vector2.Distance(m, city.Pos));
-            bool drop = far > 0f && rng.NextSingle() < 0.1f + 0.22f * far
+            bool drop = far > 0f && link.Layout != RoadLayout.Avenue && rng.NextSingle() < 0.1f + 0.22f * far
                         && degree[link.A] >= 3 && degree[link.B] >= 3;
             if (drop)
             {
@@ -304,7 +327,7 @@ public sealed class RoadBuilder
 
         // Si tiene solo il pezzo più grande del reticolo (un fiume o la costa possono staccarne dei brandelli)
         var adj = new Dictionary<RoadNode, List<RoadNode>>();
-        foreach (var (a, b, _) in kept)
+        foreach (var (a, b, _, _, _) in kept)
         {
             (adj.TryGetValue(a, out var la) ? la : adj[a] = new()).Add(b);
             (adj.TryGetValue(b, out var lb) ? lb : adj[b] = new()).Add(a);
@@ -328,8 +351,8 @@ public sealed class RoadBuilder
             _net.Nodes.Add(node);
             _compOf[node] = CityComp;
         }
-        foreach (var (a, b, pts) in kept)
-            if (best.Contains(a) && best.Contains(b)) Connect(a, b, pts, RoadKind.Street, CityComp);
+        foreach (var (a, b, pts, layout, oneWay) in kept)
+            if (best.Contains(a) && best.Contains(b)) Connect(a, b, pts, RoadKind.Street, CityComp, layout, oneWay);
 
         // Niente vicoli ciechi in città
         PruneDeadEnds();

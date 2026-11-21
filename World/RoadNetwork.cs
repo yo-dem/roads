@@ -13,6 +13,19 @@ public enum RoadKind
     Dirt,
 }
 
+/// <summary>Disposizione delle corsie di un tratto.</summary>
+public enum RoadLayout
+{
+    /// <summary>Doppio senso, una corsia per verso (statali, vie di città e paese).</summary>
+    TwoWay,
+    /// <summary>Una corsia sola, si passa in entrambi i versi (sterrati).</summary>
+    Single,
+    /// <summary>Senso unico, una corsia stretta.</summary>
+    OneWay,
+    /// <summary>Viale: due corsie per verso con lo spartitraffico in mezzo.</summary>
+    Avenue,
+}
+
 /// <summary>Un centro abitato: la città (grande, al centro) o un paese. La densità cala con la distanza dal centro.</summary>
 public sealed class Settlement
 {
@@ -65,11 +78,56 @@ public sealed class RoadEdge
     public required RoadNode B;
     public required RoadKind Kind;
     public required List<Vector2> Points;
+    /// <summary>Come sono disposte le corsie (di serie: una sola sugli sterrati, doppio senso altrove).</summary>
+    public RoadLayout Layout;
+    /// <summary>Sensi unici: +1 si va solo da A verso B, -1 solo da B verso A (0 doppio senso).</summary>
+    public int OneWay;
     private float[] _cum = [];
 
-    public float HalfWidth => WidthOf(Kind);
-    public static float WidthOf(RoadKind k) => k switch { RoadKind.Main => 1.6f, RoadKind.Street => 1.45f, _ => 1.15f };
+    public const float AvenueLane = 1.4f, AvenueMedian = 0.7f;
+
+    public float HalfWidth => Layout switch
+    {
+        RoadLayout.Avenue => AvenueLane * 2f + AvenueMedian * 0.5f,
+        RoadLayout.OneWay => 1.0f,
+        RoadLayout.Single => 1.15f,
+        _ => Kind == RoadKind.Main ? 1.6f : 1.5f,
+    };
     public bool Paved => Kind != RoadKind.Dirt;
+
+    /// <summary>
+    /// Le corsie: scostamento del centro corsia dalla mezzeria verso destra (destra di chi va da A a B) e verso di
+    /// marcia (+1 da A a B, -1 da B ad A, 0 entrambi). Si guida a destra.
+    /// </summary>
+    public (float Offset, int Dir)[] Lanes => Layout switch
+    {
+        RoadLayout.TwoWay => [(HalfWidth * 0.5f, 1), (-HalfWidth * 0.5f, -1)],
+        RoadLayout.Avenue =>
+        [
+            (AvenueMedian * 0.5f + AvenueLane * 0.5f, 1), (AvenueMedian * 0.5f + AvenueLane * 1.5f, 1),
+            (-AvenueMedian * 0.5f - AvenueLane * 0.5f, -1), (-AvenueMedian * 0.5f - AvenueLane * 1.5f, -1),
+        ],
+        RoadLayout.OneWay => [(0f, OneWay)],
+        _ => [(0f, 0)],
+    };
+
+    /// <summary>
+    /// Centri delle corsie per chi viaggia nel verso <paramref name="dir"/> (+1 da A a B), come scostamento verso la
+    /// SUA destra. Chi va contromano su un senso unico ha comunque la corsia (non lo si ferma).
+    /// </summary>
+    public float[] TravelLanes(float dir)
+    {
+        var mine = Lanes.Where(l => l.Dir == 0 || l.Dir == MathF.Sign(dir)).Select(l => l.Offset * dir).ToArray();
+        return mine.Length > 0 ? mine : Lanes.Select(l => l.Offset * dir).ToArray();
+    }
+
+    /// <summary>Mezza larghezza di una corsia.</summary>
+    public float LaneHalf => Layout switch
+    {
+        RoadLayout.Avenue => AvenueLane * 0.5f,
+        RoadLayout.TwoWay => HalfWidth * 0.5f,
+        _ => HalfWidth,
+    };
     public float Length => _cum.Length > 0 ? _cum[^1] : 0f;
     public int Count => Points.Count;
     public float CumAt(int i) => _cum[i];
@@ -191,7 +249,7 @@ public sealed class RoadNetwork
         foreach (var n in Nodes)
         {
             float hw = n.Edges.Count > 0 ? n.Edges.Max(e => e.HalfWidth) : 1.3f;
-            n.HubRadius = n.Piazza ? (n.Destination ? 4.2f : 5.5f) : n.Destination ? hw + 2.2f : hw + 0.95f;
+            n.HubRadius = n.Piazza ? MathF.Max(5.5f, hw + 2.6f) : n.Destination ? hw + 2.2f : hw + 0.95f;
         }
 
         _segs.Clear();

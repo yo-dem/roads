@@ -129,7 +129,7 @@ public sealed partial class Game
     }
 
     private List<(Vector2 Min, Vector2 Max, Vector4 Color)>? _landTiles;
-    private List<(RoadKind Kind, Vector2[] Points)>? _mapRoads;
+    private List<(RoadKind Kind, RoadLayout Layout, Vector2[] Points)>? _mapRoads;
 
     /// <summary>Il territorio della mappa, calcolato una volta: tasselli di 24 unità col colore di bioma, bosco e città.</summary>
     private List<(Vector2 Min, Vector2 Max, Vector4 Color)> LandTiles()
@@ -161,7 +161,7 @@ public sealed partial class Game
     }
 
     /// <summary>Le strade per la mappa (un punto ogni tre), sterrati prima così le statali restano sopra.</summary>
-    private List<(RoadKind Kind, Vector2[] Points)> MapRoads()
+    private List<(RoadKind Kind, RoadLayout Layout, Vector2[] Points)> MapRoads()
     {
         if (_mapRoads != null) return _mapRoads;
         _mapRoads = new();
@@ -170,7 +170,7 @@ public sealed partial class Game
             var pts = new List<Vector2>();
             for (int i = 0; i < e.Count; i += 3) pts.Add(e.Points[i]);
             if (pts[^1] != e.Points[^1]) pts.Add(e.Points[^1]);
-            _mapRoads.Add((e.Kind, pts.ToArray()));
+            _mapRoads.Add((e.Kind, e.Layout, pts.ToArray()));
         }
         return _mapRoads;
     }
@@ -217,9 +217,14 @@ public sealed partial class Game
             }
 
         // Strade: sterrati sottili color terra, vie bianche, statali più larghe e gialle con il bordo scuro
-        foreach (var (kind, pts) in MapRoads())
+        foreach (var (kind, layout, pts) in MapRoads())
         {
-            float width = kind switch { RoadKind.Main => 3.4f, RoadKind.Street => 1.9f, _ => 1.5f } * k;
+            float width = layout switch
+            {
+                RoadLayout.Avenue => 3.6f,
+                RoadLayout.OneWay => 1.3f,
+                _ => kind switch { RoadKind.Main => 3.4f, RoadKind.Street => 1.9f, _ => 1.5f },
+            } * k;
             var color = kind switch
             {
                 RoadKind.Main => new Vector4(1f, 0.84f, 0.42f, 1f),

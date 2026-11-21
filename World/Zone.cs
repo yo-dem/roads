@@ -223,7 +223,11 @@ public sealed partial class Zone : IDisposable
     private void BuildPaths(MeshBuilder mb, Random rng)
     {
         var net = RoadNetwork.Current;
-        foreach (var e in net.EdgesNear(X, Z)) BuildRoad(mb, e);
+        foreach (var e in net.EdgesNear(X, Z))
+        {
+            BuildRoad(mb, e);
+            Markings(mb, e);
+        }
 
         foreach (var n in net.NodesIn(X, Z))
         {
@@ -313,11 +317,8 @@ public sealed partial class Zone : IDisposable
         var depth = new Vector3(0, PathRaise + PathDepth, 0);
         var curb = new Vector3(0, Terrain.WalkRaise, 0);
         var walkDepth = depth + curb;
-        var lineUp = new Vector3(0, PathRaise + 0.012f, 0);
-        var lineColor = new Vector3(0.93f, 0.91f, 0.82f);
-        Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default, prevC = default, prevPerp = default;
+        Vector3 prevL = default, prevR = default, prevOL = default, prevOR = default;
         bool prevOk = false, prevPrevOk = false, prevWalk = false;
-        float prevS = 0f;
 
         bool DryAt(float s)
         {
@@ -375,18 +376,10 @@ public sealed partial class Zone : IDisposable
                 // Testate solo dove la lastra si interrompe davvero (acqua), non sul bordo del pezzo
                 if (k >= 2 && !prevPrevOk) mb.AddQuad(prevR - depth, prevL - depth, prevL, prevR, side);
                 if (k + 1 < ss.Count && !DryAt(ss[k + 1])) mb.AddQuad(l - depth, r - depth, r, l, side);
-                // Mezzeria tratteggiata delle statali (3 unità sì, 3 no, sulla distanza lungo il tratto)
-                if (e.Kind == RoadKind.Main && ((int)MathF.Floor((prevS + s) * 0.5f / 3f) & 1) == 0
-                    && !Terrain.NearHub(w.X, w.Y))
-                {
-                    const float lw = 0.07f;
-                    mb.AddQuad(prevC + lineUp + prevPerp * lw, c + lineUp + perp * lw, c + lineUp - perp * lw,
-                               prevC + lineUp - prevPerp * lw, lineColor);
-                }
             }
             prevOL = ol; prevOR = or; prevWalk = walk;
-            prevL = l; prevR = r; prevC = c; prevPerp = perp;
-            prevPrevOk = prevOk; prevOk = ok; prevS = s;
+            prevL = l; prevR = r;
+            prevPrevOk = prevOk; prevOk = ok;
         }
     }
 
@@ -519,6 +512,7 @@ public sealed partial class Zone : IDisposable
         }
 
         // Prima le costruzioni (case, palazzi, lampioni, cascine): la vegetazione riempie quel che resta
+        StreetFurniture(mb, rng, placed);
         BuildTown(mb, glow, rng, placed);
         BuildFarms(mb, glow, rng, placed);
 

@@ -43,13 +43,22 @@ public sealed class DriftLine
         _points.Add(p);
     }
 
-    /// <summary>Un punto su un tratto e il verso di marcia (+1 da A verso B, -1 al contrario).</summary>
-    private readonly record struct Cursor(RoadEdge Edge, float S, float Dir)
+    /// <summary>
+    /// Un punto su un tratto, il verso di marcia (+1 da A verso B, -1 al contrario) e la corsia: scostamento del suo
+    /// centro dalla mezzeria verso la destra di chi guida.
+    /// </summary>
+    private readonly record struct Cursor(RoadEdge Edge, float S, float Dir, float Lane = 0f)
     {
         public RoadNode Ahead => Dir > 0f ? Edge.B : Edge.A;
         public float ToAhead => Dir > 0f ? Edge.Length - S : S;
         public Vector2 Heading => Edge.Tangent(S) * Dir;
+        /// <summary>Centro della corsia alla distanza <paramref name="s"/> lungo il tratto.</summary>
+        public Vector2 PointAt(float s) => Edge.At(s) + RightOf(Edge.Tangent(s) * Dir) * Lane;
     }
+
+    /// <summary>La corsia del tratto (per il verso dato) più vicina allo scostamento <paramref name="want"/>.</summary>
+    private static float NearestLane(RoadEdge e, float dir, float want) =>
+        e.TravelLanes(dir).MinBy(o => MathF.Abs(o - want));
 
     /// <summary>Destra della direzione d sul piano (x est, z sud; vista dall'alto col nord in alto).</summary>
     private static Vector2 RightOf(Vector2 d) => new(-d.Y, d.X);
@@ -82,16 +91,16 @@ public sealed class DriftLine
             float left = length - done;
             if (c.ToAhead >= left)
             {
-                for (float t = 0f; t < left; t += Step) Add(To3(c.Edge.At(c.S + c.Dir * t)));
+                for (float t = 0f; t < left; t += Step) Add(To3(c.PointAt(c.S + c.Dir * t)));
                 c = c with { S = c.S + c.Dir * left };
-                Add(To3(c.Edge.At(c.S)));
+                Add(To3(c.PointAt(c.S)));
                 end = c;
                 return length;
             }
-            for (float t = 0f; t < c.ToAhead; t += Step) Add(To3(c.Edge.At(c.S + c.Dir * t)));
+            for (float t = 0f; t < c.ToAhead; t += Step) Add(To3(c.PointAt(c.S + c.Dir * t)));
             done += c.ToAhead;
             var node = c.Ahead;
-            Add(To3(node.Pos));
+            Add(To3(c.PointAt(c.Dir > 0f ? c.Edge.Length : 0f)));
             Vector2 travel = c.Edge.Tangent(c.Dir > 0f ? c.Edge.Length : 0f) * c.Dir;
             RoadEdge? next = null;
             if (node.Degree == 2 && !node.Piazza) next = node.Edges.First(e => e != c.Edge);
@@ -106,7 +115,8 @@ public sealed class DriftLine
                 blocked = node.Degree == 1 || !stopAtJunction;
                 return done;
             }
-            c = new Cursor(next, next.A == node ? 0f : next.Length, next.A == node ? 1f : -1f);
+            float nd = next.A == node ? 1f : -1f;
+            c = new Cursor(next, next.A == node ? 0f : next.Length, nd, NearestLane(next, nd, c.Lane));
         }
     }
 
@@ -119,9 +129,14 @@ public sealed class DriftLine
         var t = new Vector2(travel.X, travel.Z);
         if (t.LengthSquared() < 1e-8f) return false;
         t = Vector2.Normalize(t);
-        if (!Net.NearestAligned(new Vector2(pos.X, pos.Z), t, MaxOffRoad, out var hit)) return false;
+        var p = new Vector2(pos.X, pos.Z);
+        if (!Net.NearestAligned(p, t, MaxOffRoad + 2f, out var hit)) return false;
+        if (hit.Distance > hit.Edge.HalfWidth + MaxOffRoad - Zone.PathHalf) return false;
         float dir = Vector2.Dot(hit.Edge.Tangent(hit.S), t) >= 0f ? 1f : -1f;
-        cursor = new Cursor(hit.Edge, hit.S, dir);
+        // Corsia: tra quelle del proprio verso, la più vicina a dove sta l'auto (sui viali si cambia corsia liberamente;
+        // sui doppi sensi si torna a destra)
+        float side = Vector2.Dot(p - hit.Point, RightOf(hit.Edge.Tangent(hit.S) * dir));
+        cursor = new Cursor(hit.Edge, hit.S, dir, NearestLane(hit.Edge, dir, side));
         return true;
     }
 
@@ -155,14 +170,19 @@ public sealed class DriftLine
         var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
         float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
         line.Follow(c, MathF.Max(hubDist - reach, 0f), stopAtJunction: true, out _, out _);
-        Vector3 p0 = line._points.Count > 0 ? line._points[^1] : To3(c.Edge.At(c.S));
-        Vector3 h = To3(hub.Pos);
-        var exitC = new Cursor(turn.Edge, turn.Edge.A == hub ? 0f : turn.Edge.Length, turn.Edge.A == hub ? 1f : -1f);
+        Vector3 p0 = line._points.Count > 0 ? line._points[^1] : To3(c.PointAt(c.S));
+        // Corsia d'uscita: girando a destra la più esterna, a sinistra la più interna (come si fa davvero)
+        float exitDir = turn.Edge.A == hub ? 1f : -1f;
+        var lanes = turn.Edge.TravelLanes(exitDir);
+        float exitLane = steer > 0.3f ? lanes.Max() : steer < -0.3f ? lanes.Min() : NearestLane(turn.Edge, exitDir, atHub.Lane);
+        var exitC = new Cursor(turn.Edge, turn.Edge.A == hub ? 0f : turn.Edge.Length, exitDir, exitLane);
         float outS = MathF.Min(reach, turn.Edge.Length * 0.5f);
         exitC = exitC with { S = exitC.S + exitC.Dir * outS };
-        Vector3 p2 = To3(exitC.Edge.At(exitC.S));
+        Vector3 p2 = To3(exitC.PointAt(exitC.S));
+        // Punto di controllo: dove si incrociano le due corsie (per strade ad angolo retto è esatto)
+        Vector3 h = To3(hub.Pos + RightOf(travelIn) * atHub.Lane + RightOf(turn.Dir) * exitLane);
 
-        // Curva: Bézier quadratica con il centro dell'incrocio come punto di controllo (resta dentro lo slargo)
+        // Curva: Bézier quadratica col punto d'incontro delle corsie come controllo (resta dentro lo slargo)
         line.Add(p0);
         line.CornerStart = line.Length;
         for (int k = 1; k <= 16; k++)
@@ -195,15 +215,19 @@ public sealed class DriftLine
     }
 
     /// <summary>
-    /// Per il mantenimento di corsia: punto della mezzeria all'altezza dell'auto, direzione della strada nel verso
-    /// di marcia e punto della mezzeria <paramref name="lookahead"/> più avanti (segue le curve della strada).
-    /// False se non si è su una strada o se si è dentro un incrocio (lì si deve poter svoltare).
+    /// Per il mantenimento di corsia: centro della corsia all'altezza dell'auto, direzione della strada nel verso
+    /// di marcia, punto del centro corsia <paramref name="lookahead"/> più avanti (segue le curve della strada) e
+    /// mezza larghezza della corsia. False se non si è su una strada o se si è dentro un incrocio (lì si deve poter
+    /// svoltare).
     /// </summary>
-    public static bool RoadFrame(Vector3 pos, Vector3 travel, float lookahead, out Vector3 center, out Vector3 tangent, out Vector3 aim)
+    public static bool RoadFrame(Vector3 pos, Vector3 travel, float lookahead, out Vector3 center, out Vector3 tangent,
+                                 out Vector3 aim, out float laneHalf)
     {
         center = tangent = aim = default;
+        laneHalf = 0f;
         if (NearHub(pos) || !Locate(pos, travel, out var c)) return false;
-        center = To3(c.Edge.At(c.S));
+        center = To3(c.PointAt(c.S));
+        laneHalf = c.Edge.LaneHalf;
         Vector2 t = c.Heading;
         tangent = new Vector3(t.X, 0f, t.Y);
         var probe = new DriftLine();

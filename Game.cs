@@ -549,9 +549,10 @@ public sealed partial class Game : IDisposable
         if (best == null) return (new Vector3(near.X, 0f, near.Y), MathF.PI / 2f);
         Vector2 p = best.At(bestS), t = best.Tangent(bestS);
         Vector2 goal = net.Settlements.FirstOrDefault(s => s.City)?.Pos ?? Vector2.Zero;
-        if (Vector2.Dot(t, goal - p) < 0f) t = -t;
-        // Sulla destra della carreggiata, non sulla mezzeria
-        p += new Vector2(-t.Y, t.X) * (best.HalfWidth * 0.45f);
+        float dir = 1f;
+        if (Vector2.Dot(t, goal - p) < 0f) { t = -t; dir = -1f; }
+        // Nella corsia di destra, non sulla mezzeria
+        p += new Vector2(-t.Y, t.X) * best.TravelLanes(dir).Max();
         return (new Vector3(p.X, 0f, p.Y), MathF.Atan2(t.X, t.Y));
     }
 

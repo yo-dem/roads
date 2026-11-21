@@ -395,13 +395,13 @@ public sealed class Car : IDisposable
     }
 
     // ------------------------------------------------------------------ mantenimento di corsia
-    // Aiuto in strada: lo sterzo segue da solo, con leggerezza, la mezzeria (e quindi le curve della strada);
+    // Aiuto in strada: lo sterzo segue da solo, con leggerezza, il centro della propria corsia (e quindi le curve);
     // vicino al bordo l'aiuto cresce e riporta l'auto in corsia. Si vede: le ruote sterzano davvero.
     // Il giocatore resta al comando: più sterza, meno l'aiuto conta. Spento agli incroci, col freno a mano,
     // in derapata, attraversando la strada di traverso e quando si è ormai fuori strada.
     private const float LaneFollow = 0.15f;   // peso dell'aiuto al centro della strada (segue la traiettoria)
     private const float LaneEdge = 0.35f;     // peso dell'aiuto al bordo (rientro in corsia)
-    private const float LaneFree = 0.3f;      // da questa distanza dalla mezzeria l'aiuto cresce...
+    private const float LaneFree = 0.3f;      // da questa distanza dal centro corsia l'aiuto cresce...
     private const float LaneFull = 1.3f;      // ...fino al bordo della strada
     private const float LaneGone = 2.6f;      // oltre questa distanza si è fuori strada: niente aiuto
 
@@ -411,14 +411,16 @@ public sealed class Car : IDisposable
         weight = 0f;
         if (_speed < 2f || Handbrake || Sliding) return 0f;
         float look = MathF.Max(5f, _speed * 0.7f);
-        if (!DriftLine.RoadFrame(Position, Dir(_travelYaw), look, out var center, out var tangent, out var aim)) return 0f;
+        if (!DriftLine.RoadFrame(Position, Dir(_travelYaw), look, out var center, out var tangent, out var aim, out float laneHalf))
+            return 0f;
         if (Vector3.Dot(Dir(_travelYaw), tangent) < 0.75f) return 0f;            // attraversa la strada: libero
         Vector3 perp = new(tangent.Z, 0f, -tangent.X);
-        float off = MathF.Abs(Vector3.Dot(Flat(Position - center), perp));
+        float off = MathF.Abs(Vector3.Dot(Flat(Position - center), perp)); // dal centro della propria corsia
         if (off > LaneGone) return 0f;
-        weight = Noise.Lerp(LaneFollow, LaneEdge, Noise.Smooth(LaneFree, LaneFull, off))
-                 * (1f - Noise.Smooth(LaneFull + 0.6f, LaneGone, off));
-        // Inseguimento puro: curvatura dell'arco che porta al punto di mira sulla mezzeria
+        float full = MathF.Min(LaneFull, laneHalf + 0.2f); // sulle corsie strette l'aiuto cresce prima
+        weight = Noise.Lerp(LaneFollow, LaneEdge, Noise.Smooth(LaneFree, full, off))
+                 * (1f - Noise.Smooth(full + 0.6f, LaneGone, off));
+        // Inseguimento puro: curvatura dell'arco che porta al punto di mira al centro corsia
         Vector3 to = Flat(aim - Position);
         float dist = MathF.Max(to.Length(), 0.5f);
         float diff = Noise.WrapAngle(MathF.Atan2(to.X, to.Z) - Yaw);
@@ -593,7 +595,7 @@ public sealed class Car : IDisposable
             _driftPower = Noise.Smooth(AssistMinSpeed, AssistFullSpeed, _speed);
             _line = planned;
             _lineU = planned.Project(Position);
-            _lineOffset = Flat(Position - planned.At(_lineU)); // lo scarto dalla mezzeria si riassorbe in fretta
+            _lineOffset = Flat(Position - planned.At(_lineU)); // lo scarto dalla traiettoria si riassorbe in fretta
             _driftTime = 0f;
             _flickSign = _steerIn != 0f ? -MathF.Sign(_steerIn) : 0f;
             _lastHeading = planned.Heading(_lineU);
