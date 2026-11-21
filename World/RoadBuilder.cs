@@ -83,7 +83,8 @@ public sealed class RoadBuilder
         Console.WriteLine($"Strade: {net.Edges.Count} tratti, {net.Nodes.Count(n => n.Degree >= 3)} incroci, "
                           + $"{net.Bridges.Count} ponti, {net.Farms.Count} cascine, "
                           + $"{net.Edges.Sum(e => e.Length) / 1000f:F1} km");
-    }
+        foreach (var g in net.Edges.GroupBy(e => e.Layout))
+            Console.WriteLine($"  {g.Key}: {g.Count()} tratti, {g.Sum(e => e.Length):F0} unità");    }
 
     // ------------------------------------------------------------------ griglia
 

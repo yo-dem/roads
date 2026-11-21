@@ -122,14 +122,14 @@ public sealed partial class Zone
                 break;
             }
             case RoadLayout.OneWay:
-                // Frecce nel verso di marcia, una ogni 14 unità
-                for (float d = MathF.Floor(from / 14f) * 14f + 7f; d < to - 3f; d += 14f)
+                // Frecce grandi nel verso di marcia, una ogni 8 unità (si vedono anche da dietro l'auto)
+                for (float d = MathF.Floor(from / 8f) * 8f + 4f; d < to - 2.5f; d += 8f)
                 {
-                    if (d < from + 2f) continue;
+                    if (d < from + 3.5f) continue;
                     float dir = e.OneWay >= 0 ? 1f : -1f;
-                    float tail = d - dir * 1.0f, neck = d + dir * 0.5f, tip = d + dir * 1.25f;
-                    Stripe(mb, e, MathF.Min(tail, neck), MathF.Max(tail, neck), 0f, 0.16f, Paint);
-                    Vector3 a = EdgeLocal(e, neck, 0.32f), b = EdgeLocal(e, neck, -0.32f), c = EdgeLocal(e, tip, 0f);
+                    float tail = d - dir * 1.5f, neck = d + dir * 0.6f, tip = d + dir * 1.6f;
+                    Stripe(mb, e, MathF.Min(tail, neck), MathF.Max(tail, neck), 0f, 0.26f, Paint);
+                    Vector3 a = EdgeLocal(e, neck, 0.5f), b = EdgeLocal(e, neck, -0.5f), c = EdgeLocal(e, tip, 0f);
                     if (!InZone(c, 0f)) continue;
                     float y = HeightLocal(c.X, c.Z) + PathRaise + PaintLift;
                     a.Y = b.Y = c.Y = y;
@@ -192,7 +192,8 @@ public sealed partial class Zone
             var entry = dir > 0 ? e.A : e.B;
             var exit = dir > 0 ? e.B : e.A;
             float side = e.HalfWidth + Terrain.WalkWidth * 0.55f;
-            // "Senso unico" all'inizio, sul marciapiede a destra di chi entra: freccia bianca su fondo blu
+            // "Senso unico" all'inizio, sul marciapiede a destra di chi entra e rivolto verso di lui: freccia bianca
+            // in su su fondo blu
             float sIn = e.ToS(entry, entry.HubRadius + 2.2f);
             if (sIn > 0f && sIn < e.Length)
                 Sign(mb, placed, EdgeLocal(e, sIn, dir * side), e.Tangent(sIn) * dir, oneWay: true);
@@ -204,8 +205,8 @@ public sealed partial class Zone
     }
 
     /// <summary>
-    /// Un cartello su palo. <paramref name="travel"/> è il verso di marcia di chi lo deve leggere. Il senso unico è
-    /// parallelo alla strada (freccia nel verso giusto); il divieto d'accesso guarda in faccia chi arriva.
+    /// Un cartello su palo, rivolto verso chi arriva: <paramref name="travel"/> è il suo verso di marcia. Senso unico:
+    /// quadrato blu con la freccia bianca in su; divieto d'accesso: disco rosso con la barra bianca.
     /// </summary>
     private void Sign(MeshBuilder mb, List<(float X, float Z, float R)> placed, Vector3 p, Vector2 travel, bool oneWay)
     {
@@ -215,23 +216,24 @@ public sealed partial class Zone
         Matrix4x4 old = mb.Transform;
         mb.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(p) * old;
         mb.BeginObject();
-        mb.AddPrism(Vector3.Zero, 0.045f, 0.04f, 1.85f, 6, Pole);
+        mb.AddPrism(Vector3.Zero, 0.05f, 0.045f, 2.1f, 6, Pole);
+        const float y = 1.85f;
+        // Chi arriva sta verso -Z: le facce dipinte guardano da quella parte
         if (oneWay)
         {
-            // Rettangolo blu lungo la strada, con la freccia bianca che punta avanti
-            mb.AddBox(new Vector3(0.07f, 1.62f, 0f), new Vector3(0.05f, 0.34f, 0.86f), SignBlue);
-            mb.AddBox(new Vector3(0.1f, 1.62f, -0.06f), new Vector3(0.02f, 0.07f, 0.5f), SignWhite);
-            mb.AddBox(new Vector3(0.1f, 1.62f, 0.22f), new Vector3(0.02f, 0.18f, 0.1f), SignWhite);
-            mb.AddBox(new Vector3(0.1f, 1.62f, 0.29f), new Vector3(0.02f, 0.1f, 0.06f), SignWhite);
+            mb.AddBox(new Vector3(0f, y, -0.06f), new Vector3(0.72f, 0.72f, 0.05f), SignBlue);
+            mb.AddBox(new Vector3(0f, y - 0.06f, -0.1f), new Vector3(0.11f, 0.4f, 0.02f), SignWhite);   // asta
+            mb.AddBox(new Vector3(0f, y + 0.17f, -0.1f), new Vector3(0.36f, 0.08f, 0.02f), SignWhite);  // punta
+            mb.AddBox(new Vector3(0f, y + 0.23f, -0.1f), new Vector3(0.2f, 0.07f, 0.02f), SignWhite);
+            mb.AddBox(new Vector3(0f, y + 0.28f, -0.1f), new Vector3(0.08f, 0.05f, 0.02f), SignWhite);
         }
         else
         {
-            // Disco rosso con la barra bianca, rivolto verso chi arriva (di fronte: -Z)
             Matrix4x4 keep = mb.Transform;
-            mb.Transform = Matrix4x4.CreateRotationX(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0f, 1.6f, -0.06f) * keep;
-            mb.AddPrism(new Vector3(0f, -0.025f, 0f), 0.34f, 0.34f, 0.05f, 14, SignRed);
+            mb.Transform = Matrix4x4.CreateRotationX(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0f, y, -0.06f) * keep;
+            mb.AddPrism(new Vector3(0f, -0.03f, 0f), 0.46f, 0.46f, 0.06f, 16, SignRed);
             mb.Transform = keep;
-            mb.AddBox(new Vector3(0f, 1.6f, -0.1f), new Vector3(0.44f, 0.1f, 0.02f), SignWhite);
+            mb.AddBox(new Vector3(0f, y, -0.11f), new Vector3(0.6f, 0.14f, 0.02f), SignWhite);
         }
         mb.EndObject();
         mb.Transform = old;
