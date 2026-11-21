@@ -67,6 +67,7 @@ public sealed partial class Game : IDisposable
     private float ActiveYaw => _onFoot ? _kid.Yaw : _player.Yaw;
     private Vector3 ActiveVelocity => _onFoot ? _kid.Velocity : _player.Velocity;
     private Particles _particles = null!;
+    private Trains? _trains;
     private SkidMarks _skids = null!;
     private EngineSound? _engine;
     private readonly IsoCamera _camera = new();
@@ -163,6 +164,7 @@ public sealed partial class Game : IDisposable
         _world = new WorldMap(_gl, start);
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
+        _trains = new Trains(_gl, Railway.Current);
         _skids = new SkidMarks(_gl);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, startYaw);
@@ -248,6 +250,13 @@ public sealed partial class Game : IDisposable
                                 || (_time >= _debug.HandbrakeFrom && _time < _debug.HandbrakeUntil);
             _player.Update(dt, new Vector2(steerIn, throttleIn), slow, _world, _particles);
         }
+        // Il treno avanza; se finisce addosso all'auto o al personaggio li sposta di lato
+        _trains?.Update(dt);
+        if (_trains != null)
+        {
+            _trains.PushOut(ref _player.Position, 1.05f);
+            if (_onFoot) _trains.PushOut(ref _kid.Position, Villager.Radius);
+        }
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
@@ -328,6 +337,9 @@ public sealed partial class Game : IDisposable
 
         // Punti di riferimento: si disegnano sempre, ma la nebbia li copre come tutto il resto
         foreach (var l in _world.Landmarks) l.Collect(_opaque, _time, night);
+        // Treno e passaggi a livello (solo quelli entro la vista)
+        var camFlat = new Vector2(_camera.Position.X, _camera.Position.Z);
+        _trains?.Collect(_opaque, night, p => Vector2.Distance(p, camFlat) < ViewRange + 12f);
 
         _cloudItems.Clear();
         _clouds.Collect(_cloudItems, _camera.Target, _time);
@@ -687,6 +699,7 @@ public sealed partial class Game : IDisposable
         _player?.Dispose();
         _kid?.Dispose();
         _particles?.Dispose();
+        _trains?.Dispose();
         _flame?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();

@@ -202,7 +202,7 @@ public sealed partial class Zone
             float side = k % 2 == 0 ? 1f : -1f;
             Vector3 perp = new Vector3(-dir.Z, 0, dir.X) * side;
             Vector3 p = c + perp * (e.HalfWidth + Terrain.WalkWidth - 0.25f);
-            if (HeightLocal(p.X, p.Z) < WaterY + 0.12f || !InZone(p, 0.5f)) continue;
+            if (HeightLocal(p.X, p.Z) < WaterY + 0.12f || !InZone(p, 0.5f) || Railway.Current.Keepout(WX(p.X), WZ(p.Z))) continue;
             if (PathDistance(p.X, p.Z) < PathHalf + 0.2f) continue; // sulla carreggiata di un'altra via
             p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
 
@@ -236,6 +236,7 @@ public sealed partial class Zone
             if (MathF.Abs(p.X) > Half - 0.6f || MathF.Abs(p.Y) > Half - 0.6f) return false;
             if (PathDistance(p.X, p.Y) < PathHalf + Terrain.WalkWidth + 0.1f) return false;
             if (RiverDistance(p.X, p.Y) < RiverHalf + 1.5f) return false;
+            if (Railway.Current.Keepout(WX(p.X), WZ(p.Y))) return false; // fascia della ferrovia e stazioni
             if (HeightLocal(p.X, p.Y) < WaterY + 0.12f) return false; // in città il terreno è spianato a quota ~0
         }
         foreach (var l in GameMap.Current.Landmarks)

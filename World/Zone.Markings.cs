@@ -55,7 +55,8 @@ public sealed partial class Zone
             Vector3 c = EdgeLocal(e, s, offset);
             Vector3 right = EdgeLocal(e, s, offset + width * 0.5f), left = EdgeLocal(e, s, offset - width * 0.5f);
             float y = HeightLocal(c.X, c.Z);
-            bool ok = InZone(c, 0f) && y > WaterY + 0.2f;
+            bool ok = InZone(c, 0f) && y > WaterY + 0.2f
+                      && (height <= 0f || Railway.Current.Distance(WX(c.X), WZ(c.Z)) > Railway.BallastHalf + 1f); // lo spartitraffico si apre sui binari
             right.Y = left.Y = y + lift;
             if (k > 0 && ok && prevOk)
             {
@@ -117,7 +118,7 @@ public sealed partial class Zone
                 for (float s = m0 + 0.4f; s < m1 - 0.3f; s += 0.9f)
                 {
                     var p = EdgeLocal(e, s, 0f);
-                    if (InZone(p, 0f)) AddCollider(p.X, p.Z, 0.28f);
+                    if (InZone(p, 0f) && Railway.Current.Distance(WX(p.X), WZ(p.Z)) > Railway.BallastHalf + 1f) AddCollider(p.X, p.Z, 0.28f);
                 }
                 break;
             }
@@ -177,7 +178,7 @@ public sealed partial class Zone
                 {
                     if (s < from) continue;
                     var p = EdgeLocal(e, s, 0f);
-                    if (!InZone(p, 0.5f)) continue;
+                    if (!InZone(p, 0.5f) || Railway.Current.Keepout(WX(p.X), WZ(p.Z))) continue;
                     p.Y = HeightLocal(p.X, p.Z) + PathRaise + 0.12f;
                     mb.BeginObject();
                     Props.RoundTree(mb, rng, p, 0.5f + rng.NextSingle() * 0.12f, AvenueLeaves);
@@ -210,7 +211,7 @@ public sealed partial class Zone
     /// </summary>
     private void Sign(MeshBuilder mb, List<(float X, float Z, float R)> placed, Vector3 p, Vector2 travel, bool oneWay)
     {
-        if (!InZone(p, 0.3f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f) return;
+        if (!InZone(p, 0.3f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f || Railway.Current.Keepout(WX(p.X), WZ(p.Z))) return;
         p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
         float yaw = MathF.Atan2(travel.X, travel.Y); // +Z locale del cartello = verso di marcia
         Matrix4x4 old = mb.Transform;

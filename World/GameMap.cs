@@ -200,6 +200,7 @@ public sealed class GameMap
 
         // 3. Le strade, tracciate dal gioco
         RoadBuilder.Build(net, map);
+        Railway.Current = Railway.Build(net, map); // la ferrovia della città, dopo le strade
         return map;
     }
 

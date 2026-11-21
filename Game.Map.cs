@@ -180,6 +180,8 @@ public sealed partial class Game
             }
         }
 
+        DrawRailway(ToScreen, k, p => Near(p) && Seen(p) && Inside(ToScreen(p), clip, 5f * k), (a, b, w, col) => Segment(a, b, w, col, clip));
+
         // Cascine e punti di riferimento scoperti
         foreach (var f in RoadNetwork.Current.Farms)
         {
@@ -340,6 +342,8 @@ public sealed partial class Game
             }
         }
 
+        DrawRailway(ToScreen, k, p => full || ToScreen(p).X > edge + 6f * k, (a, b, w, c) => Seg(a, b, w, c));
+
         // Punti di riferimento, cascine
         foreach (var l in map.Landmarks)
         {
@@ -411,6 +415,32 @@ public sealed partial class Game
     }
 
     /// <summary>Freccia di chi si comanda: punta nella direzione <paramref name="dir"/> (schermo), con bordo scuro.</summary>
+    /// <summary>
+    /// La ferrovia sulle mappe: linea scura con i tratti bianchi (il simbolo classico) e le stazioni come quadratini.
+    /// <paramref name="show"/> dice se un punto del mondo va disegnato, <paramref name="seg"/> disegna un tratto (ritagliato).
+    /// </summary>
+    private void DrawRailway(Func<Vector2, Vector2> toScreen, float k, Func<Vector2, bool> show, Action<Vector2, Vector2, float, Vector4> seg)
+    {
+        var rail = Railway.Current;
+        if (!rail.Exists) return;
+        int n = rail.Points.Count;
+        for (int i = 0; i < n; i += 3)
+        {
+            Vector2 a = rail.Points[i], b = rail.Points[(i + 3) % n];
+            if (!show(a)) continue;
+            seg(toScreen(a), toScreen(b), 3.2f * k, new Vector4(0.2f, 0.2f, 0.24f, 1f));
+            if ((i / 3) % 2 == 0) seg(toScreen(a), toScreen(b), 1.3f * k, new Vector4(0.95f, 0.95f, 0.95f, 1f));
+        }
+        foreach (var st in rail.Stations)
+        {
+            Vector2 p = rail.At(st.S);
+            if (!show(p)) continue;
+            Vector2 s = toScreen(p);
+            _hud.Quad(s + new Vector2(-4.5f, -4.5f) * k, s + new Vector2(4.5f, -4.5f) * k, s + new Vector2(4.5f, 4.5f) * k, s + new Vector2(-4.5f, 4.5f) * k, Ink);
+            _hud.Quad(s + new Vector2(-3f, -3f) * k, s + new Vector2(3f, -3f) * k, s + new Vector2(3f, 3f) * k, s + new Vector2(-3f, 3f) * k, new Vector4(0.35f, 0.55f, 0.95f, 1f));
+        }
+    }
+
     private void PlayerArrow(Vector2 c, Vector2 dir, float k)
     {
         Vector2 h = dir.LengthSquared() > 1e-6f ? Vector2.Normalize(dir) : new Vector2(0, -1);

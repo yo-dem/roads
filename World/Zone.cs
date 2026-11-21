@@ -228,6 +228,7 @@ public sealed partial class Zone : IDisposable
             BuildRoad(mb, e);
             Markings(mb, e);
         }
+        BuildRail(mb);
 
         foreach (var n in net.NodesIn(X, Z))
         {
@@ -435,7 +436,8 @@ public sealed partial class Zone : IDisposable
             bool ok = c.Y > WaterY + 0.2f;
 
             // Marciapiedi: dal bordo della carreggiata per WalkWidth, un gradino più su
-            bool walk = ok && !dirt && Terrain.Urban(w.X, w.Y) >= Terrain.WalkFrom
+            bool walk = ok && !dirt && Railway.Current.Distance(w.X, w.Y) > Railway.BallastHalf + 0.6f
+                        && Terrain.Urban(w.X, w.Y) >= Terrain.WalkFrom
                         && s >= walkFrom - 0.01f && s <= walkTo + 0.01f;
             Vector3 ol = c + perp * (hw + Terrain.WalkWidth), or = c - perp * (hw + Terrain.WalkWidth);
             ol.Y = HeightLocal(ol.X, ol.Z);
@@ -479,6 +481,8 @@ public sealed partial class Zone : IDisposable
     private float PathLift(float x, float z)
     {
         if (Terrain.OnSidewalk(WX(x), WZ(z)) && HeightLocal(x, z) > WaterY + 0.2f) return PathRaise + Terrain.WalkRaise;
+        if (Railway.Current.Distance(WX(x), WZ(z)) < Railway.BallastHalf && PathDistance(x, z) > PathHalf + 0.4f
+            && HeightLocal(x, z) > WaterY + 0.2f) return Railway.BallastTop; // sulla massicciata
         float d = MathF.Min(PathDistance(x, z), ClearingDistance(x, z));
         if (d > PathHalf + 0.1f) return 0f;
         if (HeightLocal(x, z) <= WaterY + 0.2f) return 0f;
@@ -529,6 +533,7 @@ public sealed partial class Zone : IDisposable
             if (RiverDistance(x, z) < RiverHalf + 0.5f + r) return false;
             if (HeightLocal(x, z) < WaterY + 0.3f) return false; // niente alberi in mare
             if (NearLandmark(x, z, r + 0.5f)) return false;
+            if (Railway.Current.Keepout(WX(x), WZ(z), r)) return false;
             foreach (var c in _clearings)
                 if (MathF.Sqrt((x - c.X) * (x - c.X) + (z - c.Z) * (z - c.Z)) < c.R + r + 0.3f) return false;
             foreach (var p in placed)
@@ -604,6 +609,7 @@ public sealed partial class Zone : IDisposable
         }
 
         // Prima le costruzioni (case, palazzi, lampioni, cascine): la vegetazione riempie quel che resta
+        BuildStations(mb, glow, rng, placed);
         StreetFurniture(mb, rng, placed);
         BuildTown(mb, glow, rng, placed);
         BuildFarms(mb, glow, rng, placed);

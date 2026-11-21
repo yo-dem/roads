@@ -81,6 +81,7 @@ public static class Terrain
                 + 0.05f;
         h *= 1f - 0.85f * Noise.Smooth(0f, 0.5f, s.Urban);
         h *= Noise.Smooth(Zone.PathHalf + 0.2f, Zone.PathHalf + 1.8f, RoadDistance(x, z));
+        h *= Noise.Smooth(Railway.BallastHalf + 0.3f, Railway.BallastHalf + 2.5f, Railway.Current.Distance(x, z));
         foreach (var l in GameMap.Current.Landmarks)
         {
             float d = Vector2.Distance(new Vector2(x, z), l.Pos);
