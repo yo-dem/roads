@@ -15,7 +15,6 @@ public sealed class Villager : IDisposable
     private const float RunSpeed = 3.0f;    // andatura normale
     private const float SlowSpeed = 1.5f;   // con Shift
     public const float Radius = 0.2f;
-    private const float PlanRadius = Radius + 0.03f;
     private const float HopTime = 0.32f;    // durata del saltello dentro/fuori dall'auto
 
     public Vector3 Position;
@@ -28,46 +27,11 @@ public sealed class Villager : IDisposable
 
     private Vector3 _velocity;
     private float _time, _move;
-    private float _stuckTimer;
 
     // Saltello: da _hopFrom a _hopTo, crescendo (uscita) o rimpicciolendo (entrata)
     private float _hop = 1f;
     private Vector3 _hopFrom, _hopTo;
     private bool _hopOut;
-
-    // ------------------------------------------------------------------ destinazione (click)
-
-    public Vector3? Target { get; private set; }
-
-    private readonly List<Vector3> _waypoints = new();
-    private Vector3? _request, _lastPlanned;
-    private float _planCooldown;
-    private int _replans;
-
-    public void SetTarget(Vector3 point) => _request = point;
-
-    public void ClearTarget()
-    {
-        Target = null;
-        _request = null;
-        _lastPlanned = null;
-        _waypoints.Clear();
-    }
-
-    private void Plan(Vector3 goal, WorldMap world)
-    {
-        _stuckTimer = 0f;
-        var path = PathFinder.Find(world, Position, goal, PlanRadius, out Vector3 reached);
-        _waypoints.Clear();
-        if (path == null || Flat(reached - Position).Length() < 0.15f)
-        {
-            Target = null;
-            return;
-        }
-        _waypoints.AddRange(path);
-        bool exact = Vector2.Distance(new(reached.X, reached.Z), new(goal.X, goal.Z)) < 0.01f;
-        Target = reached with { Y = exact ? goal.Y : world.GroundHeight(reached) };
-    }
 
     // ------------------------------------------------------------------ modello
 
@@ -165,7 +129,6 @@ public sealed class Villager : IDisposable
         Position = from;
         Yaw = yaw;
         _velocity = Vector3.Zero;
-        ClearTarget();
     }
 
     /// <summary>Rientra in auto: saltello verso <paramref name="door"/> rimpicciolendo, poi sparisce.</summary>
@@ -178,7 +141,6 @@ public sealed class Villager : IDisposable
         _velocity = Vector3.Zero;
         Vector3 d = Flat(door - Position);
         if (d.LengthSquared() > 1e-4f) Yaw = MathF.Atan2(d.X, d.Z);
-        ClearTarget();
     }
 
     /// <summary>Arriva oltre 1 e torna indietro: il "pop" quando salta fuori.</summary>
@@ -222,43 +184,8 @@ public sealed class Villager : IDisposable
         float maxSpeed = slow ? SlowSpeed : RunSpeed;
         bool moving = input.LengthSquared() > 0.01f;
 
-        _planCooldown -= dt;
-        if (!moving && _request is { } req && _planCooldown <= 0f)
-        {
-            _request = null;
-            if (_lastPlanned is not { } lp || Target == null || Vector3.Distance(lp, req) > 0.3f)
-            {
-                _lastPlanned = req;
-                _replans = 0;
-                Plan(req, world);
-                _planCooldown = 0.12f;
-            }
-        }
-
-        if (moving) ClearTarget(); // la tastiera ha la precedenza sul click
-        else if (Target != null && _waypoints.Count > 0)
-        {
-            while (_waypoints.Count > 1 && Flat(_waypoints[0] - Position).Length() < 0.3f)
-                _waypoints.RemoveAt(0);
-
-            var toNext = Flat(_waypoints[0] - Position);
-            float dist = toNext.Length();
-            float remaining = dist;
-            for (int i = 1; i < _waypoints.Count; i++) remaining += Flat(_waypoints[i] - _waypoints[i - 1]).Length();
-
-            if (_waypoints.Count == 1 && dist < 0.12f) ClearTarget();
-            else
-            {
-                input = toNext;
-                moving = true;
-                maxSpeed = MathF.Min(maxSpeed, remaining * 5f + 0.5f); // frena in arrivo
-            }
-        }
-
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;
         _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed : 0f), Noise.Damp(14f, dt));
-        Vector3 before = Position;
-
         if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
 
         // Movimento con "scivolamento" lungo gli ostacoli
@@ -277,17 +204,6 @@ public sealed class Villager : IDisposable
             Position = p;
         }
         Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
-
-        if (Target is { } dest)
-        {
-            float progress = Flat(Position - before).Length();
-            _stuckTimer = progress < maxSpeed * dt * 0.25f ? _stuckTimer + dt : 0f;
-            if (_stuckTimer > 0.35f)
-            {
-                if (_replans++ < 2) Plan(dest, world);
-                else ClearTarget();
-            }
-        }
 
         // Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità
         float speed = new Vector2(_velocity.X, _velocity.Z).Length();

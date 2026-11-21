@@ -6,10 +6,9 @@ using Silk.NET.OpenGL;
 namespace Roads.Characters;
 
 /// <summary>
-/// Automobilina giocattolo low poly. Si comanda col click (ricerca del percorso) o con le frecce, Shift per andare piano.
+/// Automobilina giocattolo low poly. Si guida con le frecce, Shift per andare piano.
 /// Guida "da auto": modello cinematico a bicicletta con raggio di sterzata minimo (non gira sul posto),
-/// retromarcia per le manovre, collisione a due cerchi (muso e coda) con scivolamento sugli ostacoli,
-/// inseguimento del percorso con punto di mira avanzato (pure pursuit), luci di stop e di retromarcia.
+/// retromarcia, collisione a due cerchi (muso e coda) con scivolamento sugli ostacoli, luci di stop e di retromarcia.
 /// Il modello guarda verso +Z locale.
 /// </summary>
 public sealed class Car : IDisposable
@@ -19,11 +18,10 @@ public sealed class Car : IDisposable
     private const float ReverseSpeed = 2.4f;
     private const float Accel = 5f;           // unità/s² (retromarcia)
     private const float Brake = 11f;
-    private const float Coast = 3f;            // rallentamento senza gas (guida manuale)
+    private const float Coast = 3f;            // rallentamento senza gas
     private const float Scale = 1.1f;
     private const float WheelBase = 1.0f * Scale; // distanza tra gli assi (ruote a z = ±0.5)
     private const float MaxSteer = 0.6f;          // rad: raggio minimo ≈ WheelBase / tan(MaxSteer) ≈ 1.6
-    private const float SteerRate = 3.5f;         // rad/s: velocità con cui si girano le ruote
     // Guida da tastiera: i tasti sono tutto-o-niente, quindi lo sterzo dipende dalla velocità.
     // Piano: sterzo pieno e pronto (manovre strette); veloce: poco angolo e ruote che girano con calma.
     private const float TurnRateSlow = 3.2f;      // rad/s: rotazione massima dell'auto a passo d'uomo
@@ -33,9 +31,9 @@ public sealed class Car : IDisposable
     private const float SteerReturn = 0.15f;      // s: rilasciando, le ruote tornano dritte
     private const float HullOffset = 0.46f;       // centri dei due cerchi di collisione, davanti e dietro
     private const float HullRadius = 0.5f;
-    private const float PlanRadius = 0.6f;        // margine per la ricerca del percorso
     private const float WheelRadius = 0.2f;
-    private const float ManeuverTime = 0.75f;     // durata di una retromarcia di manovra
+    private const float WheelX = 0.47f;           // distanza delle ruote dal centro: sporgono un po' dalla scocca
+    private const float WheelWidth = 0.22f;
 
     // Freno a mano e derapata: la direzione di marcia (dove va l'auto) è separata dal muso (dove punta).
     // Con aderenza piena coincidono; col freno a mano le ruote dietro perdono aderenza, il muso ruota più
@@ -65,6 +63,11 @@ public sealed class Car : IDisposable
     private const float AssistLeadOut = 7f;          // dopo la curva l'auto si raddrizza in questa distanza
     private const float AssistFlick = 0.3f;          // rad: "scarto" della coda tenendo il freno a mano prima della curva
     private const float AssistBodyRate = 14f;        // 1/s: prontezza della carrozzeria nel mettersi di traverso
+    // Derapata comandata davvero troppo tardi: nemmeno una frenata fortissima basterebbe a scendere alla velocità di
+    // curva prima dell'incrocio. Niente aiuto: l'auto tira dritto, esce di strada e l'erba la frena quasi del tutto.
+    private const float AssistLateBrake = 14f;       // unità/s²: frenata "di manica larga" usata per decidere se è tardi
+    private const float MissedDrag = 9f;             // unità/s²: rallentamento fuori strada dopo la curva mancata
+    private const float MissedStopSpeed = 1.2f;      // la penalità finisce quando si è quasi fermi
 
     // Inversione a U col freno a mano (lontano dagli incroci, a velocità sostenuta): l'auto scivola lungo la
     // corsia rallentando fino a fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso.
@@ -147,7 +150,28 @@ public sealed class Car : IDisposable
     private float _driftTime, _steerIn, _gasIn, _lineU, _flickSign, _lastHeading;
     private DriftLine? _line;
     private bool _uturn;
+    private bool _tooLate;       // derapata rifiutata perché troppo tardi (fino al rilascio del freno a mano)
+    private float _missedTimer;  // curva mancata: finché > 0, fuori strada l'auto viene frenata forte
     private float _brakeHold, _steerLatch;
+
+    /// <summary>
+    /// La derapata è comandata troppo tardi? Vero se, anche frenando di <see cref="AssistLateBrake"/>, a inizio curva
+    /// si sarebbe ancora ben oltre la velocità massima di curva (già in curva: conta la velocità attuale).
+    /// </summary>
+    private static bool TooLate(DriftLine line, float u, float speed)
+    {
+        float d = MathF.Max(0f, line.CornerStart - u);
+        float reachable = MathF.Sqrt(AssistCornerSpeedMax * AssistCornerSpeedMax + 2f * AssistLateBrake * d);
+        return speed > reachable + 0.5f;
+    }
+
+    /// <summary>Se la derapata è troppo tardiva la rifiuta e fa partire la penalità della curva mancata.</summary>
+    private bool MissCorner(DriftLine line)
+    {
+        if (!TooLate(line, line.Project(Position), _speed)) return false;
+        _tooLate = true;
+        _missedTimer = 4f;        return true;
+    }
 
     /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
     public bool WheelsLocked { get; private set; }
@@ -170,9 +194,6 @@ public sealed class Car : IDisposable
     public float DriftAngle => Noise.WrapAngle(Yaw - _travelYaw);
     private float _slopePitch, _slopeRoll, _tilt, _roll;
     private float _exhaustTimer, _blockedTimer;
-    private float _maneuver, _maneuverSteer;   // retromarcia in corso: tempo residuo e sterzo
-    private int _maneuverCount, _lastManeuverSign = 1;
-    private float _sinceManeuver = 10f;
     private float _brakeGlow, _handbrakeGlow;
 
     /// <summary>Intensità degli stop: 1 in frenata, fino a 2 col freno a mano tirato (sfuma al rilascio).</summary>
@@ -185,85 +206,6 @@ public sealed class Car : IDisposable
     public float Skid { get; private set; }
 
     private readonly Mesh _body, _headLights, _tailLights, _reverseLights, _wheel;
-
-    // ------------------------------------------------------------------ destinazione e percorso
-
-    public Vector3? Target { get; private set; }
-
-    private readonly List<Vector3> _waypoints = new();
-    private Vector3 _segStart;   // inizio del tratto di percorso corrente
-    private Vector3? _request, _lastPlanned;
-    private float _planCooldown;
-    private int _replans;
-
-    public void SetTarget(Vector3 point) => _request = point;
-
-    public void ClearTarget()
-    {
-        Target = null;
-        _request = null;
-        _lastPlanned = null;
-        _waypoints.Clear();
-    }
-
-    private void Plan(Vector3 goal, WorldMap world)
-    {
-        _blockedTimer = 0f;
-        _maneuverCount = 0;
-        var path = PathFinder.Find(world, Position, goal, PlanRadius, out Vector3 reached);
-        _waypoints.Clear();
-        if (path == null || Flat(reached - Position).Length() < 0.25f)
-        {
-            Target = null;
-            return;
-        }
-        _waypoints.AddRange(path);
-        _segStart = Position;
-        bool exact = Vector2.Distance(new(reached.X, reached.Z), new(goal.X, goal.Z)) < 0.01f;
-        Target = reached with { Y = exact ? goal.Y : world.GroundHeight(reached) };
-    }
-
-    /// <summary>
-    /// Pure pursuit: proietta l'auto sul tratto corrente e restituisce il punto che sta
-    /// <paramref name="lookahead"/> più avanti lungo il percorso. Le curve vengono così arrotondate.
-    /// </summary>
-    private Vector3 PursuitPoint(float lookahead, out float remaining)
-    {
-        while (_waypoints.Count > 1)
-        {
-            Vector3 b = _waypoints[0];
-            if (ProjectT(_segStart, b, Position) >= 1f || Flat(b - Position).Length() < 0.6f)
-            {
-                _segStart = b;
-                _waypoints.RemoveAt(0);
-            }
-            else break;
-        }
-
-        Vector3 a0 = _segStart, b0 = _waypoints[0];
-        Vector3 proj = a0 + (b0 - a0) * Math.Clamp(ProjectT(a0, b0, Position), 0f, 1f);
-
-        remaining = Flat(b0 - Position).Length();
-        for (int i = 1; i < _waypoints.Count; i++) remaining += Flat(_waypoints[i] - _waypoints[i - 1]).Length();
-
-        float left = lookahead;
-        Vector3 cur = proj;
-        foreach (var next in _waypoints)
-        {
-            float seg = Flat(next - cur).Length();
-            if (seg >= left) return cur + (next - cur) * (left / seg);
-            left -= seg;
-            cur = next;
-        }
-        return _waypoints[^1];
-    }
-
-    private static float ProjectT(Vector3 a, Vector3 b, Vector3 p)
-    {
-        Vector3 ab = Flat(b - a);
-        float len2 = ab.LengthSquared();
-        return len2 < 1e-6f ? 1f : Vector3.Dot(Flat(p - a), ab) / len2;
-    }
 
     // ------------------------------------------------------------------ modello
 
@@ -311,10 +253,10 @@ public sealed class Car : IDisposable
             mb.AddBox(new Vector3(sx * 0.15f, 0.41f, -0.8f), new Vector3(0.07f, 0.06f, 0.03f), new Vector3(1f, 1f, 0.95f));
         _reverseLights = mb.Build(gl);
 
-        // Ruota centrata nell'origine con asse lungo X
+        // Ruota centrata nell'origine con asse lungo X: larga, sporge dai fianchi e si vede di lato
         mb = new MeshBuilder { Transform = Matrix4x4.CreateRotationZ(MathF.PI / 2f) };
-        mb.AddPrism(new Vector3(0, -0.08f, 0), WheelRadius, WheelRadius, 0.16f, 10, dark);
-        mb.AddPrism(new Vector3(0, -0.09f, 0), 0.09f, 0.09f, 0.18f, 6, trim);
+        mb.AddPrism(new Vector3(0, -WheelWidth * 0.5f, 0), WheelRadius, WheelRadius, WheelWidth, 10, dark);
+        mb.AddPrism(new Vector3(0, -WheelWidth * 0.5f - 0.01f, 0), 0.09f, 0.09f, WheelWidth + 0.02f, 6, trim);
         _wheel = mb.Build(gl);
     }
 
@@ -443,8 +385,8 @@ public sealed class Car : IDisposable
     // vicino al bordo l'aiuto cresce e riporta l'auto in corsia. Si vede: le ruote sterzano davvero.
     // Il giocatore resta al comando: più sterza, meno l'aiuto conta. Spento agli incroci, col freno a mano,
     // in derapata, attraversando la strada di traverso e quando si è ormai fuori strada.
-    private const float LaneFollow = 0.5f;    // peso dell'aiuto al centro della strada (segue la traiettoria)
-    private const float LaneEdge = 0.95f;     // peso dell'aiuto al bordo (rientro in corsia)
+    private const float LaneFollow = 0.15f;   // peso dell'aiuto al centro della strada (segue la traiettoria)
+    private const float LaneEdge = 0.35f;     // peso dell'aiuto al bordo (rientro in corsia)
     private const float LaneFree = 0.3f;      // da questa distanza dalla mezzeria l'aiuto cresce...
     private const float LaneFull = 1.3f;      // ...fino al bordo della strada
     private const float LaneGone = 2.6f;      // oltre questa distanza si è fuori strada: niente aiuto
@@ -534,145 +476,50 @@ public sealed class Car : IDisposable
         return 0f;
     }
 
-    private void StartManeuver(float diff)
-    {
-        // In retro lo sterzo è invertito: per portare il muso verso la meta si sterza dalla parte opposta
-        int sign = MathF.Abs(diff) > 0.15f ? MathF.Sign(diff) : (_lastManeuverSign = -_lastManeuverSign);
-        _maneuver = ManeuverTime;
-        _maneuverSteer = -sign * MaxSteer;
-        _maneuverCount++;
-        _sinceManeuver = 0f;
-        _blockedTimer = 0f;
-    }
-
-    /// <param name="input">Direzione voluta nel mondo (comandi relativi alla camera dall'alto).</param>
-    /// <param name="manual">
-    /// Guida diretta "da gioco di auto": X = sterzo (-1 sinistra, +1 destra), Y = gas (+1) / freno e retro (-1).
-    /// Se presente ha la precedenza su <paramref name="input"/> e sul percorso.
+    /// <param name="drive">
+    /// Guida "da gioco di auto": X = sterzo (-1 sinistra, +1 destra), Y = gas (+1) / freno e retro (-1).
     /// </param>
-    public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Vector2? manual = null)
+    public void Update(float dt, Vector2 drive, bool slow, WorldMap world, Particles fx)
     {
         _time += dt;
-        _sinceManeuver += dt;
         float maxSpeed = slow ? SlowSpeed : FastSpeed;
-        bool keys = manual != null || input.LengthSquared() > 0.01f;
-
-        _planCooldown -= dt;
-        if (!keys && _request is { } req && _planCooldown <= 0f)
-        {
-            _request = null;
-            if (_lastPlanned is not { } lp || Target == null || Vector3.Distance(lp, req) > 0.3f)
-            {
-                _lastPlanned = req;
-                _replans = 0;
-                Plan(req, world);
-                _planCooldown = 0.12f;
-            }
-        }
-        if (keys) ClearTarget(); // la tastiera ha la precedenza sul click
-
-        // --- Dove vuole andare: direzione dei tasti o punto di mira lungo il percorso
-        Vector3? aim = null;
-        float remaining = float.MaxValue;
-        bool following = false;
-        if (manual != null) { }
-        else if (keys)
-            aim = Position + Vector3.Normalize(Flat(input)) * 3f;
-        else if (Target != null && _waypoints.Count > 0)
-        {
-            float lookahead = Math.Clamp(1.2f + MathF.Abs(_speed) * 0.3f, 1.2f, 3f);
-            Vector3 p = PursuitPoint(lookahead, out remaining);
-            if (remaining < 0.25f) ClearTarget();
-            else { aim = p; following = true; }
-        }
 
         // --- Sterzo e velocità desiderati
-        float wantSpeed = 0f, wantSteer = 0f, diff = 0f;
+        float wantSpeed = 0f;
         bool coasting = false;
-        _steerIn = 0f;
-        _gasIn = 0f;
-        if (manual is { } drive)
+        // Dopo l'inversione a U lo sterzo tenuto per farla non conta finché non si rilascia il tasto,
+        // altrimenti l'auto, finito il giro, continuerebbe a girare oltre i 180°
+        if (_steerLatch != 0f && MathF.Sign(drive.X) != _steerLatch) _steerLatch = 0f;
+        if (_steerLatch != 0f) drive.X = 0f;
+        _steerIn = Math.Clamp(drive.X, -1f, 1f);
+        _gasIn = Math.Clamp(drive.Y, -1f, 1f);
+        // Sterzo a destra = rotazione oraria vista dall'alto = yaw che diminuisce
+        float limit = ManualSteerLimit;
+        if (Handbrake || Sliding) limit = MathF.Max(limit, DriftSteer); // in derapata si può sterzare (e controsterzare) di più
+        float wantSteer = -_steerIn * limit;
+        if (_gasIn > 0.1f) wantSpeed = maxSpeed;
+        else if (_gasIn < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
+        else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
+        // Freno a mano tirato: le ruote dietro sono bloccate, né gas né retromarcia muovono l'auto
+        // (se era già in corsa scivola e rallenta, così la derapata resta possibile)
+        if (Handbrake) { wantSpeed = 0f; coasting = true; }
+        // Mantenimento di corsia: lo sterzo si accompagna alla strada; chi sterza con decisione decide da sé
+        if (!_drifting && !_uturn)
         {
-            _maneuver = 0f;
-            // Dopo l'inversione a U lo sterzo tenuto per farla non conta finché non si rilascia il tasto,
-            // altrimenti l'auto, finito il giro, continuerebbe a girare oltre i 180°
-            if (_steerLatch != 0f && MathF.Sign(drive.X) != _steerLatch) _steerLatch = 0f;
-            if (_steerLatch != 0f) drive.X = 0f;
-            _steerIn = Math.Clamp(drive.X, -1f, 1f);
-            _gasIn = Math.Clamp(drive.Y, -1f, 1f);
-            // Sterzo a destra = rotazione oraria vista dall'alto = yaw che diminuisce
-            float limit = ManualSteerLimit;
-            if (Handbrake || Sliding) limit = MathF.Max(limit, DriftSteer); // in derapata si può sterzare (e controsterzare) di più
-            wantSteer = -Math.Clamp(drive.X, -1f, 1f) * limit;
-            if (drive.Y > 0.1f) wantSpeed = maxSpeed;
-            else if (drive.Y < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
-            else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
-            // Freno a mano tirato: le ruote dietro sono bloccate, né gas né retromarcia muovono l'auto
-            // (se era già in corsa scivola e rallenta, così la derapata resta possibile)
-            if (Handbrake) { wantSpeed = 0f; coasting = true; }
-            // Mantenimento di corsia: lo sterzo si accompagna alla strada; chi sterza con decisione decide da sé
-            if (!_drifting && !_uturn)
-            {
-                float lane = LaneSteer(out float w);
-                w *= 1f - 0.65f * MathF.Abs(_steerIn);
-                wantSteer = Noise.Lerp(wantSteer, lane, w);
-            }
-        }
-        else if (aim is { } goal)
-        {
-            Vector3 to = Flat(goal - Position);
-            float dist = MathF.Max(to.Length(), 0.5f);
-            diff = Noise.WrapAngle(MathF.Atan2(to.X, to.Z) - Yaw);
-            float arrive = following ? remaining * 2.2f + 0.3f : float.MaxValue; // frena in arrivo
-
-            // Meta alle spalle e vicina: retromarcia dritta verso di lei invece di un giro largo
-            bool backUp = following && remaining < 3.5f && MathF.Abs(diff) > 2.0f;
-            // Direzione quasi opposta da fermi: inversione a "tre punti" (retro sterzando, poi avanti)
-            if (_maneuver <= 0f && _sinceManeuver > 1.2f && !backUp && MathF.Abs(diff) > 2.2f && MathF.Abs(_speed) < 1.5f)
-                StartManeuver(diff);
-
-            if (_maneuver > 0f)
-            {
-                wantSteer = _maneuverSteer;
-                wantSpeed = -ReverseSpeed * 0.8f;
-            }
-            else if (backUp)
-            {
-                float rearDiff = Noise.WrapAngle(diff - MathF.PI);
-                wantSteer = Math.Clamp(-rearDiff * 2f, -MaxSteer, MaxSteer);
-                wantSpeed = -MathF.Min(ReverseSpeed, arrive);
-            }
-            else
-            {
-                // Pure pursuit: curvatura dell'arco che porta al punto di mira
-                float curvature = 2f * MathF.Sin(diff) / dist;
-                wantSteer = MathF.Abs(diff) > MathF.PI / 2f
-                    ? MathF.Sign(diff) * MaxSteer
-                    : Math.Clamp(MathF.Atan(WheelBase * curvature), -MaxSteer, MaxSteer);
-                // In curva stretta si rallenta, ma senza fermarsi: l'auto gira solo muovendosi
-                wantSpeed = maxSpeed * Noise.Lerp(1f, 0.4f, MathF.Abs(wantSteer) / MaxSteer);
-                if (MathF.Abs(diff) > 1.4f) wantSpeed = MathF.Min(wantSpeed, maxSpeed * 0.45f);
-                wantSpeed = MathF.Max(MathF.Min(wantSpeed, arrive), MathF.Min(1.2f, arrive));
-            }
-        }
-        else if (_maneuver > 0f)
-        {
-            _maneuver = 0f;
+            float lane = LaneSteer(out float w);
+            w *= 1f - 0.65f * MathF.Abs(_steerIn);
+            wantSteer = Noise.Lerp(wantSteer, lane, w);
         }
 
         // --- Dinamica: ruote che sterzano progressivamente, accelerazione e frenata lineari
-        float steerRate = SteerRate;
-        if (manual != null)
-        {
-            // Le ruote arrivano a fine corsa in un tempo che cresce con la velocità: pronte da fermi, calme in velocità
-            bool turningIn = MathF.Abs(wantSteer) > MathF.Abs(_steer) && wantSteer * _steer >= 0f;
-            float ramp = Noise.Lerp(SteerRampSlow, SteerRampFast, MathF.Min(MathF.Abs(_speed) / FastSpeed, 1f));
-            steerRate = turningIn ? ManualSteerLimit / ramp : MathF.Max(MathF.Abs(_steer), ManualSteerLimit) / SteerReturn;
-            if (Handbrake || Sliding) steerRate = MathF.Max(steerRate, DriftSteerRate);
-        }
+        // Le ruote arrivano a fine corsa in un tempo che cresce con la velocità: pronte da fermi, calme in velocità
+        bool turningIn = MathF.Abs(wantSteer) > MathF.Abs(_steer) && wantSteer * _steer >= 0f;
+        float ramp = Noise.Lerp(SteerRampSlow, SteerRampFast, MathF.Min(MathF.Abs(_speed) / FastSpeed, 1f));
+        float steerRate = turningIn ? ManualSteerLimit / ramp : MathF.Max(MathF.Abs(_steer), ManualSteerLimit) / SteerReturn;
+        if (Handbrake || Sliding) steerRate = MathF.Max(steerRate, DriftSteerRate);
         _steer = MoveTowards(_steer, wantSteer, steerRate * dt);
         // Oltre la velocità massima (spinta di uscita dalla derapata) col gas si rallenta piano, senza frenare
-        if (manual != null && _gasIn > 0.1f && wantSpeed > 0f && _speed > wantSpeed) coasting = true;
+        if (_gasIn > 0.1f && wantSpeed > 0f && _speed > wantSpeed) coasting = true;
         bool braking = MathF.Abs(wantSpeed) < MathF.Abs(_speed) - 0.05f || wantSpeed * _speed < 0f;
         float prevSpeed = _speed;
         // In avanti la spinta viene dal cambio: marcia, curva di coppia e pausa durante la cambiata
@@ -680,15 +527,26 @@ public sealed class Car : IDisposable
         if (!braking && !coasting && wantSpeed > 0f && _speed >= -0.05f)
             push = _shiftTimer > 0f ? 0f : GearPower[Gear - 1] * TorqueCurve(GearRpm(Gear));
         // Freno tenuto premuto in corsa (in avanti): dopo un attimo le ruote si bloccano
-        bool brakePedal = manual != null && _gasIn < -0.1f && _speed > 0.3f;
+        bool brakePedal = _gasIn < -0.1f && _speed > 0.3f;
         _brakeHold = brakePedal ? _brakeHold + dt : 0f;
         WheelsLocked = brakePedal && _brakeHold > BrakeLockTime && _speed > 1f;
         _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? (WheelsLocked ? BrakeLocked : Brake) : push) * dt);
-        bool handbrake = Handbrake && manual != null;
+        bool handbrake = Handbrake;
         // In velocità il freno a mano serve a far scartare la coda, non a inchiodare: frena la metà
         if (handbrake) _speed = MoveTowards(_speed, 0f, (_speed > DriftMinSpeed ? 0.5f : 1f) * HandbrakeDecel * dt);
         // Di traverso le gomme strisciano e frenano, tanto più quanto è ampio l'angolo
         _speed = MoveTowards(_speed, 0f, MathF.Abs(MathF.Sin(DriftAngle)) * DriftScrub * dt);
+        // Curva mancata: appena fuori strada l'erba frena forte, fin quasi a fermarsi (con polvere)
+        if (_missedTimer > 0f)
+        {
+            _missedTimer -= dt;
+            if (!world.IsRoad(Position) && _speed > 0f)
+            {
+                _speed = MoveTowards(_speed, 0f, MissedDrag * dt);
+                if (_speed > 2f && Random.Shared.NextSingle() < dt * 20f)
+                    fx.Dust(Vector3.Transform(new Vector3(0f, 0.05f, -0.4f), RootMatrix), 1);
+                if (_speed < MissedStopSpeed) _missedTimer = 0f;            }
+        }
         UpdateGearbox(dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
         // Contro un ostacolo il motore non "tira": il suono resta al minimo, legato alla velocità vera
@@ -708,8 +566,12 @@ public sealed class Car : IDisposable
 
         // Innesco della derapata assistita: freno a mano in velocità su una strada (non durante un'inversione a U:
         // nello slargo in fondo a un vicolo cieco, a metà giro, sostituirebbe la traiettoria e farebbe un secondo giro)
-        if (!_drifting && !_uturn && manual != null && handbrake && _speed > AssistMinSpeed
-            && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } planned)
+        // Se è davvero troppo tardi niente aiuto (e niente inversione a U al suo posto) finché non si rilascia lo spazio:
+        // l'auto va lunga fuori strada. Rallentata, a metà curva non viene più "ripescata".
+        if (!handbrake) _tooLate = false;
+        if (!_drifting && !_uturn && !_tooLate && handbrake && _speed > AssistMinSpeed
+            && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } planned
+            && !MissCorner(planned))
         {
             _drifting = true;
             // Quanto è "piena" la derapata dipende dalla velocità d'ingresso: piano si mette poco di traverso
@@ -723,7 +585,7 @@ public sealed class Car : IDisposable
         }
 
         // Inversione a U: freno a mano sterzando a velocità sostenuta, dove non c'è un incrocio per svoltare
-        if (!_drifting && !_uturn && manual != null && handbrake && _speed > UTurnMinSpeed && MathF.Abs(_steerIn) > 0.3f)
+        if (!_drifting && !_uturn && !_tooLate && handbrake && _speed > UTurnMinSpeed && MathF.Abs(_steerIn) > 0.3f)
         {
             float length = Math.Clamp(_speed * 0.6f, UTurnSlideMin, UTurnSlideMax);
             if (DriftLine.AlongRoad(Position, Dir(_travelYaw), length) is { } along
@@ -887,25 +749,10 @@ public sealed class Car : IDisposable
         if (expected > 1e-6f && moved < expected * 0.999f)
             _speed *= moved / expected;
 
-        // Bloccata mentre vuole muoversi: se insiste si fa manovra in retro (guida automatica)
+        // Bloccata mentre vuole muoversi (motore al minimo, fine delle manovre assistite)
         bool pushing = MathF.Abs(wantSpeed) > 0.1f;
         if (pushing && moved < expected * 0.3f) _blockedTimer += dt;
         else _blockedTimer = MathF.Max(0f, _blockedTimer - dt);
-
-        if (_maneuver > 0f)
-        {
-            _maneuver -= dt;
-            if (_blockedTimer > 0.2f) _maneuver = 0f; // anche dietro è bloccato: si riprova in avanti
-        }
-        else if (_blockedTimer > 0.35f && aim != null)
-        {
-            if (following && _maneuverCount >= 3)
-            {
-                if (_replans++ < 2 && Target is { } dest) Plan(dest, world);
-                else ClearTarget();
-            }
-            else StartManeuver(diff);
-        }
 
         Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
 
@@ -969,7 +816,7 @@ public sealed class Car : IDisposable
         : MarkingWheels == 2 ? Math.Clamp(MathF.Abs(_speed) / 7f, 0.4f, 1f) : 0f;
 
     /// <summary>Punto di contatto a terra della ruota (<paramref name="sx"/> ±1 lato, <paramref name="sz"/> +1 davanti, -1 dietro).</summary>
-    public Vector3 WheelContact(float sx, float sz) => Vector3.Transform(new Vector3(sx * 0.44f, 0f, sz * 0.5f), RootMatrix);
+    public Vector3 WheelContact(float sx, float sz) => Vector3.Transform(new Vector3(sx * WheelX, 0f, sz * 0.5f), RootMatrix);
 
     /// <summary>Direzione del muso (orizzontale).</summary>
     public Vector3 Heading => Forward;
@@ -999,7 +846,7 @@ public sealed class Car : IDisposable
             {
                 float steer = sz > 0 ? _steer : 0f;
                 items.Add(new DrawItem(_wheel, Matrix4x4.CreateRotationX(_spin) * Matrix4x4.CreateRotationY(steer)
-                                               * Matrix4x4.CreateTranslation(sx * 0.44f, WheelRadius, sz * 0.5f) * root));
+                                               * Matrix4x4.CreateTranslation(sx * WheelX, WheelRadius, sz * 0.5f) * root));
             }
     }
 

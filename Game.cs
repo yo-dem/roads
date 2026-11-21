@@ -15,7 +15,6 @@ namespace Roads;
 public sealed class DebugOptions
 {
     public List<(string Path, float Time)> Shots { get; } = new();
-    public List<(Vector2 Screen, float Time)> Clicks { get; } = new();
     public Vector3? Walk;
     public float WalkUntil = float.MaxValue;
     /// <summary>Guida manuale simulata, a tratti in sequenza: X = sterzo, Y = gas, fino all'istante Until.</summary>
@@ -49,15 +48,11 @@ public sealed class Game : IDisposable
     private Clouds _clouds = null!;
     private readonly List<DrawItem> _cloudItems = new();
     private ShadowMap _shadow = null!;
-    private Mesh _flame = null!, _marker = null!;
-    private IMouse? _mouse;
-    private bool _mouseHeld, _rightHeld;
+    private Mesh _flame = null!;
+    private bool _rightHeld;
     private Vector2 _lastMouse;
-    private float _markerAge;
     private int _toggleIndex;
     private bool _farView;        // visuale scelta: false = dietro l'auto (standard, tasto 1), true = lontana dall'alto (tasto 2)
-    private bool _driving;        // guida da tastiera in corso (fino al prossimo click di destinazione)
-    private int _clickIndex;
 
     private WorldMap _world = null!;
     private Car _player = null!;
@@ -111,9 +106,9 @@ public sealed class Game : IDisposable
                 Console.WriteLine($"Personaggio: {_kid.Character}");
             }
         };
+        // Il mouse serve solo alla visuale: rotella = distanza, tasto destro trascinato = rotazione
         foreach (var mouse in _input.Mice)
         {
-            _mouse ??= mouse;
             mouse.Scroll += (_, wheel) => _camera.Distance = Math.Clamp(_camera.Distance - wheel.Y * 1.2f, 8f, 32f);
             mouse.MouseMove += (_, pos) =>
             {
@@ -128,22 +123,12 @@ public sealed class Game : IDisposable
             };
             mouse.MouseDown += (m, button) =>
             {
-                if (button == MouseButton.Right)
-                {
-                    _rightHeld = true;
-                    _lastMouse = m.Position;
-                    return;
-                }
-                if (button != MouseButton.Left) return;
-                if (OverMinimap(m.Position)) return; // un click sulla minimappa non è una destinazione
-                _mouseHeld = true;
-                _driving = false; // il click passa al percorso automatico (la visuale non cambia)
-                _mouse = m;
-                if (Pick(m.Position)) _markerAge = 0f;
+                if (button != MouseButton.Right) return;
+                _rightHeld = true;
+                _lastMouse = m.Position;
             };
             mouse.MouseUp += (_, button) =>
             {
-                if (button == MouseButton.Left) _mouseHeld = false;
                 if (button == MouseButton.Right) _rightHeld = false;
             };
         }
@@ -160,7 +145,6 @@ public sealed class Game : IDisposable
         _hud = new Hud(_gl);
         _flame = Props.BuildFlame(_gl);
         _day = new DayCycle(_debug.Hour ?? StartHour);
-        _marker = BuildMarker(_gl);
 
         var start = new Vector3(-2.5f, 0f, 0.3f);
         if (_debug.Start is { } s) start = new Vector3(s.X, 0f, Terrain.RoadZ((int)MathF.Round(s.Y / Terrain.ChunkSize), s.X)); // test: sulla strada est-ovest
@@ -184,44 +168,6 @@ public sealed class Game : IDisposable
     private Matrix4x4 Projection(float aspect) =>
         Matrix4x4.CreatePerspectiveFieldOfView(FieldOfView, aspect, 0.3f, 300f);
 
-    /// <summary>Converte un punto dello schermo in un raggio e imposta la destinazione del personaggio.</summary>
-    private bool Pick(Vector2 screen)
-    {
-        Vector2D<int> size = _window.Size;
-        if (size.X == 0 || size.Y == 0) return false;
-
-        float x = 2f * screen.X / size.X - 1f;
-        float y = 1f - 2f * screen.Y / size.Y;
-        Matrix4x4 viewProj = _camera.View * Projection((float)size.X / size.Y);
-        if (!Matrix4x4.Invert(viewProj, out Matrix4x4 inv)) return false;
-
-        // System.Numerics usa profondità NDC in [0,1]
-        Vector4 near = Vector4.Transform(new Vector4(x, y, 0f, 1f), inv);
-        Vector4 far = Vector4.Transform(new Vector4(x, y, 1f, 1f), inv);
-        Vector3 origin = new Vector3(near.X, near.Y, near.Z) / near.W;
-        Vector3 dir = Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - origin);
-
-        if (!_world.Raycast(origin, dir, out Vector3 hit)) return false;
-        if (_onFoot) _kid.SetTarget(hit);
-        else _player.SetTarget(hit);
-        return true;
-    }
-
-    private static Mesh BuildMarker(GL gl)
-    {
-        var mb = new MeshBuilder();
-        var color = new Vector3(1f, 0.95f, 0.7f);
-        const int segments = 18;
-        for (int s = 0; s < segments; s++)
-        {
-            float a0 = MathF.Tau * s / segments, a1 = MathF.Tau * (s + 1) / segments;
-            Vector3 d0 = new(MathF.Cos(a0), 0, MathF.Sin(a0)), d1 = new(MathF.Cos(a1), 0, MathF.Sin(a1));
-            mb.AddQuad(d0 * 0.32f, d1 * 0.32f, d1 * 0.45f, d0 * 0.45f, color);
-        }
-        mb.AddDisc(Vector3.Zero, 0.1f, 8, color);
-        return mb.Build(gl);
-    }
-
     private void OnUpdate(double deltaTime)
     {
         float dt = (float)Math.Min(deltaTime, 0.05);
@@ -238,21 +184,12 @@ public sealed class Game : IDisposable
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
         Vector3 input = Vector3.Zero;
 
-        // Tenendo premuto il tasto sinistro il personaggio segue il cursore
-        if (_mouseHeld && _mouse != null) Pick(_mouse.Position);
-
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
             input = walk;
         if (_time > 0.5f)
             foreach (var (drive, until) in _debug.Drives)
                 if (_time < until) { (steerIn, throttleIn) = (drive.X, drive.Y); break; }
         if (_debug.Slow) slow = true;
-        while (_clickIndex < _debug.Clicks.Count && _time >= _debug.Clicks[_clickIndex].Time)
-        {
-            _driving = false;
-            if (Pick(_debug.Clicks[_clickIndex].Screen)) _markerAge = 0f;
-            _clickIndex++;
-        }
         while (_toggleIndex < _debug.Toggles.Count && _time >= _debug.Toggles[_toggleIndex])
         {
             ToggleOnFoot();
@@ -264,7 +201,7 @@ public sealed class Game : IDisposable
             // A piedi: frecce rispetto alla camera; l'auto resta parcheggiata a motore spento
             if (input == Vector3.Zero) input = _camera.Right * steerIn + _camera.Forward * throttleIn;
             _player.Handbrake = false;
-            _player.Update(dt, Vector3.Zero, false, _world, _particles, Vector2.Zero);
+            _player.Update(dt, Vector2.Zero, false, _world, _particles);
             _kid.Update(dt, input, slow, _world, _particles, _player.Blocks);
             if (_kid.Hidden)
             {
@@ -275,22 +212,12 @@ public sealed class Game : IDisposable
         }
         else
         {
-            // Un tasto di guida prende il controllo (e annulla il percorso); un click lo restituisce al percorso.
-            // Rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
-            if (steerIn != 0f || throttleIn != 0f) _driving = true;
-            Vector2? manual = _driving ? new Vector2(steerIn, throttleIn) : null;
+            // Guida con le frecce; rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
             // Freno a mano (spazio): tirato in velocità con lo sterzo fa entrare in curva in derapata
             _player.Handbrake = _keyboard.IsKeyPressed(Key.Space)
                                 || (_time >= _debug.HandbrakeFrom && _time < _debug.HandbrakeUntil);
-            if (_player.Handbrake && manual == null && MathF.Abs(_player.Speed) > 0.1f)
-            {
-                // Tirarlo mentre l'auto va da sola al punto cliccato passa alla guida manuale
-                _driving = true;
-                manual = new Vector2(steerIn, throttleIn);
-            }
-            _player.Update(dt, input, slow, _world, _particles, manual);
+            _player.Update(dt, new Vector2(steerIn, throttleIn), slow, _world, _particles);
         }
-        _markerAge += dt;
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
@@ -363,16 +290,6 @@ public sealed class Game : IDisposable
         _player.Collect(_opaque);
         _kid.Collect(_opaque);
         _particles.Collect(_opaque);
-
-        // Indicatore di destinazione: "atterra" ingrandito e poi pulsa
-        if ((_onFoot ? _kid.Target : _player.Target) is { } target)
-        {
-            float pop = 1f + 0.8f * MathF.Max(0f, 1f - _markerAge / 0.2f);
-            float pulse = 1f + 0.08f * MathF.Sin(_time * 7f);
-            _opaque.Add(new DrawItem(_marker,
-                Matrix4x4.CreateScale(pop * pulse) * Matrix4x4.CreateRotationY(_time * 1.5f)
-                * Matrix4x4.CreateTranslation(target + new Vector3(0, 0.07f, 0)), 0.6f, CastShadow: false));
-        }
     }
 
     private unsafe void OnRender(double deltaTime)
@@ -601,8 +518,6 @@ public sealed class Game : IDisposable
     private const float MapRadius = 62f, MapMargin = 18f;
     private static readonly Vector2 MapCenter = new(MapMargin + MapRadius, MapMargin + MapRadius);
 
-    private bool OverMinimap(Vector2 windowPos) => Vector2.Distance(windowPos, MapCenter) < MapRadius;
-
     /// <summary>
     /// Minimappa in alto a sinistra: ruota con la camera (in alto c'è sempre la direzione in cui si guarda),
     /// con i punti cardinali sul bordo e al centro una freccia con la direzione dell'auto.
@@ -674,8 +589,6 @@ public sealed class Game : IDisposable
                 Vector3 outward = Vector3.Normalize(new Vector3(spot.X - _player.Position.X, 0, spot.Z - _player.Position.Z));
                 _kid.HopOut(_player.SeatPoint(side), spot, MathF.Atan2(outward.X, outward.Z));
                 _onFoot = true;
-                _driving = false;
-                _player.ClearTarget();
                 _player.EngineOn = false;
                 return;
             }
@@ -735,7 +648,6 @@ public sealed class Game : IDisposable
         _kid?.Dispose();
         _particles?.Dispose();
         _flame?.Dispose();
-        _marker?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();
         _depth?.Dispose();

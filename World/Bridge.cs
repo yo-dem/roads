@@ -44,7 +44,7 @@ public sealed class Bridge
         var plankAlt = new Vector3(0.50f, 0.32f, 0.17f);
         var beam = new Vector3(0.38f, 0.23f, 0.12f);
         var post = new Vector3(0.44f, 0.27f, 0.14f);
-        var rail = new Vector3(0.60f, 0.40f, 0.22f);
+        var rail = new Vector3(0.86f, 0.68f, 0.44f); // passamano in legno chiaro: staccano dal resto del ponte
         var cap = new Vector3(0.33f, 0.20f, 0.10f);
 
         Matrix4x4 old = mb.Transform;

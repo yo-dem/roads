@@ -11,7 +11,6 @@ public static class Program
     /// Argomenti opzionali (per test automatici):
     ///   --shot file.png@secondi   (ripetibile) salva uno screenshot e chiude dopo l'ultimo
     ///   --walk x,z[,finoA]        cammina in direzione mondo (x,z) fino al secondo indicato
-    ///   --click px,py@secondi     (ripetibile) simula un click sinistro nel punto dello schermo
     ///   --slow                    passo lento (come tenere premuto Shift)
     ///   --mute                    nessun suono
     ///   --handbrake da,a          tiene tirato il freno a mano tra i due istanti (secondi)
@@ -60,11 +59,6 @@ public static class Program
                     d.Walk = new Vector3(v[0], 0, v[1]);
                     if (v.Length > 2) d.WalkUntil = v[2];
                     break;
-                case "--click" when i + 1 < args.Length:
-                    var c = args[++i].Split('@');
-                    var xy = c[0].Split(',').Select(s => float.Parse(s, inv)).ToArray();
-                    d.Clicks.Add((new Vector2(xy[0], xy[1]), float.Parse(c[1], inv)));
-                    break;
                 case "--slow":
                     d.Slow = true;
                     break;
@@ -107,7 +101,6 @@ public static class Program
             }
         }
         d.Shots.Sort((a, b) => a.Time.CompareTo(b.Time));
-        d.Clicks.Sort((a, b) => a.Time.CompareTo(b.Time));
         return d;
     }
 }

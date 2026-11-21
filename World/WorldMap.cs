@@ -158,43 +158,6 @@ public sealed class WorldMap : IDisposable
         return true;
     }
 
-    /// <summary>Altezza della superficie cliccabile (terreno, ponti o pelo dell'acqua); false dove non c'è terreno caricato.</summary>
-    public bool TryGetSurface(Vector3 p, out float height)
-    {
-        height = 0f;
-        var zone = ZoneAt(p);
-        if (zone == null) return false;
-        height = MathF.Max(zone.GroundHeight(p), Zone.WaterY);
-        return true;
-    }
-
-    /// <summary>Interseca un raggio con il terreno (ray marching + bisezione).</summary>
-    public bool Raycast(Vector3 origin, Vector3 dir, out Vector3 hit)
-    {
-        const float step = 0.2f;
-        Vector3 prev = origin;
-        for (float t = 0f; t < 200f; t += step)
-        {
-            Vector3 p = origin + dir * t;
-            if (p.Y < -6f) break;
-            if (TryGetSurface(p, out float h) && p.Y <= h)
-            {
-                Vector3 a = prev, b = p;
-                for (int i = 0; i < 8; i++)
-                {
-                    Vector3 m = (a + b) * 0.5f;
-                    if (TryGetSurface(m, out float hm) && m.Y <= hm) b = m; else a = m;
-                }
-                TryGetSurface(b, out float hb);
-                hit = b with { Y = hb };
-                return true;
-            }
-            prev = p;
-        }
-        hit = default;
-        return false;
-    }
-
     public bool IsRoad(Vector3 p) => ZoneAt(p)?.IsRoad(p) ?? false;
 
     /// <summary>
