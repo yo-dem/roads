@@ -532,6 +532,7 @@ public sealed partial class Zone : IDisposable
         if (Terrain.OnSidewalk(WX(x), WZ(z)) && HeightLocal(x, z) > WaterY + 0.2f) return PathRaise + Terrain.WalkRaise;
         if (Railway.Current.Distance(WX(x), WZ(z)) < Railway.BallastHalf && PathDistance(x, z) > PathHalf + 0.4f
             && HeightLocal(x, z) > WaterY + 0.2f) return Railway.BallastTop; // sulla massicciata
+        if (Railway.Current.OnPlatform(new Vector2(WX(x), WZ(z)))) return Railway.PlatformHeight; // sulla banchina
         float d = MathF.Min(PathDistance(x, z), ClearingDistance(x, z));
         if (d > PathHalf + 0.1f) return 0f;
         if (HeightLocal(x, z) <= WaterY + 0.2f) return 0f;

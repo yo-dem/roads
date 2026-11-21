@@ -26,6 +26,7 @@ public sealed partial class Game
     private static readonly Vector4 White = new(0.93f, 0.95f, 0.98f, 0.95f);
     private static readonly Vector4 NorthRed = new(0.98f, 0.38f, 0.32f, 1f);
     private static readonly Vector4 PinColor = new(1f, 0.32f, 0.52f, 1f);
+    private static readonly Vector4 CarColor = new(0.92f, 0.20f, 0.16f, 1f);
     private static readonly Vector4 SeaColor = new(0.12f, 0.27f, 0.42f, 0.55f);
 
     private static Vector4 LandmarkColor(LandmarkKind k) => k switch
@@ -106,6 +107,20 @@ public sealed partial class Game
                 _hud.Triangle(tip + d * 1.5f * k, back + side * 7f * k, back - side * 7f * k, Ink);
                 _hud.Triangle(tip, back + side * 5.5f * k * pulse, back - side * 5.5f * k * pulse, PinColor);
             }
+        }
+
+        // A piedi (o in treno): un pallino rosso dove si è lasciata l'auto, sul bordo nella sua direzione se è lontana
+        if (_onFoot)
+        {
+            Vector3 me = ActivePos;
+            var to = new Vector3(_player.Position.X - me.X, 0f, _player.Position.Z - me.Z);
+            float dist = to.Length();
+            Vector2 d = dist > 1e-3f ? Vector2.Normalize(ToMap(to / dist)) : Vector2.Zero;
+            float rad = MathF.Min(dist * r / MiniRange, r - 10f * k);
+            Vector2 at = c + d * rad;
+            _hud.Disc(at, 6f * k, 16, Ink);
+            _hud.Disc(at, 4.4f * k, 16, CarColor);
+            _hud.Disc(at, 1.6f * k, 10, White);
         }
 
         Vector2 h = ToMap(new Vector3(MathF.Sin(ActiveYaw), 0f, MathF.Cos(ActiveYaw)));
@@ -369,6 +384,18 @@ public sealed partial class Game
                 _hud.Triangle(s, s + new Vector2(-5f, -11f) * k, s + new Vector2(5f, -11f) * k, Ink);
                 _hud.Disc(s + new Vector2(0, -14f) * k, 7.5f * k, 16, Ink);
                 _hud.Disc(s + new Vector2(0, -14f) * k, 5.5f * k, 16, PinColor);
+            }
+        }
+
+        // L'auto parcheggiata, se si è a piedi
+        if (_onFoot)
+        {
+            Vector2 cs = ToScreen(new Vector2(_player.Position.X, _player.Position.Z));
+            if (full || cs.X > edge + 8f * k)
+            {
+                _hud.Disc(cs, 6.5f * k, 16, Ink);
+                _hud.Disc(cs, 4.8f * k, 16, CarColor);
+                _hud.Disc(cs, 1.7f * k, 10, White);
             }
         }
 

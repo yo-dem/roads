@@ -13,7 +13,7 @@ public sealed class Trains : IDisposable
 {
     public static Trains? Current { get; private set; }
 
-    private const float MaxSpeed = 7.5f, Accel = 1.4f, Decel = 1.6f, Dwell = 6f;
+    private const float MaxSpeed = 7.5f, Accel = 1.4f, Decel = 1.6f, Dwell = 9f;
     private const float LocoLength = 6f, CarLength = 6.6f, Gap = 0.45f;
     private const float HalfWidth = 0.95f;
     private const float WarnAhead = 30f;      // le sbarre si abbassano quando il muso è a questa distanza
@@ -25,6 +25,63 @@ public sealed class Trains : IDisposable
     private float _speed;
     private float _dwell;
     private int _nextStop;
+    private int _at = -1;          // stazione dove il treno è fermo (-1 in viaggio)
+
+    // ------------------------------------------------------------------ viaggiatori
+
+    /// <summary>La stazione dove il treno è fermo con le porte aperte (null mentre viaggia).</summary>
+    public RailStation? StoppedAt => _at >= 0 && _dwell > 0.6f ? _rail.Stations[_at] : null;
+
+    /// <summary>Secondi che mancano alla partenza (0 se viaggia).</summary>
+    public float DepartsIn => _at >= 0 ? MathF.Max(_dwell, 0f) : 0f;
+
+    /// <summary>
+    /// Chi sta in <paramref name="p"/> può salire? Il treno è fermo in stazione e il punto è accanto a una carrozza
+    /// (non alla locomotiva), dalla parte della banchina. Restituisce il punto della porta.
+    /// </summary>
+    public bool CanBoard(Vector2 p, out Vector3 door)
+    {
+        door = default;
+        if (StoppedAt is not { } st) return false;
+        foreach (var (c, d, len, loco) in Cars())
+        {
+            if (loco) continue;
+            Vector2 side = new(-d.Y, d.X), rel = p - c;
+            float along = Vector2.Dot(rel, d), across = Vector2.Dot(rel, side) * st.Side;
+            if (MathF.Abs(along) > len * 0.5f - 0.3f || across < HalfWidth - 0.1f || across > HalfWidth + 1.8f) continue;
+            Vector2 at = c + d * along + side * st.Side * HalfWidth;
+            door = new Vector3(at.X, Terrain.Height(at.X, at.Y) + Railway.RailTop + 0.9f, at.Y);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Dove sta chi viaggia: in mezzo alla prima carrozza, e la direzione di marcia (yaw).</summary>
+    public (Vector3 Pos, float Yaw) Seat
+    {
+        get
+        {
+            var (c, d, _, _) = Cars().ElementAt(1);
+            return (new Vector3(c.X, Terrain.Height(c.X, c.Y) + Railway.RailTop + 0.6f, c.Y), MathF.Atan2(d.X, d.Y));
+        }
+    }
+
+    /// <summary>
+    /// Dove si scende, se il treno è fermo in stazione: sulla banchina accanto alla prima carrozza, con lo sguardo
+    /// rivolto fuori dai binari.
+    /// </summary>
+    public bool AlightPoint(out Vector3 spot, out float yaw)
+    {
+        spot = default;
+        yaw = 0f;
+        if (StoppedAt is not { } st) return false;
+        var (c, d, _, _) = Cars().ElementAt(1);
+        Vector2 out2 = new Vector2(-d.Y, d.X) * st.Side;
+        Vector2 at = c + out2 * (HalfWidth + 0.9f);
+        spot = new Vector3(at.X, Terrain.Height(at.X, at.Y) + Railway.PlatformHeight, at.Y);
+        yaw = MathF.Atan2(out2.X, out2.Y);
+        return true;
+    }
     private readonly float[] _armAngle; // per passaggio a livello: 0 = abbassata, 1 = alzata
     private readonly bool[] _closed;
     private float _time;
@@ -46,7 +103,8 @@ public sealed class Trains : IDisposable
         _lamp = lb.Build(gl);
         // Si parte fermi alla prima stazione
         if (rail.Stations.Count > 0) _head = rail.Wrap(rail.Stations[0].S + TrainLength * 0.5f);
-        _dwell = 3f;
+        _dwell = Dwell; // si parte fermi in stazione, con tutto il tempo per salire
+        _at = rail.Stations.Count > 0 ? 0 : -1;
         _nextStop = rail.Stations.Count > 1 ? 1 : 0;
         Current = this;
     }
@@ -58,7 +116,11 @@ public sealed class Trains : IDisposable
         _time += dt;
         if (!_rail.Exists) return;
 
-        if (_dwell > 0f) _dwell -= dt;
+        if (_dwell > 0f)
+        {
+            _dwell -= dt;
+            if (_dwell <= 0f) _at = -1; // si riparte
+        }
         else
         {
             // Frenata dolce fino alla prossima stazione: il treno si ferma con la sua metà davanti alla banchina
@@ -72,6 +134,7 @@ public sealed class Trains : IDisposable
                 {
                     _speed = 0f;
                     _dwell = Dwell;
+                    _at = _nextStop;
                     _nextStop = (_nextStop + 1) % _rail.Stations.Count;
                 }
                 else allowed = MathF.Min(allowed, MathF.Sqrt(2f * Decel * MathF.Max(d - 0.05f, 0f)) + 0.3f);

@@ -26,7 +26,8 @@ public static class Program
     ///   --map file.txt            usa un'altra mappa (di serie Assets/Maps/isola.txt)
     ///   --mappa-grande            parte con la mappa dell'isola aperta (tasto M)
     ///   --punto x,z               punto da raggiungere già scelto (come un clic sulla mappa)
-    ///   --verifica-strade         genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
+    ///   --banchina                appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
+    ///   --verifica-strade        genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
     /// </summary>
     public static void Main(string[] args)
     {
@@ -107,6 +108,9 @@ public static class Program
                     break;
                 case "--mappa-grande":
                     d.BigMap = true;
+                    break;
+                case "--banchina":
+                    d.Platform = true;
                     break;
                 case "--verifica-strade":
                     d.VerifyRoads = true;

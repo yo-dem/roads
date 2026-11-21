@@ -34,6 +34,7 @@ public sealed class DebugOptions
     public bool BigMap;            // parte con la mappa grande aperta (test)
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
+    public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -256,7 +257,16 @@ public sealed partial class Game : IDisposable
             // su va avanti, giù arretra senza voltarsi. Con la visuale lontana le frecce restano rispetto alla camera.
             // L'auto resta parcheggiata a motore spento.
             float? face = null;
-            if (input == Vector3.Zero)
+            if (_debug.Platform && !_kid.Busy && !_onTrain && !_boarding && _trains != null
+                && _trains.AlightPoint(out var platform, out float platformYaw))
+            {
+                // Test: subito sulla banchina, girati verso il treno
+                _kid.Position = platform;
+                _kid.Yaw = _footYaw = platformYaw + MathF.PI;
+                _debug.Platform = false;
+            }
+            if (_onTrain) input = Vector3.Zero; // a bordo non si cammina
+            else if (input == Vector3.Zero)
             {
                 if (_farView)
                 {
@@ -274,7 +284,14 @@ public sealed partial class Game : IDisposable
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
             _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, face);
-            if (_kid.Hidden)
+            if (_kid.Hidden && _boarding)
+            {
+                // Il saltello sulla carrozza è finito: si viaggia
+                _boarding = false;
+                _onTrain = true;
+                Console.WriteLine("In treno: Invio per scendere alla prossima stazione");
+            }
+            else if (_kid.Hidden && !_onTrain)
             {
                 // Il saltello per rientrare è finito: si torna a guidare
                 _onFoot = false;
@@ -294,7 +311,14 @@ public sealed partial class Game : IDisposable
         if (_trains != null)
         {
             _trains.PushOut(ref _player.Position, 1.05f);
-            if (_onFoot) _trains.PushOut(ref _kid.Position, Villager.Radius);
+            if (_onTrain)
+            {
+                // A bordo il personaggio (nascosto) viaggia col treno: la camera e il mondo lo seguono
+                var (seat, yaw) = _trains.Seat;
+                _kid.Position = seat;
+                _kid.Yaw = yaw;
+            }
+            else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
@@ -314,8 +338,10 @@ public sealed partial class Game : IDisposable
         // La camera anticipa un po' nella direzione di marcia, di più quando si va veloci
         // In derapata la camera da dietro segue la direzione di marcia, così si vede l'auto di traverso
         // A piedi la visuale da dietro segue il personaggio come se fosse una mini auto
-        _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, _onFoot ? _kid.Yaw : _player.TravelYaw,
-                       walk: _onFoot);
+        // In treno la camera sta dietro la carrozza, larga come dietro l'auto (walk: false)
+        // (il punto seguito sta sopra il tetto: la camera guarda il treno da sopra le carrozze, non dentro)
+        _camera.Update(dt, _onTrain ? ActivePos + new Vector3(0f, 3.4f, 0f) : ActivePos + ActiveVelocity * 0.3f, chase: !_farView,
+                       _onFoot ? _kid.Yaw : _player.TravelYaw, walk: _onFoot && !_onTrain);
         UpdateMap(dt);
         if (_engine != null) _engine.Horn = !_onFoot && _keyboard.IsKeyPressed(Key.E); // clacson (solo in auto)
         _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
@@ -338,7 +364,8 @@ public sealed partial class Game : IDisposable
             string place = RoadNetwork.Current.SettlementAt(ActivePos.X, ActivePos.Z)?.Name
                            ?? (here != null ? GameMap.DistrictName(GameMap.Current.At(here.X, here.Z)) : "...");
             _window.Title = $"Roads  |  {_day.Clock}  |  {place}{near}  |  territorio esplorato: {_world.Count}"
-                            + (_onFoot ? "  |  a piedi" : "") + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
+                            + (_onTrain ? TrainStatus() : _onFoot ? "  |  a piedi" + BoardHint() : "")
+                            + (_player.Headlights ? "  |  fari accesi" : "") + $"  |  {perf}";
         }
     }
 
@@ -685,6 +712,17 @@ public sealed partial class Game : IDisposable
         }
 
         if (_kid.Busy) return;
+
+        // In treno: si scende sulla banchina, ma solo a treno fermo in stazione
+        if (_onTrain)
+        {
+            if (_trains == null || !_trains.AlightPoint(out var spot, out float yaw)) return;
+            _kid.HopOut(_trains.Seat.Pos, spot, yaw);
+            _footYaw = yaw;
+            _onTrain = false;
+            return;
+        }
+
         // Si risale dalla portiera più vicina, se si è abbastanza vicini all'auto
         float best = float.MaxValue, bestSide = 1f;
         foreach (float side in new[] { 1f, -1f })
@@ -692,8 +730,31 @@ public sealed partial class Game : IDisposable
             float d = Vector2.Distance(new(_kid.Position.X, _kid.Position.Z), new(_player.DoorPoint(side).X, _player.DoorPoint(side).Z));
             if (d < best) { best = d; bestSide = side; }
         }
-        if (best < 1.3f) _kid.HopIn(_player.SeatPoint(bestSide));
+        if (best < 1.3f)
+        {
+            _kid.HopIn(_player.SeatPoint(bestSide));
+            return;
+        }
+
+        // Altrimenti, se si è sulla banchina accanto a una carrozza del treno fermo, si sale in treno
+        if (_trains != null && _trains.CanBoard(new Vector2(_kid.Position.X, _kid.Position.Z), out var door))
+        {
+            _kid.HopIn(door);
+            _boarding = true;
+        }
     }
+
+    /// <summary>Nel titolo, in treno: dove si è fermi (e quando si riparte) o che si sta viaggiando.</summary>
+    private string TrainStatus() => _trains?.StoppedAt is { } st
+        ? $"  |  in treno, fermi a {st.Name} (Invio per scendere, si riparte tra {_trains.DepartsIn:F0} s)"
+        : "  |  in treno";
+
+    /// <summary>Nel titolo, a piedi accanto al treno fermo: si può salire.</summary>
+    private string BoardHint() =>
+        _trains != null && _trains.CanBoard(new Vector2(_kid.Position.X, _kid.Position.Z), out _) ? "  (Invio per salire sul treno)" : "";
+
+    private bool _onTrain;   // il personaggio viaggia in treno
+    private bool _boarding;  // sta saltando sulla carrozza
 
     private void DrawSeeThrough()
     {

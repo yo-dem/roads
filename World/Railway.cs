@@ -147,6 +147,21 @@ public sealed class Railway
     }
 
     /// <summary>
+    /// Il punto è sulla banchina di una stazione (allargata di <paramref name="margin"/>)? Lì si cammina, in auto no.
+    /// </summary>
+    public bool OnPlatform(Vector2 p, float margin = 0f)
+    {
+        if (!Exists) return false;
+        float d = Distance(p.X, p.Y, out float along);
+        if (d > BallastHalf + PlatformWidth + 1f + margin) return false;
+        var st = StationNear(along, margin);
+        if (st == null) return false;
+        Vector2 t = Tangent(along);
+        float off = Vector2.Dot(p - At(along), new Vector2(-t.Y, t.X)) * st.Side;
+        return off >= BallastHalf + 0.2f - margin && off <= BallastHalf + 0.2f + PlatformWidth + margin;
+    }
+
+    /// <summary>
     /// Il punto è nella fascia della ferrovia (massicciata, margine, banchine e pensiline delle stazioni)? Lì non si
     /// costruisce e non crescono alberi.
     /// </summary>

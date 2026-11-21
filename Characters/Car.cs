@@ -462,7 +462,10 @@ public sealed class Car : IDisposable
     private static bool Fits(WorldMap world, Vector3 p, float yaw)
     {
         Vector3 f = Dir(yaw) * HullOffset;
-        return world.IsWalkable(p + f, HullRadius) && world.IsWalkable(p - f, HullRadius);
+        return world.IsWalkable(p + f, HullRadius) && world.IsWalkable(p - f, HullRadius)
+            // sulle banchine delle stazioni si va solo a piedi
+            && !Railway.Current.OnPlatform(new Vector2(p.X + f.X, p.Z + f.Z), HullRadius)
+            && !Railway.Current.OnPlatform(new Vector2(p.X - f.X, p.Z - f.Z), HullRadius);
     }
 
     /// <summary>

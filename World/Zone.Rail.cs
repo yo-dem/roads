@@ -103,15 +103,8 @@ public sealed partial class Zone
                           PlatformStone, PlatformStone * 0.78f);
                 float edge = st.Side * (Railway.BallastHalf + 0.2f + 0.22f);
                 RailStrip(mb, rail, s, s1, edge, 0.12f, Railway.PlatformHeight + 0.01f, 0.01f, SafetyLine, SafetyLine);
-                var c = RailLocal(rail, (s + s1) * 0.5f, off);
-                AddCollider(c.X, c.Z, 0.8f);
             }
-            // Testate della banchina
-            foreach (float end in new[] { st.S - H, st.S + H })
-            {
-                var c = RailLocal(rail, end, off);
-                if (InZone(c, 0f)) AddCollider(c.X, c.Z, 0.8f);
-            }
+            // (Sulla banchina si sale a piedi, vedi PathLift; le auto no, vedi Railway.OnPlatform in Car)
 
             // Pensilina con panchina, a metà banchina
             var mid = RailLocal(rail, st.S, off);
