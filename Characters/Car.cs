@@ -65,9 +65,16 @@ public sealed class Car : IDisposable
     private const float AssistBodyRate = 14f;        // 1/s: prontezza della carrozzeria nel mettersi di traverso
     // Derapata comandata davvero troppo tardi: nemmeno una frenata fortissima basterebbe a scendere alla velocità di
     // curva prima dell'incrocio. Niente aiuto: l'auto tira dritto, esce di strada e l'erba la frena quasi del tutto.
-    private const float AssistLateBrake = 14f;       // unità/s²: frenata "di manica larga" usata per decidere se è tardi
+    private const float AssistLateBrake = 20f;       // unità/s²: frenata "di manica larghissima" per decidere se è tardi:
+                                                     // si rifiutano solo le derapate chiaramente impossibili
     private const float MissedDrag = 9f;             // unità/s²: rallentamento fuori strada dopo la curva mancata
     private const float MissedStopSpeed = 1.2f;      // la penalità finisce quando si è quasi fermi
+    // Sbandata della curva mancata: il muso viene strappato verso la svolta, la coda parte, l'auto scivola
+    // di traverso lungo la traiettoria che aveva e le gomme che strisciano mangiano la velocità
+    private const float SpinTime = 1.2f;             // s: durata della sbandata
+    private const float SpinYawRate = 1.0f;          // rad/s: rotazione del muso all'inizio della sbandata
+    private const float SpinMaxDrift = 1.75f;        // rad: in sbandata il traverso può superare quello di una derapata
+    private const float SpinScrub = 7f;              // unità/s²: attrito in più delle gomme di traverso
 
     // Inversione a U col freno a mano (lontano dagli incroci, a velocità sostenuta): l'auto scivola lungo la
     // corsia rallentando fino a fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso.
@@ -151,6 +158,7 @@ public sealed class Car : IDisposable
     private DriftLine? _line;
     private bool _uturn;
     private bool _tooLate;       // derapata rifiutata perché troppo tardi (fino al rilascio del freno a mano)
+    private float _spinTimer, _spinSide; // sbandata in corso (curva mancata) e verso di rotazione del muso
     private float _missedTimer;  // curva mancata: finché > 0, fuori strada l'auto viene frenata forte
     private float _brakeHold, _steerLatch;
 
@@ -160,9 +168,10 @@ public sealed class Car : IDisposable
     /// </summary>
     private static bool TooLate(DriftLine line, float u, float speed)
     {
-        float d = MathF.Max(0f, line.CornerStart - u);
+        float d = line.CornerStart - u;
+        if (d < -0.5f) return true; // già dentro la curva: troppo tardi comunque
         float reachable = MathF.Sqrt(AssistCornerSpeedMax * AssistCornerSpeedMax + 2f * AssistLateBrake * d);
-        return speed > reachable + 0.5f;
+        return speed > reachable + 1f;
     }
 
     /// <summary>Se la derapata è troppo tardiva la rifiuta e fa partire la penalità della curva mancata.</summary>
@@ -170,7 +179,12 @@ public sealed class Car : IDisposable
     {
         if (!TooLate(line, line.Project(Position), _speed)) return false;
         _tooLate = true;
-        _missedTimer = 4f;        return true;
+        _missedTimer = 4f;
+        // Sbandata: il muso gira verso la strada che si voleva prendere (svolta a destra = yaw che diminuisce),
+        // più violenta quanto più si arriva forte
+        _spinTimer = SpinTime * Noise.Lerp(0.7f, 1f, Noise.Smooth(AssistMinSpeed, FastSpeed, _speed));
+        _spinSide = line.TurnSign != 0f ? -line.TurnSign : (_steerIn != 0f ? -MathF.Sign(_steerIn) : 1f);
+        return true;
     }
 
     /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
@@ -545,7 +559,8 @@ public sealed class Car : IDisposable
                 _speed = MoveTowards(_speed, 0f, MissedDrag * dt);
                 if (_speed > 2f && Random.Shared.NextSingle() < dt * 20f)
                     fx.Dust(Vector3.Transform(new Vector3(0f, 0.05f, -0.4f), RootMatrix), 1);
-                if (_speed < MissedStopSpeed) _missedTimer = 0f;            }
+                if (_speed < MissedStopSpeed) _missedTimer = 0f;
+            }
         }
         UpdateGearbox(dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
@@ -670,6 +685,11 @@ public sealed class Car : IDisposable
                 float cornerSpeed = Math.Clamp(_speed, AssistCornerSpeedMin, AssistCornerSpeedMax);
                 if (_lineU > line.CornerStart - _speed * 0.9f && _speed > cornerSpeed)
                     _speed = MoveTowards(_speed, cornerSpeed, AssistBrake * dt);
+                // Entrati decisi e in tempo: fino alla curva e in curva la velocità non crolla sotto quella giusta (freno a mano e gomme
+                // di traverso altrimenti la mangerebbero tutta e l'auto si pianterebbe in mezzo all'incrocio).
+                // Entrati piano no: lì la derapata può spegnersi a metà, come sarebbe davvero
+                if (_driftPower > 0.4f)
+                    _speed = MathF.Max(_speed, MathF.Min(AssistCornerSpeedMin, _speed + 6f * dt));
             }
 
             // L'auto avanza sulla traiettoria: marcia = direzione della strada, sempre in corsia
@@ -724,17 +744,30 @@ public sealed class Car : IDisposable
         else
         {
             // A ruote bloccate le anteriori non direzionano: lo sterzo quasi non conta
-            float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f);
+            float spin = 0f;
+            if (_spinTimer > 0f)
+            {
+                // Sbandata: niente aderenza dietro, il muso ruota da sé (si smorza col tempo e con la velocità persa)
+                _spinTimer -= dt;
+                spin = Noise.Smooth(0f, SpinTime * 0.6f, _spinTimer) * Math.Clamp(_speed / 6f, 0f, 1f);
+                _grip = MathF.Min(_grip, GripDrift * 0.6f);
+                _speed = MoveTowards(_speed, 0f, SpinScrub * MathF.Abs(MathF.Sin(DriftAngle)) * dt);
+                if (_speed < 0.8f) _spinTimer = 0f;
+            }
+            float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f)
+                                * (_spinTimer > 0f ? 0.45f : 1f); // in sbandata anche le anteriori strisciano
             yawRate = gripYawRate * (1f + DriftYawBoost * slip);
             // Senza aderenza la rotazione in più ha un tetto: si entra di traverso senza girarsi su se stessi
             float yawCap = MathF.Max(MathF.Abs(gripYawRate), DriftYawMax);
             yawRate = Math.Clamp(yawRate, -yawCap, yawCap);
+            yawRate += _spinSide * SpinYawRate * spin;
             newYaw = Yaw + yawRate * dt;
             // La direzione di marcia insegue il muso con la rapidità data dall'aderenza
             _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(newYaw - _travelYaw) * (1f - MathF.Exp(-_grip * dt)));
         }
         float drift = Noise.WrapAngle(newYaw - _travelYaw);
-        if (MathF.Abs(drift) > MaxDrift) _travelYaw = Noise.WrapAngle(newYaw - MathF.Sign(drift) * MaxDrift);
+        float maxDrift = _spinTimer > 0f ? SpinMaxDrift : MaxDrift;
+        if (MathF.Abs(drift) > maxDrift) _travelYaw = Noise.WrapAngle(newYaw - MathF.Sign(drift) * maxDrift);
         BoostFlash = MathF.Max(0f, BoostFlash - dt * 2.5f);
         if (railStep == null && _speed > 0.5f) newYaw = BridgeAssist(world, newYaw, dt);
         Vector3 step = railStep ?? Dir(_travelYaw) * (_speed * dt);
