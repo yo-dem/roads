@@ -112,13 +112,9 @@ public sealed partial class Zone
                 Dashes(mb, e, from + 0.6f, to - 0.6f, divider, 0.1f);
                 Dashes(mb, e, from + 0.6f, to - 0.6f, -divider, 0.1f);
                 // Spartitraffico: aiuola rialzata col cordolo, interrotta prima degli incroci (lì si gira)
-                float m0 = from + 1.6f, m1 = to - 1.6f;
-                Stripe(mb, e, m0, m1, 0f, RoadEdge.AvenueMedian - 0.1f, MedianGrass, 0.14f, Curb);
-                for (float s = m0 + 0.4f; s < m1 - 0.3f; s += 0.9f)
-                {
-                    var p = EdgeLocal(e, s, 0f);
-                    if (InZone(p, 0f)) AddCollider(p.X, p.Z, 0.28f);
-                }
+                // (nessun muro invisibile: chi ci finisce contro ci sale, vedi RoadNetwork.MedianLift)
+                float m0 = e.A.TrimFor(e) + RoadNetwork.MedianGap, m1 = e.Length - e.B.TrimFor(e) - RoadNetwork.MedianGap;
+                Stripe(mb, e, m0, m1, 0f, RoadEdge.AvenueMedian - 0.1f, MedianGrass, RoadNetwork.MedianHeight, Curb);
                 break;
             }
             case RoadLayout.OneWay:

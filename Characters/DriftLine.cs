@@ -17,7 +17,8 @@ public sealed class DriftLine
     private const float MaxOffRoad = 2.8f;    // oltre questa distanza dalla mezzeria non si è "in strada"
     private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo
     private const float StraightDot = 0.8f;   // un'uscita è "dritto" se devia meno di ~37°
-    private const float SideDot = 0.3f;       // un'uscita è a destra/sinistra se ci punta almeno così
+    private const float SideDot = 0.3f;
+    private const float UTurnJunctionMargin = 3f; // niente inversione guidata se un incrocio è più vicino di scivolata + questo       // un'uscita è a destra/sinistra se ci punta almeno così
 
     private readonly List<Vector3> _points = new();
     private readonly List<float> _cum = new();
@@ -158,14 +159,20 @@ public sealed class DriftLine
         float hubDist = probe.Length;
         if (hubDist >= TurnWindow) return null;
 
+        // L'aiuto c'è solo dove è ovvio dove si vuole andare: niente viali a doppia corsia né piazze (in città la
+        // svolta voluta è ambigua), e dal lato dello sterzo una sola strada da prendere. Altrimenti il freno a mano
+        // fa una derapata libera, senza assistenza.
+        if (hub.Piazza || c.Edge.Layout == RoadLayout.Avenue || atHub.Edge.Layout == RoadLayout.Avenue) return null;
         Vector2 travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
         var exits = Exits(hub, atHub.Edge, travelIn).ToList();
-        (RoadEdge Edge, Vector2 Dir, float Ahead, float Right)? exit = null;
-        if (steer > 0.3f) exit = exits.Where(x => x.Right > SideDot).OrderByDescending(x => x.Right).Cast<(RoadEdge, Vector2, float, float)?>().FirstOrDefault();
-        else if (steer < -0.3f) exit = exits.Where(x => -x.Right > SideDot).OrderByDescending(x => -x.Right).Cast<(RoadEdge, Vector2, float, float)?>().FirstOrDefault();
-        else if (!exits.Any(x => x.Ahead > StraightDot) && exits.Count > 0)
-            exit = exits.OrderByDescending(x => x.Ahead).First(); // senza direzione, se la strada curva per forza si segue la curva
-        if (exit is not { } turn) return null; // nessuna svolta: niente aiuto, il freno a mano fa una scivolata libera
+        float want = steer > 0.3f ? 1f : steer < -0.3f ? -1f : 0f;
+        var side = want != 0f
+            ? exits.Where(x => want * x.Right > SideDot).ToList()
+            : exits.Count == 1 && exits[0].Ahead <= StraightDot ? exits // senza sterzo: la strada curva per forza, si segue
+            : new();
+        // Nessuna svolta, più strade possibili da quel lato o un viale: derapata libera
+        if (side.Count != 1 || side[0].Edge.Layout == RoadLayout.Avenue) return null;
+        var turn = side[0];
 
         var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
         float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
@@ -202,6 +209,13 @@ public sealed class DriftLine
     public static DriftLine? AlongRoad(Vector3 pos, Vector3 travel, float length)
     {
         if (!Locate(pos, travel, out var c)) return null;
+        // Inversione guidata solo dove è ovvia: lontano dagli incroci, né davanti né sotto l'auto (lì il freno a mano
+        // potrebbe voler dire "svolta": derapata libera). Vale su ogni strada, viali e sensi unici compresi.
+        if (NearHub(pos)) return null;
+        var probe = new DriftLine();
+        float look = length + UTurnJunctionMargin;
+        float free = probe.Follow(c, look, stopAtJunction: true, out _, out bool deadEnd);
+        if (free < look - 0.01f && !deadEnd) return null; // incrocio o piazza davanti: lì si gira, non si inverte
         var line = new DriftLine();
         float went = line.Follow(c, length, stopAtJunction: false, out var end, out bool blocked);
         if (blocked)
@@ -211,7 +225,11 @@ public sealed class DriftLine
             line.Add(To3(end.Edge.At(end.S) + dir * DeadEndOverrun));
             if (went < 0.5f) return null; // oltre la fine della strada: niente inversione guidata
         }
-        return line._points.Count >= 2 ? line : null;
+        if (line._points.Count < 2) return null;
+        // Sul viale si gira passando nella carreggiata opposta (scavalcando lo spartitraffico): l'auto finisce nella
+        // corsia interna dell'altro verso, pronta a ripartire nel senso giusto
+        if (c.Edge.Layout == RoadLayout.Avenue) line.ShiftAcross(-(RoadEdge.AvenueMedian * 0.5f + RoadEdge.AvenueLane * 0.5f) - c.Lane);
+        return line;
     }
 
     /// <summary>
@@ -240,6 +258,30 @@ public sealed class DriftLine
     {
         var hub = Net.HubAt(new Vector2(p.X, p.Z), 1.5f);
         return hub != null && (hub.Degree != 2 || hub.Piazza);
+    }
+
+    /// <summary>
+    /// Sposta la linea di lato (verso la destra di chi la percorre) in modo graduale: da 0 all'inizio fino a
+    /// <paramref name="offset"/> a tre quarti della lunghezza, poi costante.
+    /// </summary>
+    private void ShiftAcross(float offset)
+    {
+        float total = Length;
+        if (total <= 0f) return;
+        var moved = new List<Vector3>(_points.Count);
+        for (int i = 0; i < _points.Count; i++)
+        {
+            Vector3 a = _points[Math.Max(i - 1, 0)], b = _points[Math.Min(i + 1, _points.Count - 1)];
+            var d = new Vector2(b.X - a.X, b.Z - a.Z);
+            if (d.LengthSquared() < 1e-8f) { moved.Add(_points[i]); continue; }
+            Vector2 r = RightOf(Vector2.Normalize(d));
+            float t = Math.Clamp(_cum[i] / (total * 0.75f), 0f, 1f);
+            float k = offset * t * t * (3f - 2f * t);
+            moved.Add(_points[i] + new Vector3(r.X, 0f, r.Y) * k);
+        }
+        _points.Clear();
+        _cum.Clear();
+        foreach (var p in moved) Add(p);
     }
 
     /// <summary>Punto della linea alla lunghezza <paramref name="u"/> (oltre la fine prosegue dritto).</summary>

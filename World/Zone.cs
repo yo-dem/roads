@@ -736,7 +736,7 @@ public sealed partial class Zone : IDisposable
         foreach (var b in Bridges)
             if (b.TryGetHeight(world, 0f, out float h)) return h;
         float x = world.X - Origin.X, z = world.Z - Origin.Z;
-        return HeightLocal(x, z) + PathLift(x, z);
+        return HeightLocal(x, z) + PathLift(x, z) + RoadNetwork.Current.MedianLift(new Vector2(world.X, world.Z));
     }
 
     /// <summary>Carica le mesh sulla GPU (thread principale) e libera i dati lato CPU.</summary>
