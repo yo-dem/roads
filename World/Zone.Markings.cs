@@ -216,28 +216,29 @@ public sealed partial class Zone
         Matrix4x4 old = mb.Transform;
         mb.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(p) * old;
         mb.BeginObject();
-        mb.AddPrism(Vector3.Zero, 0.05f, 0.045f, 2.1f, 6, Pole);
-        const float y = 1.85f;
+        // Misure vere in scala con l'auto (larga ~1,3 unità ≈ 1,8 m): palo ~2,3 m, cartello ~60 cm
+        mb.AddPrism(Vector3.Zero, 0.03f, 0.027f, 1.65f, 6, Pole);
+        const float y = 1.45f;
         // Chi arriva sta verso -Z: le facce dipinte guardano da quella parte
         if (oneWay)
         {
-            mb.AddBox(new Vector3(0f, y, -0.06f), new Vector3(0.72f, 0.72f, 0.05f), SignBlue);
-            mb.AddBox(new Vector3(0f, y - 0.06f, -0.1f), new Vector3(0.11f, 0.4f, 0.02f), SignWhite);   // asta
-            mb.AddBox(new Vector3(0f, y + 0.17f, -0.1f), new Vector3(0.36f, 0.08f, 0.02f), SignWhite);  // punta
-            mb.AddBox(new Vector3(0f, y + 0.23f, -0.1f), new Vector3(0.2f, 0.07f, 0.02f), SignWhite);
-            mb.AddBox(new Vector3(0f, y + 0.28f, -0.1f), new Vector3(0.08f, 0.05f, 0.02f), SignWhite);
+            mb.AddBox(new Vector3(0f, y, -0.035f), new Vector3(0.42f, 0.42f, 0.025f), SignBlue);
+            mb.AddBox(new Vector3(0f, y - 0.04f, -0.052f), new Vector3(0.06f, 0.22f, 0.01f), SignWhite);   // asta
+            mb.AddBox(new Vector3(0f, y + 0.09f, -0.052f), new Vector3(0.2f, 0.045f, 0.01f), SignWhite);   // punta
+            mb.AddBox(new Vector3(0f, y + 0.13f, -0.052f), new Vector3(0.12f, 0.04f, 0.01f), SignWhite);
+            mb.AddBox(new Vector3(0f, y + 0.165f, -0.052f), new Vector3(0.05f, 0.03f, 0.01f), SignWhite);
         }
         else
         {
             Matrix4x4 keep = mb.Transform;
-            mb.Transform = Matrix4x4.CreateRotationX(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0f, y, -0.06f) * keep;
-            mb.AddPrism(new Vector3(0f, -0.03f, 0f), 0.46f, 0.46f, 0.06f, 16, SignRed);
+            mb.Transform = Matrix4x4.CreateRotationX(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0f, y, -0.035f) * keep;
+            mb.AddPrism(new Vector3(0f, -0.0125f, 0f), 0.22f, 0.22f, 0.025f, 16, SignRed);
             mb.Transform = keep;
-            mb.AddBox(new Vector3(0f, y, -0.11f), new Vector3(0.6f, 0.14f, 0.02f), SignWhite);
+            mb.AddBox(new Vector3(0f, y, -0.052f), new Vector3(0.3f, 0.065f, 0.01f), SignWhite);
         }
         mb.EndObject();
         mb.Transform = old;
-        AddCollider(p.X, p.Z, 0.1f);
-        placed.Add((p.X, p.Z, 0.35f));
+        AddCollider(p.X, p.Z, 0.06f);
+        placed.Add((p.X, p.Z, 0.25f));
     }
 }

@@ -44,43 +44,11 @@ public sealed partial class Game
     private void UpdateMap(float dt)
     {
         _mapReveal = MathF.Max(0f, MathF.Min(1f, _mapReveal + (_bigMap ? dt : -dt) / 0.35f));
-        _wrongWay = WrongWay() ? MathF.Min(1f, _wrongWay + dt * 5f) : MathF.Max(0f, _wrongWay - dt * 2f);
         if (_waypoint is { } w && Vector2.Distance(w, new Vector2(ActivePos.X, ActivePos.Z)) < WaypointReached)
         {
             _waypoint = null;
             Console.WriteLine("Punto raggiunto");
         }
-    }
-
-    private float _wrongWay; // 0..1: quanto è acceso l'avviso "contromano"
-
-    /// <summary>L'auto sta percorrendo un senso unico nel verso sbagliato (fuori dagli incroci)?</summary>
-    private bool WrongWay()
-    {
-        if (_onFoot || MathF.Abs(_player.Speed) < 1f) return false;
-        var v = new Vector2(_player.Velocity.X, _player.Velocity.Z);
-        if (v.LengthSquared() < 1e-4f) return false;
-        v = Vector2.Normalize(v);
-        var p = new Vector2(_player.Position.X, _player.Position.Z);
-        var net = RoadNetwork.Current;
-        if (net.HubAt(p, 0.5f) != null) return false;
-        if (!net.NearestAligned(p, v, 3f, out var hit) || hit.Edge.Layout != RoadLayout.OneWay) return false;
-        if (hit.Distance > hit.Edge.HalfWidth + 0.4f) return false;
-        return Vector2.Dot(hit.Edge.Tangent(hit.S) * hit.Edge.OneWay, v) < -0.5f;
-    }
-
-    /// <summary>Avviso "contromano" in alto al centro: il cartello del divieto d'accesso che lampeggia.</summary>
-    private void DrawWrongWay(Vector2D<int> fb)
-    {
-        if (_wrongWay <= 0.01f) return;
-        float k = PixelScale, a = _wrongWay * (0.75f + 0.25f * MathF.Sin(_time * 9f));
-        var c = new Vector2(fb.X * 0.5f, 54f * k);
-        float r = 30f * k;
-        _hud.Disc(c, r + 3f * k, 28, Ink with { W = 0.6f * a });
-        _hud.Disc(c, r, 28, new Vector4(0.86f, 0.12f, 0.12f, a));
-        _hud.Quad(c + new Vector2(-19f, -5f) * k, c + new Vector2(19f, -5f) * k, c + new Vector2(19f, 5f) * k,
-                  c + new Vector2(-19f, 5f) * k, new Vector4(0.97f, 0.97f, 0.97f, a));
-        _hud.Flush(fb.X, fb.Y);
     }
 
     // ------------------------------------------------------------------ minimappa

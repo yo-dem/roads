@@ -489,7 +489,6 @@ public sealed partial class Game : IDisposable
 
         if (_mapReveal > 0f) DrawBigMap(size);
         DrawCompass(size);
-        DrawWrongWay(size);
         TakeScreenshotIfDue(size);
     }
 
