@@ -5,16 +5,16 @@ using Silk.NET.Maths;
 namespace Roads;
 
 /// <summary>
-/// Orientamento a schermo. In alto a sinistra la bussola (ruota con la camera): punti cardinali, la freccia di chi si
-/// comanda e, se se n'è scelto uno, l'indicatore del punto da raggiungere. Con M la mappa vera dell'isola si srotola
+/// Orientamento a schermo. In alto a sinistra la minimappa (ruota con la camera, mostra ciò che si è esplorato):
+/// punti cardinali, la freccia di chi si comanda e l'indicatore del punto da raggiungere. Con M la mappa vera dell'isola si srotola
 /// sulla destra, semitrasparente: biomi, boschi, città e paesi, strade (statali, vie, sterrati), fiumi e punti di
 /// riferimento. Un clic sulla mappa sceglie il punto da seguire (un clic sul punto lo toglie).
 /// </summary>
 public sealed partial class Game
 {
     // Dimensioni in punti della finestra (sugli schermi Retina vengono moltiplicate)
-    private const float CompassRadius = 64f, CompassMargin = 18f;
-    private const float CompassNear = 120f; // entro questa distanza l'indicatore del punto scelto entra nella bussola
+    private const float CompassRadius = 80f, CompassMargin = 18f;
+    private const float MiniRange = 230f;   // unità di mondo dal centro al bordo della minimappa
     private const float WaypointReached = 8f;
     private static readonly Vector2 CompassCenter = new(CompassMargin + CompassRadius, CompassMargin + CompassRadius);
 
@@ -83,12 +83,13 @@ public sealed partial class Game
         _hud.Flush(fb.X, fb.Y);
     }
 
-    // ------------------------------------------------------------------ bussola
+    // ------------------------------------------------------------------ minimappa
 
     /// <summary>
-    /// Bussola in alto a sinistra: ruota con la camera (in alto c'è sempre la direzione in cui si guarda), con i punti
-    /// cardinali sul bordo, al centro la freccia di chi si comanda e l'indicatore rosa del punto scelto: sul bordo
-    /// quando è lontano, verso il centro quando ci si avvicina.
+    /// Minimappa in alto a sinistra, come prima: ruota con la camera (in alto c'è sempre la direzione in cui si
+    /// guarda) e mostra il territorio già esplorato attorno, con strade, fiumi, cascine e punti di riferimento; sul
+    /// bordo i punti cardinali, al centro la freccia di chi si comanda. Il punto scelto sulla mappa grande compare
+    /// come freccia rosa: al suo posto se è vicino, sul bordo (nella sua direzione) se è lontano.
     /// </summary>
     private void DrawCompass(Vector2D<int> framebuffer)
     {
@@ -100,7 +101,8 @@ public sealed partial class Game
         Vector3 right = _camera.Right, forward = _camera.Forward;
         Vector2 ToMap(Vector3 world) => new(Vector3.Dot(world, right), -Vector3.Dot(world, forward));
 
-        _hud.Disc(c, r, 40, Ink with { W = 0.42f });
+        _hud.Disc(c, r, 40, SeaColor with { W = 0.85f });
+        DrawMiniIsland(c, r, k, ToMap);
         _hud.Ring(c, r - 2f * k, r, 40, new Vector4(0.93f, 0.95f, 0.98f, 0.8f));
         // Tacche: lunghe sui punti cardinali, corte su quelli intermedi
         for (int i = 0; i < 8; i++)
@@ -128,7 +130,7 @@ public sealed partial class Game
             if (dist > 1e-3f)
             {
                 Vector2 d = Vector2.Normalize(ToMap(to / dist));
-                float rad = MathF.Min(dist / CompassNear, 1f) * (r - 12f * k);
+                float rad = MathF.Min(dist * r / MiniRange, r - 12f * k);
                 Vector2 at = c + d * rad, side = new(-d.Y, d.X);
                 float pulse = 1f + 0.12f * MathF.Sin(_time * 5f);
                 // Freccia che punta verso il punto (fuori dalla bussola quando è lontano)
@@ -141,6 +143,92 @@ public sealed partial class Game
         Vector2 h = ToMap(new Vector3(MathF.Sin(ActiveYaw), 0f, MathF.Cos(ActiveYaw)));
         PlayerArrow(c, h, k * 0.9f);
         _hud.Flush(framebuffer.X, framebuffer.Y);
+    }
+
+    /// <summary>
+    /// Il contenuto della minimappa, ritagliato nel cerchio: solo i pezzi di territorio già esplorati (come prima: la
+    /// mappa si scopre girando). Stessi colori e stesse strade della mappa grande.
+    /// </summary>
+    private void DrawMiniIsland(Vector2 c, float r, float k, Func<Vector3, Vector2> toMap)
+    {
+        const float C = Terrain.ChunkSize;
+        Vector3 me = ActivePos;
+        var me2 = new Vector2(me.X, me.Z);
+        float scale = r / MiniRange, reach = MiniRange * 1.45f;
+        Vector2 ToScreen(Vector2 w) => c + toMap(new Vector3(w.X - me.X, 0f, w.Y - me.Z)) * scale;
+        bool Seen(Vector2 w) => _world.IsExplored((int)MathF.Round(w.X / C), (int)MathF.Round(w.Y / C));
+        bool Near(Vector2 w) => Vector2.DistanceSquared(w, me2) < reach * reach;
+
+        var clip = new List<Vector2>(40);
+        for (int i = 0; i < 40; i++)
+        {
+            float a = MathF.Tau * i / 40f;
+            clip.Add(c + new Vector2(MathF.Cos(a), MathF.Sin(a)) * (r - 1.5f * k));
+        }
+
+        // Terreno esplorato
+        foreach (var (a, b, color) in LandTiles())
+        {
+            Vector2 mid = (a + b) * 0.5f;
+            if (!Near(mid) || !Seen(mid)) continue;
+            var quad = new List<Vector2>
+            {
+                ToScreen(a - new Vector2(0.4f)), ToScreen(new Vector2(b.X + 0.4f, a.Y - 0.4f)),
+                ToScreen(b + new Vector2(0.4f)), ToScreen(new Vector2(a.X - 0.4f, b.Y + 0.4f)),
+            };
+            var poly = ClipPolygon(quad, clip);
+            for (int t = 1; t + 1 < poly.Count; t++) _hud.Triangle(poly[0], poly[t], poly[t + 1], color with { W = 0.95f });
+        }
+
+        // Fiumi
+        var river = new Vector4(0.30f, 0.62f, 0.95f, 1f);
+        foreach (int col in GameMap.Current.RiverColumns)
+            for (float z = MathF.Floor((me.Z - reach) / 8f) * 8f; z < me.Z + reach; z += 8f)
+            {
+                Vector2 pa = new(Terrain.RiverX(col, z), z), pb = new(Terrain.RiverX(col, z + 8f), z + 8f);
+                if (!Near(pa) || !Seen(pa) || GameMap.Current.Sample(pa.X, pa.Y).Land < 0.55f) continue;
+                Segment(ToScreen(pa), ToScreen(pb), 2.4f * k, river, clip);
+            }
+
+        // Strade
+        foreach (var (kind, layout, pts) in MapRoads())
+        {
+            float width = layout switch
+            {
+                RoadLayout.Avenue => 4.2f,
+                RoadLayout.OneWay => 1.6f,
+                _ => kind switch { RoadKind.Main => 3.4f, RoadKind.Street => 2.3f, _ => 1.8f },
+            } * k;
+            var color = kind switch
+            {
+                RoadKind.Main => new Vector4(1f, 0.84f, 0.42f, 1f),
+                RoadKind.Street => new Vector4(0.97f, 0.97f, 0.97f, 1f),
+                _ => new Vector4(0.98f, 0.90f, 0.70f, 1f),
+            };
+            for (int i = 0; i + 1 < pts.Length; i++)
+            {
+                if (!Near(pts[i]) || !(Seen(pts[i]) || Seen(pts[i + 1]))) continue;
+                Segment(ToScreen(pts[i]), ToScreen(pts[i + 1]), width, color, clip);
+            }
+        }
+
+        // Cascine e punti di riferimento scoperti
+        foreach (var f in RoadNetwork.Current.Farms)
+        {
+            if (!Near(f.Yard) || !Seen(f.Yard)) continue;
+            Vector2 s = ToScreen(f.Yard);
+            if (!Inside(s, clip, 4f * k)) continue;
+            _hud.Quad(s + new Vector2(-3f, -3f) * k, s + new Vector2(3f, -3f) * k, s + new Vector2(3f, 3f) * k,
+                      s + new Vector2(-3f, 3f) * k, new Vector4(0.70f, 0.22f, 0.16f, 1f));
+        }
+        foreach (var l in GameMap.Current.Landmarks)
+        {
+            if (!Seen(l.Pos)) continue;
+            Vector2 s = ToScreen(l.Pos);
+            if (!Inside(s, clip, 6f * k)) continue;
+            _hud.Disc(s, 6.5f * k, 14, Ink);
+            _hud.Disc(s, 4.8f * k, 14, LandmarkColor(l.Kind));
+        }
     }
 
     // ------------------------------------------------------------------ mappa grande
@@ -384,6 +472,40 @@ public sealed partial class Game
     }
 
     private static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;
+
+    /// <summary>Il punto è dentro la regione convessa, con un margine (pixel) dal bordo?</summary>
+    private static bool Inside(Vector2 p, List<Vector2> clip, float margin)
+    {
+        float o = Orientation(clip);
+        for (int i = 0; i < clip.Count; i++)
+        {
+            Vector2 a = clip[i], b = clip[(i + 1) % clip.Count];
+            Vector2 e = b - a;
+            if (o * Cross(e, p - a) / e.Length() < margin) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Ritaglia un poligono convesso con una regione convessa (Sutherland–Hodgman).</summary>
+    private static List<Vector2> ClipPolygon(List<Vector2> poly, List<Vector2> clip)
+    {
+        float o = Orientation(clip);
+        var output = poly;
+        for (int i = 0; i < clip.Count && output.Count > 0; i++)
+        {
+            Vector2 a = clip[i], e = clip[(i + 1) % clip.Count] - a;
+            var input = output;
+            output = new List<Vector2>(input.Count + 2);
+            for (int k = 0; k < input.Count; k++)
+            {
+                Vector2 p = input[k], q = input[(k + 1) % input.Count];
+                float dp = o * Cross(e, p - a), dq = o * Cross(e, q - a);
+                if (dp >= 0f) output.Add(p);
+                if ((dp >= 0f) != (dq >= 0f)) output.Add(p + (q - p) * (dp / (dp - dq)));
+            }
+        }
+        return output;
+    }
 
     /// <summary>Linea ritagliata dentro la regione convessa (Cyrus–Beck).</summary>
     private void Segment(Vector2 p, Vector2 q, float width, Vector4 color, List<Vector2> clip)
