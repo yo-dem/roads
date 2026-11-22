@@ -325,21 +325,8 @@ public sealed partial class Zone : IDisposable
         Vector3 side = color * 0.8f;
         var depth = new Vector3(0, PathRaise + PathDepth, 0);
 
-        // Per ogni strada: centro della carreggiata dove finisce, la sua destra (guardando fuori dall'incrocio), mezza larghezza
-        var arms = n.Edges.Select((e, i) =>
-        {
-            float s = e.ToS(n, n.Trim[i]);
-            Vector2 p = e.At(s), t = e.Tangent(s) * (e.A == n ? 1f : -1f);
-            return (P: p, Right: new Vector2(-t.Y, t.X), Hw: e.HalfWidth, Ang: MathF.Atan2(p.Y - n.Pos.Y, p.X - n.Pos.X));
-        }).OrderBy(a => a.Ang).ToArray();
-
-        // Poligono: per ogni strada il bordo sinistro e quello destro, girando attorno al centro
-        var ring = new List<Vector3>();
-        foreach (var a in arms)
-        {
-            ring.Add(L(a.P - a.Right * a.Hw) with { Y = top });
-            ring.Add(L(a.P + a.Right * a.Hw) with { Y = top });
-        }
+        var arms = JunctionArms(n);
+        var ring = JunctionRing(n, arms).Select(p => L(p) with { Y = top }).ToList();
         var c = center with { Y = top };
         for (int i = 0; i < ring.Count; i++)
             UpTriangle(mb, c, ring[i], ring[(i + 1) % ring.Count], color);
@@ -357,25 +344,202 @@ public sealed partial class Zone : IDisposable
         {
             var a = arms[q];
             var b = arms[(q + 1) % arms.Length];
-            Vector3 r = ring[2 * q + 1], l = ring[(2 * q + 2) % ring.Count]; // bordo destro di a, sinistro di b
+            // Bordo dell'incrocio tra la strada a e la successiva b: dal bordo destro di a al sinistro di b, girando
+            // l'angolo esterno se c'è (vedi EdgeCorner)
+            var edge = new List<Vector3> { L(a.P + a.Right * a.Hw) with { Y = top } };
+            edge.AddRange(EdgeCorner(n, a, b, a.Hw, b.Hw).Select(p => L(p) with { Y = top }));
+            edge.Add(L(b.P - b.Right * b.Hw) with { Y = top });
             if (!n.Sidewalks)
             {
                 // Fianco della lastra lungo il bordo dell'incrocio (entrambe le facce: si vede da ogni lato)
-                mb.AddQuad(r - depth, l - depth, l, r, side);
-                mb.AddQuad(l - depth, r - depth, r, l, side);
+                for (int i = 0; i + 1 < edge.Count; i++)
+                {
+                    Vector3 r = edge[i], l = edge[i + 1];
+                    mb.AddQuad(r - depth, l - depth, l, r, side);
+                    mb.AddQuad(l - depth, r - depth, r, l, side);
+                }
                 continue;
             }
             // Angolo di marciapiede: dal bordo destro di a (e dal suo marciapiede) al bordo sinistro di b
-            Vector3 rc = r + curbUp, lc = l + curbUp;
-            Vector3 ro = L(a.P + a.Right * (a.Hw + Terrain.WalkWidth)) with { Y = rc.Y };
-            Vector3 lo = L(b.P - b.Right * (b.Hw + Terrain.WalkWidth)) with { Y = lc.Y };
-            UpTriangle(mb, rc, ro, lo, Sidewalk);
-            UpTriangle(mb, rc, lo, lc, Sidewalk);
-            mb.AddQuad(r, l, lc, rc, Curb);                 // cordolo verso l'incrocio
-            mb.AddQuad(l, r, rc, lc, Curb);
+            var outer = new List<Vector3> { L(a.P + a.Right * (a.Hw + Terrain.WalkWidth)) };
+            outer.AddRange(EdgeCorner(n, a, b, a.Hw + Terrain.WalkWidth, b.Hw + Terrain.WalkWidth).Select(L));
+            outer.Add(L(b.P - b.Right * (b.Hw + Terrain.WalkWidth)));
+            if (outer.Count != edge.Count) // angolo vivo da una parte e smussato dall'altra: si segue il bordo strada
+                outer = edge.Select(p => p + Vector3.Normalize(p - center with { Y = top }) * Terrain.WalkWidth).ToList();
             var down = depth + curbUp;
-            mb.AddQuad(ro - down, lo - down, lo, ro, Sidewalk * 0.8f); // fianco esterno
-            mb.AddQuad(lo - down, ro - down, ro, lo, Sidewalk * 0.8f);
+            for (int i = 0; i + 1 < edge.Count; i++)
+            {
+                Vector3 r = edge[i], l = edge[i + 1];
+                Vector3 rc = r + curbUp, lc = l + curbUp;
+                Vector3 ro = outer[i] with { Y = rc.Y }, lo = outer[i + 1] with { Y = lc.Y };
+                UpTriangle(mb, rc, ro, lo, Sidewalk);
+                UpTriangle(mb, rc, lo, lc, Sidewalk);
+                mb.AddQuad(r, l, lc, rc, Curb);                 // cordolo verso l'incrocio
+                mb.AddQuad(l, r, rc, lc, Curb);
+                mb.AddQuad(ro - down, lo - down, lo, ro, Sidewalk * 0.8f); // fianco esterno
+                mb.AddQuad(lo - down, ro - down, ro, lo, Sidewalk * 0.8f);
+            }
+        }
+    }
+
+    /// <summary>Una strada che esce da un incrocio: centro della carreggiata dove finisce, direzione verso fuori, destra.</summary>
+    public readonly record struct JunctionArm(Vector2 P, Vector2 T, Vector2 Right, float Hw, float Ang);
+
+    /// <summary>Le strade dell'incrocio, in ordine di angolo attorno al centro.</summary>
+    public static JunctionArm[] JunctionArms(RoadNode n) => n.Edges.Select((e, i) =>
+    {
+        float s = e.ToS(n, n.Trim[i]);
+        Vector2 p = e.At(s), t = e.Tangent(s) * (e.A == n ? 1f : -1f);
+        return new JunctionArm(p, t, new Vector2(-t.Y, t.X), e.HalfWidth, MathF.Atan2(p.Y - n.Pos.Y, p.X - n.Pos.X));
+    }).OrderBy(a => a.Ang).ToArray();
+
+    /// <summary>
+    /// Il poligono dell'incrocio (coordinate del mondo): per ogni strada il bordo sinistro e quello destro, girando
+    /// attorno al centro, e tra due strade l'eventuale angolo esterno.
+    /// </summary>
+    public static List<Vector2> JunctionRing(RoadNode n, JunctionArm[] arms)
+    {
+        var ring = new List<Vector2>();
+        for (int q = 0; q < arms.Length; q++)
+        {
+            var a = arms[q];
+            ring.Add(a.P - a.Right * a.Hw);
+            ring.Add(a.P + a.Right * a.Hw);
+            ring.AddRange(EdgeCorner(n, a, b: arms[(q + 1) % arms.Length], a.Hw, arms[(q + 1) % arms.Length].Hw));
+        }
+        return ring;
+    }
+
+    /// <summary>
+    /// I punti da inserire nel bordo dell'incrocio tra il bordo destro della strada <paramref name="a"/> e quello
+    /// sinistro della successiva <paramref name="b"/> (girando attorno al centro), a distanza
+    /// <paramref name="offA"/> / <paramref name="offB"/> dalle mezzerie. Una semplice corda tra i due bordi lascerebbe
+    /// buchi: se tra le due strade c'è più di mezzo giro (lato esterno di una curva, retro di un incrocio a Y) taglierebbe
+    /// l'angolo vicino al centro lasciando un buco a V, e allora i bordi si prolungano fino a incontrarsi (angolo vivo) o,
+    /// se si incontrerebbero troppo lontano, girano attorno al centro (smusso). Sul lato interno di solito basta la corda,
+    /// tranne tra strade ad angolo acuto (vedi sotto). Se la strada arriva curva, il bordo segue anche la direzione da cui
+    /// arriva davvero.
+    /// </summary>
+    public static List<Vector2> EdgeCorner(RoadNode n, JunctionArm a, JunctionArm b, float offA, float offB)
+    {
+        var pts = new List<Vector2>();
+        if (n.Edges.Count < 2) return pts;
+        float gap = b.Ang - a.Ang;
+        if (gap <= 0f) gap += MathF.Tau;
+
+        // Vicino all'incrocio la strada può curvare: i bordi si prolungano lungo la direzione centro → fine carreggiata
+        // (dove la strada arriva davvero), non lungo la tangente in quel punto, che può puntare di lato rispetto al centro
+        float off = MathF.Max(offA, offB);
+        Vector2 da = Approach(n, a), db = Approach(n, b);
+        Vector2 ra = new(-da.Y, da.X), rb = new(-db.Y, db.X);
+        Vector2 pa = a.P + ra * offA, pb = b.P - rb * offB;
+        Vector2 ea = a.P + a.Right * offA, eb = b.P - b.Right * offB; // bordi della lastra dove comincia la carreggiata
+        bool addA = Vector2.Dot(da, a.T) < 0.9999f, addB = Vector2.Dot(db, b.T) < 0.9999f; // strada che arriva curva
+        static float Cross(Vector2 u, Vector2 v) => u.X * v.Y - u.Y * v.X;
+
+        if (gap <= MathF.PI + 0.02f)
+        {
+            // Lato interno. Di solito i due bordi si incontrano prima dell'inizio di entrambe le carreggiate e la corda
+            // tra i due passa fuori dall'angolo vero (lo riempie un poco). Ma tra strade ad angolo acuto, con una
+            // carreggiata che comincia molto più lontano dell'altra, i bordi si incontrano oltre l'inizio di una sola
+            // delle due: la corda taglierebbe una scheggia dell'altra strada, e allora il bordo passa da quel punto.
+            // Ogni bordo, prima dell'inizio della carreggiata, va nella direzione d'arrivo; dopo, lungo la lastra.
+            if (addA) pts.Add(pa);
+            if (Meet(pa, da, pb, db, out float u, out float v) is { } x && (u > 0f) != (v > 0f))
+            {
+                x = u > 0f ? Meet(ea, a.T, pb, db, out u, out v) ?? x : Meet(pa, da, eb, b.T, out u, out v) ?? x;
+                if (Vector2.Distance(x, n.Pos) < n.Trim.Max() + 3f) pts.Add(x);
+            }
+            if (addB) pts.Add(pb);
+            return pts;
+        }
+
+        if (addA) pts.Add(pa);
+        float denom = Cross(da, db);
+        bool mitred = false;
+        if (MathF.Abs(denom) > 0.05f)
+        {
+            float u = Cross(pb - pa, db) / denom, v = Cross(pb - pa, da) / denom;
+            Vector2 x = pa + da * u;
+            if (u <= 0f && v <= 0f && Vector2.Distance(x, n.Pos) < 2.5f * off)
+            {
+                pts.Add(x); // angolo vivo
+                mitred = true;
+            }
+        }
+        if (!mitred)
+        {
+            // Smusso: i bordi tornano fino all'altezza del centro e lo si aggira dalla parte esterna
+            pts.Add(n.Pos + ra * offA);
+            Vector2 bis = da + db;
+            if (bis.LengthSquared() > 1e-4f) pts.Add(n.Pos - Vector2.Normalize(bis) * off);
+            pts.Add(n.Pos - rb * offB);
+        }
+        if (addB) pts.Add(pb);
+        return pts;
+    }
+
+    /// <summary>Incontro delle rette p1 + d1·u e p2 + d2·v (null se quasi parallele).</summary>
+    private static Vector2? Meet(Vector2 p1, Vector2 d1, Vector2 p2, Vector2 d2, out float u, out float v)
+    {
+        float det = d1.X * d2.Y - d1.Y * d2.X;
+        Vector2 w = p2 - p1;
+        u = v = 0f;
+        if (MathF.Abs(det) <= 0.05f) return null;
+        u = (w.X * d2.Y - w.Y * d2.X) / det;
+        v = (w.X * d1.Y - w.Y * d1.X) / det;
+        return p1 + d1 * u;
+    }
+
+    /// <summary>Direzione dal centro dell'incrocio al punto dove comincia la carreggiata della strada.</summary>
+    private static Vector2 Approach(RoadNode n, JunctionArm a)
+    {
+        Vector2 d = a.P - n.Pos;
+        return d.LengthSquared() > 1e-4f ? Vector2.Normalize(d) : a.T;
+    }
+
+    /// <summary>
+    /// Verifica (test): i punti della carreggiata attorno all'incrocio, cioè le strade prolungate dritte fino al centro,
+    /// devono stare dentro il poligono dell'incrocio o sulla lastra della strada. Restituisce quelli scoperti.
+    /// </summary>
+    public static IEnumerable<Vector2> JunctionGaps(RoadNode n)
+    {
+        if (!n.Junction || n.Edges.Count < 2) yield break;
+        var arms = JunctionArms(n);
+        var ring = JunctionRing(n, arms);
+        // Dentro uno dei triangoli disegnati (a ventaglio dal centro, come in BuildJunction)
+        static float Cross(Vector2 u, Vector2 v) => u.X * v.Y - u.Y * v.X;
+        bool InRing(Vector2 p)
+        {
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector2 a = n.Pos, b = ring[i], c = ring[(i + 1) % ring.Count];
+                float d1 = Cross(b - a, p - a), d2 = Cross(c - b, p - b), d3 = Cross(a - c, p - c);
+                const float eps = 1e-4f;
+                if ((d1 >= -eps && d2 >= -eps && d3 >= -eps) || (d1 <= eps && d2 <= eps && d3 <= eps)) return true;
+            }
+            return false;
+        }
+        // Sulla lastra della strada (appena oltre il punto dove comincia la carreggiata)
+        bool OnStrip(Vector2 p) => arms.Any(a =>
+        {
+            Vector2 r = p - a.P;
+            float along = Vector2.Dot(r, a.T), across = MathF.Abs(r.X * a.T.Y - r.Y * a.T.X);
+            return along >= -0.03f && along < 20f && across <= a.Hw + 0.01f; // tolleranza: i campioni sul confine
+        });
+        // Dove la strada cambia larghezza, il poligono raccorda le due larghezze: al centro conta la più stretta
+        float narrowest = arms.Min(a => a.Hw);
+        foreach (var a in arms)
+        {
+            Vector2 d = Approach(n, a), right = new(-d.Y, d.X);
+            float len = Vector2.Distance(a.P, n.Pos); // fin dove arriva il poligono lungo la strada
+            for (float s = 0f; s < len; s += 0.2f)
+                for (float o = -0.9f; o <= 0.901f; o += 0.15f)
+                {
+                    float hw = narrowest + (a.Hw - narrowest) * (len > 0f ? s / len : 1f);
+                    Vector2 p = n.Pos + d * s + right * (o * hw);
+                    if (!InRing(p) && !OnStrip(p)) yield return p;
+                }
         }
     }
 

@@ -199,6 +199,17 @@ public sealed partial class Game : IDisposable
                     Console.WriteLine($"  cucitura scoperta in fondo al tratto {e.Id} ({e.Kind}) da s={reached:F2} a {e.Length:F2}, a {e.At(reached)}");
             }
             Console.WriteLine($"Verifica cuciture: {seams} tratti di strada non disegnati da nessun pezzo");
+            // Incroci e giunzioni: la carreggiata prolungata fino al centro dev'essere tutta coperta (niente buchi a V)
+            int gapNodes = 0;
+            foreach (var n in RoadNetwork.Current.Nodes)
+            {
+                var gaps = Zone.JunctionGaps(n).ToList();
+                if (gaps.Count == 0) continue;
+                if (gapNodes++ < 30)
+                    Console.WriteLine($"  incrocio scoperto a {n.Pos.X:F1}, {n.Pos.Y:F1} ({n.Degree} strade, {gaps.Count} punti, "
+                                      + $"es. {gaps[0].X:F1}, {gaps[0].Y:F1})");
+            }
+            Console.WriteLine($"Verifica incroci: {gapNodes} incroci con buchi nella carreggiata");
             VerifyAvenueUTurns();
             var defects = RoadNetwork.Current.FindDefects();
             Console.WriteLine($"Verifica geometria: {defects.Count} difetti");
