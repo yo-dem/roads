@@ -74,6 +74,7 @@ public sealed partial class Game : IDisposable
     private Vector3 ActiveVelocity => _onFoot ? _kid.Velocity : _player.Velocity;
     private Particles _particles = null!;
     private Trains? _trains;
+    private Mesh[] _signalLit = [];   // lente accesa del semaforo: rossa, gialla, verde (vedi TrafficLights.Light)
     private SkidMarks _skids = null!;
     private EngineSound? _engine;
     private readonly IsoCamera _camera = new();
@@ -218,6 +219,15 @@ public sealed partial class Game : IDisposable
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
+        // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
+        Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
+        _signalLit = new Mesh[3];
+        for (int k = 0; k < 3; k++) // nell'ordine di TrafficLights.Light: rossa in alto, gialla, verde in basso
+        {
+            var sb = new MeshBuilder();
+            sb.AddBox(new Vector3(0f, Zone.SignalLensY[k], Zone.SignalLensZ - 0.004f), new Vector3(0.15f, 0.15f, 0.02f), litColor[k]);
+            _signalLit[k] = sb.Build(_gl);
+        }
         _skids = new SkidMarks(_gl);
         start.Y = _world.GroundHeight(start);
         _player = new Car(_gl, start, startYaw);
@@ -285,10 +295,7 @@ public sealed partial class Game : IDisposable
 
         if (_onFoot)
         {
-            // A piedi, con la visuale da dietro, il personaggio si guida come una mini auto: destra/sinistra lo girano,
-            // su va avanti, giù arretra senza voltarsi. Con la visuale lontana le frecce restano rispetto alla camera.
             // L'auto resta parcheggiata a motore spento.
-            float? face = null;
             if (_debug.Platform && !_kid.Busy && !_onTrain && !_boarding && _trains != null
                 && _trains.AlightPoint(out var platform, out float platformYaw))
             {
@@ -297,16 +304,16 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            // A piedi si va con WASD o le frecce rispetto alla visuale (che si gira col mouse): il personaggio si volta da solo
-            // nella direzione in cui cammina. Spazio: salto.
+            // A piedi come in GTA: WASD o frecce rispetto alla visuale, e il personaggio si volta da solo dove corre (con S si
+            // gira e viene verso la camera). Il mouse gira la visuale attorno a lui. Spazio: salto.
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
                 input = _camera.Right * moveX + _camera.Forward * moveY;
-            if (!_onTrain && jumpPressed) _kid.Jump();
             _footYaw = _kid.Yaw;
+            if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
-            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, face);
+            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks);
             if (_kid.Hidden && _boarding)
             {
                 // Il saltello sulla carrozza è finito: si è dentro, davanti alla porta, rivolti verso i sedili
@@ -365,8 +372,15 @@ public sealed partial class Game : IDisposable
         if (!_onTrain)
         {
             _camera.Unfix();
+            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato; quando
+            // invece viene verso la camera (S) non gira affatto: arretra con lui, che resta visto di fronte
+            _mouseLookIdle += dt;
+            Vector3 kv = _kid.Velocity with { Y = 0f };
+            float follow = 0f;
+            if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
+                follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
             _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, _onFoot ? _kid.Yaw : _player.TravelYaw,
-                           walk: _onFoot);
+                           walk: _onFoot, follow: follow);
         }
         UpdateMap(dt);
         if (_engine != null) _engine.Horn = !_onFoot && _keyboard.IsKeyPressed(Key.E); // clacson (solo in auto)
@@ -395,6 +409,39 @@ public sealed partial class Game : IDisposable
         }
     }
 
+    private const int MaxLamps = 24; // come uLampPos nello shader
+    private readonly float[] _lampXyz = new float[MaxLamps * 3];
+    private readonly List<(float D, Vector3 P)> _lampNear = new();
+
+    /// <summary>Di notte i lampioni più vicini alla visuale fanno luce vera sulla strada (pozze di luce calda).</summary>
+    private void SetLamps()
+    {
+        float glow = Noise.Smooth(0.3f, 0.75f, 1f - _day.Daylight);
+        _lampNear.Clear();
+        if (glow > 0.01f)
+        {
+            // Centro un po' avanti alla camera: lì c'è ciò che si vede
+            Vector3 c = _camera.Target + _camera.Forward * 10f;
+            foreach (var zone in _world.Zones)
+                foreach (var p in zone.LampLights)
+                {
+                    float d = Vector2.DistanceSquared(new(p.X, p.Z), new(c.X, c.Z));
+                    if (d < 45f * 45f) _lampNear.Add((d, p));
+                }
+            _lampNear.Sort((a, b) => a.D.CompareTo(b.D));
+        }
+        int n = Math.Min(_lampNear.Count, MaxLamps);
+        for (int i = 0; i < n; i++)
+        {
+            _lampXyz[i * 3] = _lampNear[i].P.X;
+            _lampXyz[i * 3 + 1] = _lampNear[i].P.Y;
+            _lampXyz[i * 3 + 2] = _lampNear[i].P.Z;
+        }
+        _lit.SetInt("uLampCount", n);
+        if (n > 0) _lit.SetVector3Array("uLampPos[0]", _lampXyz.AsSpan(0, n * 3));
+        _lit.SetFloat("uLampGlow", glow);
+    }
+
     private void CollectScene(Matrix4x4 viewProj)
     {
         _viewProj = viewProj;
@@ -416,6 +463,13 @@ public sealed partial class Game : IDisposable
             if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m, Area: area));
             if (zone.Glow != null)
                 _opaque.Add(new DrawItem(zone.Glow, m, 0.1f + 0.9f * night, CastShadow: false, SeeThrough: true, Area: area));
+            // Semafori: per ogni testa la lente accesa in questo istante
+            foreach (var h in zone.TrafficHeads)
+            {
+                var light = TrafficLights.State(h.Node, h.Group, _time);
+                _opaque.Add(new DrawItem(_signalLit[(int)light],
+                                         Matrix4x4.CreateRotationY(h.Yaw) * Matrix4x4.CreateTranslation(h.World), 1f, CastShadow: false));
+            }
 
             for (int i = 0; i < zone.Campfires.Count; i++)
             {
@@ -521,6 +575,7 @@ public sealed partial class Game : IDisposable
         _lit.SetVector3("uTailPos", _player.TailLightPos);
         _lit.SetVector3("uTailDir", _player.TailLightDir);
         _lit.SetFloat("uTailGlow", darkness * ((_player.Headlights ? 0.25f : 0f) + 0.9f * _player.BrakeLight));
+        SetLamps();
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
 
@@ -914,8 +969,15 @@ public sealed partial class Game : IDisposable
             _lookTilt = Math.Clamp(_lookTilt - delta.Y * MousePitch, -0.6f, 0.5f);
         }
         else if (_onTrain) _cabinLook -= delta.X * MouseYaw;
-        else _camera.Orbit(-delta.X * MouseYaw, delta.Y * MousePitch);
+        else
+        {
+            // A piedi il mouse gira la visuale attorno al personaggio
+            _camera.Orbit(-delta.X * MouseYaw, delta.Y * MousePitch);
+            if (delta.LengthSquared() > 1f) _mouseLookIdle = 0f;
+        }
     }
+
+    private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
 
     // ------------------------------------------------------------------ a bordo del treno
 
@@ -1056,6 +1118,7 @@ public sealed partial class Game : IDisposable
         _kid?.Dispose();
         _particles?.Dispose();
         _trains?.Dispose();
+        foreach (var m in _signalLit) m.Dispose();
         _flame?.Dispose();
         _shadow?.Dispose();
         _lit?.Dispose();

@@ -212,6 +212,7 @@ public sealed partial class Zone
             Vector3 head = p + new Vector3(0, 2.5f, 0) - perp * 0.62f;
             mb.AddBox(head + new Vector3(0, 0.1f, 0), new Vector3(0.34f, 0.08f, 0.34f), Pole);
             glow.AddBox(head, new Vector3(0.24f, 0.12f, 0.24f), LitWindow);
+            LampLights.Add(head + Origin);
             AddCollider(p.X, p.Z, 0.12f);
             placed.Add((p.X, p.Z, 0.4f));
         }

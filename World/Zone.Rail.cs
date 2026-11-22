@@ -110,7 +110,7 @@ public sealed partial class Zone
             var mid = RailLocal(rail, st.S, off);
             Vector2 t = rail.Tangent(st.S);
             float yaw = MathF.Atan2(t.X, t.Y);
-            if (InZone(mid, 3f))
+            if (InZone(mid, 0f)) // (anche vicino al bordo del pezzo: lo costruisce il pezzo che ne contiene il centro)
             {
                 float y = HeightLocal(mid.X, mid.Z) + Railway.PlatformHeight;
                 Matrix4x4 old = mb.Transform;
@@ -130,17 +130,14 @@ public sealed partial class Zone
                 mb.Transform = old;
             }
 
-            // Edificio della stazione dietro la banchina, rivolto verso i binari
-            float back = st.Side * (Railway.BallastHalf + 0.2f + Railway.PlatformWidth + 0.4f + 2.2f);
-            var b = RailLocal(rail, st.S, back);
-            Vector2 toTrack = -new Vector2(-t.Y, t.X) * st.Side;
-            float byaw = MathF.Atan2(toTrack.X, toTrack.Y);
-            var foot = Footprint.Box(new Vector2(b.X, b.Z), new Vector2(3.6f, 2.2f), byaw);
-            if (Corners(foot).All(p => MathF.Abs(p.X) < Half - 0.6f && MathF.Abs(p.Y) < Half - 0.6f)
-                && PathDistance(b.X, b.Z) > PathHalf + 3.5f)
+            // Fabbricato viaggiatori dietro la banchina, rivolto verso i binari (posto scelto da Railway)
+            if (st.BuildingPos is { } bw)
             {
+                var b = new Vector3(bw.X - Origin.X, 0f, bw.Y - Origin.Z);
+                if (!InZone(b, 0f)) continue;
+                var foot = Footprint.Box(new Vector2(b.X, b.Z), new Vector2(RailStation.BuildingHalfLength, RailStation.BuildingHalfDepth), st.BuildingYaw);
                 float baseY = Corners(foot).Min(p => HeightLocal(p.X, p.Y));
-                BuildBuilding(mb, glow, rng, new Vector3(b.X, baseY, b.Z), byaw, 7.2f, 4.4f, 2.7f, false, new Vector3(0.93f, 0.84f, 0.62f));
+                BuildBuilding(mb, glow, rng, new Vector3(b.X, baseY, b.Z), st.BuildingYaw, 7.2f, 4.4f, 2.7f, false, new Vector3(0.93f, 0.84f, 0.62f));
                 AddBoxCollider(foot);
                 _buildings.Add(foot);
                 placed.Add((b.X, b.Z, foot.Reach));

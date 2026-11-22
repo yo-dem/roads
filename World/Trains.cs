@@ -332,24 +332,102 @@ public sealed class Trains : IDisposable
                     mb.AddBox(new Vector3(x, 0.2f, z + dz), new Vector3(0.12f, 0.4f, 0.4f), Dark);
     }
 
+    // Treno regionale moderno: cassa bianca, fascia color petrolio, finestrini a nastro, gonne sui carrelli
+    private static readonly Vector3 BodyWhite = new(0.93f, 0.94f, 0.95f);
+    private static readonly Vector3 Teal = new(0.06f, 0.50f, 0.56f);
+    private static readonly Vector3 Skirt = new(0.30f, 0.32f, 0.35f);
+    private static readonly Vector3 RoofGrey = new(0.62f, 0.65f, 0.68f);
+    private static readonly Vector3 Ribbon = new(0.14f, 0.18f, 0.24f);
+
+    /// <summary>Triangolo con la faccia rivolta verso <paramref name="outward"/>, qualunque sia l'ordine dei vertici.</summary>
+    private static void Tri(MeshBuilder mb, Vector3 a, Vector3 b, Vector3 c, Vector3 outward, Vector3 color)
+    {
+        if (Vector3.Dot(Vector3.Cross(b - a, c - a), outward) < 0f) (b, c) = (c, b);
+        mb.AddTriangle(a, b, c, color);
+    }
+
+    /// <summary>
+    /// Solido ottenuto estrudendo un profilo laterale convesso (punti (z, y), in giro) tra x = -w e x = +w:
+    /// fianchi pieni e una faccia per ogni lato del profilo, colorata da <paramref name="faceColor"/>.
+    /// </summary>
+    private static void Extrude(MeshBuilder mb, Vector2[] profile, float w, Vector3 side, Func<int, Vector3> faceColor)
+    {
+        Vector2 mid = profile.Aggregate(Vector2.Zero, (acc, p) => acc + p) / profile.Length;
+        for (int i = 1; i + 1 < profile.Length; i++)
+            foreach (float sx in new[] { -1f, 1f })
+                Tri(mb, new Vector3(sx * w, profile[0].Y, profile[0].X), new Vector3(sx * w, profile[i].Y, profile[i].X),
+                    new Vector3(sx * w, profile[i + 1].Y, profile[i + 1].X), new Vector3(sx, 0, 0), side);
+        for (int i = 0; i < profile.Length; i++)
+        {
+            Vector2 p = profile[i], q = profile[(i + 1) % profile.Length];
+            Vector2 m = (p + q) * 0.5f - mid;
+            var outward = new Vector3(0, m.Y, m.X);
+            var a = new Vector3(-w, p.Y, p.X); var b = new Vector3(w, p.Y, p.X);
+            var c = new Vector3(w, q.Y, q.X); var d = new Vector3(-w, q.Y, q.X);
+            Tri(mb, a, b, c, outward, faceColor(i));
+            Tri(mb, a, c, d, outward, faceColor(i));
+        }
+    }
+
+    /// <summary>Gonne sotto la cassa (coprono quasi tutto il carrello) e mantice d'intercomunicazione sul davanti.</summary>
+    private static void Underframe(MeshBuilder mb, float len, bool bellowsFront)
+    {
+        Bogies(mb, len);
+        mb.AddBox(new Vector3(0, 0.46f, 0), new Vector3(1.9f, 0.26f, len - 0.5f), Skirt);
+        if (bellowsFront) mb.AddBox(new Vector3(0, 1.45f, len * 0.5f + 0.15f), new Vector3(1.5f, 1.75f, 0.42f), Dark);
+    }
+
+    /// <summary>Pantografo a "Z" sul tetto, con gli isolatori.</summary>
+    private static void Pantograph(MeshBuilder mb, float z, float roof)
+    {
+        foreach (float x in new[] { -0.45f, 0.45f })
+            mb.AddPrism(new Vector3(x, roof, z), 0.06f, 0.05f, 0.14f, 6, new Vector3(0.75f, 0.35f, 0.25f)); // isolatori
+        mb.AddBox(new Vector3(0, roof + 0.16f, z), new Vector3(1.0f, 0.05f, 0.5f), Dark);
+        Matrix4x4 old = mb.Transform;
+        mb.Transform = Matrix4x4.CreateRotationX(0.75f) * Matrix4x4.CreateTranslation(0, roof + 0.36f, z + 0.12f) * old;
+        mb.AddBox(Vector3.Zero, new Vector3(0.06f, 0.05f, 0.62f), Dark);
+        mb.Transform = Matrix4x4.CreateRotationX(-0.75f) * Matrix4x4.CreateTranslation(0, roof + 0.6f, z - 0.05f) * old;
+        mb.AddBox(Vector3.Zero, new Vector3(0.06f, 0.05f, 0.5f), Dark);
+        mb.Transform = old;
+        mb.AddBox(new Vector3(0, roof + 0.78f, z - 0.2f), new Vector3(1.1f, 0.04f, 0.08f), Dark); // strisciante
+    }
+
+    /// <summary>
+    /// Carrozza di testa di un treno regionale moderno: muso aerodinamico inclinato con un grande parabrezza scuro
+    /// avvolgente, fanali sottili, cassa bianca con la fascia color petrolio, finestrini a nastro e pantografo.
+    /// </summary>
     private static (Mesh, Mesh) BuildLoco(GL gl)
     {
         var mb = new MeshBuilder();
         var glow = new MeshBuilder();
-        var red = new Vector3(0.80f, 0.16f, 0.14f);
-        var yellow = new Vector3(0.95f, 0.78f, 0.20f);
-        Bogies(mb, LocoLength);
-        // Cofano davanti, cabina dietro
-        mb.AddBox(new Vector3(0, 1.05f, 0.9f), new Vector3(1.55f, 1.25f, 3.9f), red);
-        mb.AddBox(new Vector3(0, 1.35f, -1.75f), new Vector3(1.85f, 1.85f, 2.3f), red);
-        mb.AddBox(new Vector3(0, 0.52f, 0f), new Vector3(1.9f, 0.18f, LocoLength - 0.2f), yellow);   // fascia
-        mb.AddBox(new Vector3(0, 2.33f, -1.75f), new Vector3(1.95f, 0.12f, 2.45f), Dark);            // tetto cabina
-        foreach (float x in new[] { -0.93f, 0.93f })
-            mb.AddBox(new Vector3(x, 1.7f, -1.75f), new Vector3(0.03f, 0.55f, 1.5f), GlassC);
-        mb.AddBox(new Vector3(0, 1.72f, -0.59f), new Vector3(1.4f, 0.5f, 0.03f), GlassC);              // parabrezza
-        mb.AddBox(new Vector3(0, 1.75f, 2.2f), new Vector3(0.2f, 0.25f, 0.2f), Dark);                  // fumaiolo
-        glow.AddBox(new Vector3(0.5f, 0.95f, 2.87f), new Vector3(0.22f, 0.18f, 0.04f), Lit);           // fari
-        glow.AddBox(new Vector3(-0.5f, 0.95f, 2.87f), new Vector3(0.22f, 0.18f, 0.04f), Lit);
+        const float L = LocoLength, W = 0.95f, Bottom = 0.56f, Roof = 2.42f;
+        float back = -L * 0.5f + 0.05f, front = L * 0.5f;
+        Underframe(mb, L, bellowsFront: false);
+        // Profilo laterale: retro, tetto, muso che scende inclinato, punta arrotondata, fondo
+        Vector2[] profile =
+        [
+            new(back, Bottom), new(front - 0.05f, Bottom), new(front, 0.85f), new(front - 0.12f, 1.2f),
+            new(front - 0.75f, 1.95f), new(front - 1.35f, Roof - 0.04f), new(front - 1.7f, Roof), new(back, Roof),
+        ];
+        // Faccia 0 il fondo, 1-2 la punta (fascia colorata), 3 il parabrezza, 4 la fronte del tetto
+        Extrude(mb, profile, W, BodyWhite, i => i switch { 0 => Skirt, 1 or 2 => Teal, 3 => Ribbon, 4 => RoofGrey, 5 or 6 => RoofGrey, _ => BodyWhite });
+        // Fascia petrolio sui fianchi, finestrini a nastro, porte
+        foreach (float sx in new[] { -1f, 1f })
+        {
+            float x = sx * (W + 0.012f);
+            mb.AddBox(new Vector3(x, 0.98f, -0.4f), new Vector3(0.02f, 0.2f, L - 1.0f), Teal);
+            mb.AddBox(new Vector3(x, 1.68f, -0.55f), new Vector3(0.02f, 0.62f, L - 2.4f), Ribbon);
+            mb.AddBox(new Vector3(x, 1.75f, front - 1.15f), new Vector3(0.02f, 0.4f, 0.55f), Ribbon); // finestrino del macchinista
+            mb.AddBox(new Vector3(sx * (W + 0.02f), 1.3f, -L * 0.5f + 0.7f), new Vector3(0.02f, 1.35f, 0.6f), Teal); // porta
+            mb.AddBox(new Vector3(sx * (W + 0.03f), 1.3f, -L * 0.5f + 0.7f), new Vector3(0.01f, 1.25f, 0.04f), Skirt);
+        }
+        // Tetto: tettuccio dei condizionatori e pantografo
+        mb.AddBox(new Vector3(0, Roof + 0.08f, -1.2f), new Vector3(1.3f, 0.16f, 1.6f), RoofGrey);
+        Pantograph(mb, 0.1f, Roof);
+        // Fanali sottili ai lati della punta, sotto il parabrezza (accesi: mesh luminosa)
+        foreach (float sx in new[] { -1f, 1f })
+            glow.AddBox(new Vector3(sx * 0.58f, 1.05f, front - 0.04f), new Vector3(0.36f, 0.09f, 0.05f), Lit);
+        glow.AddBox(new Vector3(0, 2.18f, front - 1.05f), new Vector3(0.3f, 0.07f, 0.05f), Lit); // fanale alto
         return (mb.Build(gl), glow.Build(gl));
     }
 
@@ -357,20 +435,35 @@ public sealed class Trains : IDisposable
     {
         var mb = new MeshBuilder();
         var glow = new MeshBuilder();
-        var body = new Vector3(0.92f, 0.88f, 0.76f);
-        var green = new Vector3(0.18f, 0.46f, 0.32f);
-        Bogies(mb, CarLength);
-        mb.AddBox(new Vector3(0, 1.45f, 0), new Vector3(1.9f, 1.9f, CarLength - 0.15f), body);
-        mb.AddBox(new Vector3(0, 0.75f, 0), new Vector3(1.94f, 0.35f, CarLength - 0.1f), green);
-        mb.AddBox(new Vector3(0, 2.45f, 0), new Vector3(1.96f, 0.14f, CarLength + 0.05f), new Vector3(0.45f, 0.47f, 0.5f));
-        foreach (float x in new[] { -0.96f, 0.96f })
+        const float L = CarLength, W = 0.95f, Bottom = 0.56f, Roof = 2.42f;
+        Underframe(mb, L, bellowsFront: true);
+        // Cassa con gli spigoli del tetto smussati
+        float h = L * 0.5f - 0.07f;
+        Vector2[] profile = [new(-h, Bottom), new(h, Bottom), new(h, Roof), new(-h, Roof)];
+        Extrude(mb, profile, W, BodyWhite, i => i == 0 ? Skirt : i == 2 ? RoofGrey : BodyWhite);
+        foreach (float sx in new[] { -1f, 1f })
         {
+            Matrix4x4 old = mb.Transform;
+            mb.Transform = Matrix4x4.CreateRotationZ(sx * 0.6f) * Matrix4x4.CreateTranslation(sx * (W - 0.1f), Roof - 0.02f, 0) * old;
+            mb.AddBox(Vector3.Zero, new Vector3(0.32f, 0.1f, L - 0.14f), RoofGrey);
+            mb.Transform = old;
+        }
+        mb.AddBox(new Vector3(0, Roof + 0.08f, 0), new Vector3(1.4f, 0.14f, L - 0.6f), RoofGrey);
+        foreach (float x in new[] { -1f, 1f })
+        {
+            float xs = x * (W + 0.012f);
+            mb.AddBox(new Vector3(xs, 0.98f, 0), new Vector3(0.02f, 0.2f, L - 0.3f), Teal);                     // fascia
+            mb.AddBox(new Vector3(xs, 1.66f, -0.3f), new Vector3(0.02f, 0.72f, L - 1.4f), Ribbon);              // nastro
             for (int w = 0; w < 4; w++)
             {
                 float z = -CarLength * 0.5f + 0.9f + w * 1.55f;
-                (w % 2 == 0 ? glow : mb).AddBox(new Vector3(x, 1.7f, z), new Vector3(0.03f, 0.55f, 1.0f), w % 2 == 0 ? Lit : GlassC);
+                if (z > CarLength * 0.5f - 1.0f) continue;
+                (w % 2 == 0 ? glow : mb).AddBox(new Vector3(x * (W + 0.022f), 1.66f, z), new Vector3(0.02f, 0.62f, 1.1f),
+                                                w % 2 == 0 ? Lit : GlassC);
             }
-            mb.AddBox(new Vector3(x, 1.3f, CarLength * 0.5f - 0.5f), new Vector3(0.03f, 1.3f, 0.55f), green); // porta
+            // Porta scorrevole color petrolio con la sua finestrella
+            mb.AddBox(new Vector3(x * (W + 0.02f), 1.3f, CarLength * 0.5f - 0.5f), new Vector3(0.02f, 1.35f, 0.62f), Teal);
+            mb.AddBox(new Vector3(x * (W + 0.03f), 1.62f, CarLength * 0.5f - 0.5f), new Vector3(0.01f, 0.45f, 0.42f), GlassC);
         }
         return (mb.Build(gl), glow.Build(gl));
     }

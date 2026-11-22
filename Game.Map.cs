@@ -443,7 +443,7 @@ public sealed partial class Game
 
     /// <summary>Freccia di chi si comanda: punta nella direzione <paramref name="dir"/> (schermo), con bordo scuro.</summary>
     /// <summary>
-    /// La ferrovia sulle mappe: linea scura con i tratti bianchi (il simbolo classico) e le stazioni come quadratini.
+    /// La ferrovia sulle mappe: linea scura con i tratti bianchi (il simbolo classico) e le stazioni col simbolo del treno.
     /// <paramref name="show"/> dice se un punto del mondo va disegnato, <paramref name="seg"/> disegna un tratto (ritagliato).
     /// </summary>
     private void DrawRailway(Func<Vector2, Vector2> toScreen, float k, Func<Vector2, bool> show, Action<Vector2, Vector2, float, Vector4> seg)
@@ -462,10 +462,25 @@ public sealed partial class Game
         {
             Vector2 p = rail.At(st.S);
             if (!show(p)) continue;
-            Vector2 s = toScreen(p);
-            _hud.Quad(s + new Vector2(-4.5f, -4.5f) * k, s + new Vector2(4.5f, -4.5f) * k, s + new Vector2(4.5f, 4.5f) * k, s + new Vector2(-4.5f, 4.5f) * k, Ink);
-            _hud.Quad(s + new Vector2(-3f, -3f) * k, s + new Vector2(3f, -3f) * k, s + new Vector2(3f, 3f) * k, s + new Vector2(-3f, 3f) * k, new Vector4(0.35f, 0.55f, 0.95f, 1f));
+            StationIcon(toScreen(p), k);
         }
+    }
+
+    /// <summary>Simbolo della stazione: tondo blu bordato di scuro con un treno bianco visto di fronte (come sui cartelli).</summary>
+    private void StationIcon(Vector2 s, float k)
+    {
+        var blue = new Vector4(0.15f, 0.38f, 0.82f, 1f);
+        void Box(float x0, float y0, float x1, float y1, Vector4 c) =>
+            _hud.Quad(s + new Vector2(x0, y0) * k, s + new Vector2(x1, y0) * k, s + new Vector2(x1, y1) * k, s + new Vector2(x0, y1) * k, c);
+        _hud.Disc(s, 9.5f * k, 20, Ink);
+        _hud.Disc(s, 8f * k, 20, blue);
+        Box(-3.6f, -5.2f, 3.6f, 2.6f, White);   // cassa
+        Box(-2.7f, -4.2f, 2.7f, -1.6f, blue);   // parabrezza
+        Box(-2.6f, 0f, -1.4f, 1.2f, blue);      // fari
+        Box(1.4f, 0f, 2.6f, 1.2f, blue);
+        Box(-3f, 3.4f, -1.6f, 4.4f, White);     // carrelli
+        Box(1.6f, 3.4f, 3f, 4.4f, White);
+        Box(-4.6f, 5f, 4.6f, 5.8f, White);      // binario
     }
 
     private void PlayerArrow(Vector2 c, Vector2 dir, float k)

@@ -62,6 +62,8 @@ public sealed class Shader : IDisposable
 
     public void SetVector2(string name, Vector2 v) => _gl.Uniform2(Location(name), v.X, v.Y);
     public void SetVector3(string name, Vector3 v) => _gl.Uniform3(Location(name), v.X, v.Y, v.Z);
+    /// <summary>Array di vec3 (es. "uLampPos[0]"): <paramref name="xyz"/> contiene le terne una dopo l'altra.</summary>
+    public void SetVector3Array(string name, ReadOnlySpan<float> xyz) => _gl.Uniform3(Location(name), (uint)(xyz.Length / 3), xyz);
     public void SetFloat(string name, float v) => _gl.Uniform1(Location(name), v);
     public void SetInt(string name, int v) => _gl.Uniform1(Location(name), v);
 

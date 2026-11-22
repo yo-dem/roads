@@ -24,6 +24,20 @@ public sealed class RailStation
     /// <summary>Mezza lunghezza della banchina (le fermate l'hanno più corta delle stazioni).</summary>
     public float HalfLength = 10.5f;
     public required string Name;
+    /// <summary>Piazzale della stazione, dove finisce la via d'accesso (null se non c'è strada).</summary>
+    public Vector2? Forecourt;
+    /// <summary>Il piazzale è nuovo, lastricato e attaccato alla banchina, a questa distanza lungo l'anello.</summary>
+    public float? PlazaS;
+    public const float PlazaRadius = 5.5f;
+    /// <summary>Centro (mondo) e orientamento del fabbricato viaggiatori; null se non c'è posto.</summary>
+    public Vector2? BuildingPos;
+    public float BuildingYaw;
+    public const float BuildingHalfLength = 3.6f, BuildingHalfDepth = 2.2f;
+    /// <summary>Dove la via della stazione si stacca dalla rete, e la direzione in cui parte verso la stazione.</summary>
+    public Vector2? AccessJunction;
+    public Vector2 AccessDir;
+    /// <summary>Direzione della strada principale nel punto d'innesto (per orientare il cartello).</summary>
+    public Vector2 AccessRoadDir;
 }
 
 /// <summary>
@@ -41,6 +55,8 @@ public sealed class Railway
     public const float RailTop = 0.32f;        // piano del ferro (dove poggiano le ruote)
     public const float PlatformWidth = 1.8f;
     public const float PlatformHeight = 0.45f;
+    /// <summary>Fin dove arriva, dalla parte della banchina, l'area della stazione (fabbricato e piazzale).</summary>
+    public const float StationYard = 14f;
 
     /// <summary>Anello chiuso: il segmento i va da Points[i] a Points[(i+1) % n].</summary>
     public List<Vector2> Points { get; } = new();
@@ -169,8 +185,14 @@ public sealed class Railway
     {
         float d = Distance(x, z, out float along);
         if (d < BallastHalf + 1.4f + margin) return true;
-        if (d > 8f + margin) return false;
-        return StationNear(along, 4f) != null && d < BallastHalf + PlatformWidth + 4.5f + margin;
+        if (d > StationYard + margin) return false;
+        var st = StationNear(along, 4f);
+        if (st == null) return false;
+        if (d < BallastHalf + PlatformWidth + 4.5f + margin) return true;
+        // Dalla parte della banchina, fino alla strada, resta il piazzale della stazione: niente case
+        Vector2 t = Tangent(along);
+        float off = Vector2.Dot(new Vector2(x, z) - At(along), new Vector2(-t.Y, t.X)) * st.Side;
+        return off > 0f;
     }
 
     // ------------------------------------------------------------------ generazione
@@ -187,7 +209,7 @@ public sealed class Railway
         const int A = 180;
         float R = city.Radius;
         var radii = new List<float>();
-        for (float r = R * 0.36f; r <= R * 0.7f; r += 2.5f) radii.Add(r);
+        for (float r = R * 0.48f; r <= R * 0.92f; r += 2.5f) radii.Add(r);
         int K = radii.Count;
         float phase = Noise.Hash01((int)city.Pos.X, (int)city.Pos.Y, 17) * MathF.Tau;
         Vector2 PointAt(int a, int k)
@@ -197,13 +219,13 @@ public sealed class Railway
             return city.Pos + new Vector2(MathF.Cos(ang), MathF.Sin(ang)) * radii[k] * wobble;
         }
 
-        var nodes = net.Nodes.Where(n => n.Degree > 0 && Vector2.Distance(n.Pos, city.Pos) < R * 0.9f).ToList();
+        var nodes = net.Nodes.Where(n => n.Degree > 0 && Vector2.Distance(n.Pos, city.Pos) < R * 1.1f).ToList();
         var cost = new float[A, K];
         for (int a = 0; a < A; a++)
             for (int k = 0; k < K; k++)
             {
                 var p = PointAt(a, k);
-                float c = MathF.Abs(radii[k] - R * 0.55f) * 0.3f;
+                float c = MathF.Abs(radii[k] - R * 0.74f) * 0.3f;
                 if (map.Sample(p.X, p.Y).Land < 0.95f) c += 1e5f;
                 if (Terrain.RiverDistance(p.X, p.Y) < Zone.RiverHalf + 6f) c += 1e5f;
                 foreach (var l in map.Landmarks)
@@ -288,6 +310,52 @@ public sealed class Railway
                           + $"{rail.Stations.Count} stazioni");
         foreach (var st in rail.Stations)
             Console.WriteLine($"  {st.Name} a {rail.At(st.S).X:F0}, {rail.At(st.S).Y:F0}");        return rail;
+    }
+
+    /// <summary>
+    /// Dove va il fabbricato di ogni stazione: dietro la banchina, accanto al piazzale se c'è, tutto dentro un solo
+    /// pezzo di territorio (ogni pezzo costruisce solo ciò che gli sta dentro) e lontano dalle strade.
+    /// </summary>
+    public void PlaceStationBuildings(RoadNetwork net)
+    {
+        const float C = Terrain.ChunkSize;
+        bool InOneChunk(Vector2 p, float reach)
+        {
+            float lx = p.X - MathF.Round(p.X / C) * C, lz = p.Y - MathF.Round(p.Y / C) * C;
+            return MathF.Abs(lx) + reach < Zone.Half - 0.6f && MathF.Abs(lz) + reach < Zone.Half - 0.6f;
+        }
+        foreach (var st in Stations)
+        {
+            float back = BallastHalf + 0.2f + PlatformWidth + 0.4f + RailStation.BuildingHalfDepth;
+            float reach = MathF.Sqrt(RailStation.BuildingHalfLength * RailStation.BuildingHalfLength + RailStation.BuildingHalfDepth * RailStation.BuildingHalfDepth);
+            var tries = new List<float>();
+            if (st.PlazaS is { } ps)
+            {
+                float d = Ahead(st.S, ps) < Length * 0.5f ? Ahead(st.S, ps) : -Ahead(ps, st.S);
+                float first = d > 0.5f ? -1f : 1f, gap = RailStation.PlazaRadius + RailStation.BuildingHalfLength + 1.4f;
+                for (float k = 0f; k <= 8f; k += 1f) { tries.Add(ps + first * (gap + k)); tries.Add(ps - first * (gap + k)); }
+            }
+            else
+                for (float k = 0f; k <= 10f; k += 1f) { tries.Add(st.S + k); tries.Add(st.S - k); }
+            // Prima i posti tutti dentro un pezzo; se il binario corre lungo un confine, va bene anche a cavallo
+            foreach (bool strict in new[] { true, false })
+            {
+                foreach (float sb in tries)
+                {
+                    Vector2 t = Tangent(sb), right = new(-t.Y, t.X);
+                    Vector2 c = At(sb) + right * st.Side * back;
+                    if (strict && !InOneChunk(c, reach)) continue;
+                    if (net.Distance(c.X, c.Y) < Zone.PathHalf + 3.5f) continue;
+                    if (st.Forecourt is { } f && st.PlazaS != null && Vector2.Distance(c, f) < RailStation.PlazaRadius + reach + 0.5f) continue;
+                    Vector2 toTrack = -right * st.Side;
+                    st.BuildingPos = c;
+                    st.BuildingYaw = MathF.Atan2(toTrack.X, toTrack.Y);
+                    break;
+                }
+                if (st.BuildingPos != null) break;
+            }
+            if (st.BuildingPos == null) Console.WriteLine($"  {st.Name}: nessun posto per il fabbricato");
+        }
     }
 
     private static bool SegCross(Vector2 p, Vector2 q, Vector2 a, Vector2 b, out float t, out float u)

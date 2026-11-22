@@ -36,7 +36,7 @@ public sealed class IsoCamera
     public float EffectiveYaw => Yaw + Noise.WrapAngle(_chaseYaw - Yaw) * Chase;
     public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, _walkPitch, Walk), Chase);
 
-    // A piedi la visuale si gira col mouse attorno al personaggio (non si rimette da sola alle sue spalle)
+    // A piedi la visuale si gira col mouse attorno al personaggio
     private float _walkPitch = WalkPitch;
 
     /// <summary>
@@ -110,11 +110,12 @@ public sealed class IsoCamera
         _wasChase = chase;
     }
 
-    /// <param name="follow">Punto da seguire.</param>
+    /// <param name="target">Punto da seguire.</param>
     /// <param name="chase">Vero per la visuale dietro l'auto, falso per quella lontana.</param>
     /// <param name="heading">Direzione dell'auto (yaw), usata per mettersi alle sue spalle.</param>
     /// <param name="walk">Vero per la visuale vicina a piedi (ha senso solo quando <paramref name="chase"/> è falso).</param>
-    public void Update(float dt, Vector3 follow, bool chase, float heading, bool walk = false)
+    /// <param name="follow">A piedi: quanto la camera torna alle spalle del personaggio (0 = resta dov'è, 1 = piano ma deciso).</param>
+    public void Update(float dt, Vector3 target, bool chase, float heading, bool walk = false, float follow = 0f)
     {
         Walk = Noise.Lerp(Walk, walk ? 1f : 0f, Noise.Damp(3f, dt));
         // Entrando nell'inseguimento si parte dall'angolo attuale, così non ci sono scatti
@@ -131,9 +132,11 @@ public sealed class IsoCamera
 
         // Alle spalle dell'auto: la camera sta dalla parte opposta al muso
         float behind = heading + MathF.PI;
-        if (!walk) _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(4f, dt); // a piedi la gira il mouse
+        // In auto sempre alle spalle; a piedi la gira il mouse e torna dietro al personaggio solo quanto dice follow
+        if (!walk) _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(4f, dt);
+        else if (follow > 0f) _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(1.6f * follow, dt);
 
-        Vector3 aim = follow + new Vector3(0, Noise.Lerp(0.8f, Noise.Lerp(ChaseLift, WalkLift, Walk), Chase), 0);
+        Vector3 aim = target + new Vector3(0, Noise.Lerp(0.8f, Noise.Lerp(ChaseLift, WalkLift, Walk), Chase), 0);
         Target = Vector3.Lerp(Target, aim, Noise.Damp(Noise.Lerp(5f, 9f, Chase), dt));
     }
 

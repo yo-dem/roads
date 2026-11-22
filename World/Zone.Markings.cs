@@ -29,12 +29,43 @@ public sealed partial class Zone
         return new Vector3(p.X - Origin.X, 0f, p.Y - Origin.Z);
     }
 
+    /// <summary>
+    /// Quota (senza il rialzo) della lastra d'asfalto nel punto a distanza <paramref name="s"/> e scostamento
+    /// <paramref name="offset"/>: come la costruisce Strip, piana tra un vertice e il successivo (ogni RoadStep lungo il
+    /// tratto) e tra i due bordi.
+    /// </summary>
+    private float RoadSurface(RoadEdge e, float s, float offset)
+    {
+        float s0 = MathF.Floor(s / RoadStep) * RoadStep, s1 = MathF.Min(s0 + RoadStep, e.Length);
+        float t = s1 > s0 ? Math.Clamp((s - s0) / (s1 - s0), 0f, 1f) : 0f;
+        float hw = e.HalfWidth;
+        float across = Math.Clamp((hw - offset) / (2f * hw), 0f, 1f); // 0 sul bordo sinistro (+offset), 1 sul destro
+        float Section(float at)
+        {
+            Vector3 l = EdgeLocal(e, at, hw), r = EdgeLocal(e, at, -hw);
+            return Noise.Lerp(HeightAnywhere(l.X, l.Z), HeightAnywhere(r.X, r.Z), across);
+        }
+        return Noise.Lerp(Section(s0), Section(s1), t);
+    }
+
     /// <summary>Distanza dal capo A (e dal capo B) da cui cominciano i segni: fuori dallo slargo dell'incrocio.</summary>
     private static (float From, float To) PaintRange(RoadEdge e, float margin)
     {
-        float from = e.A.TrimFor(e) + margin;
-        float to = e.Length - e.B.TrimFor(e) - margin;
+        float from = PassThrough(e, e.A) ? 0f : e.A.TrimFor(e) + margin;
+        float to = PassThrough(e, e.B) ? e.Length : e.Length - e.B.TrimFor(e) - margin;
         return (from, to);
+    }
+
+    /// <summary>
+    /// Il nodo è solo un punto di passaggio (due tratti uguali che proseguono quasi dritti, senza incrocio)? Lì le linee
+    /// dipinte continuano senza interrompersi.
+    /// </summary>
+    private static bool PassThrough(RoadEdge e, RoadNode n)
+    {
+        if (n.Degree != 2 || n.Piazza || n.Destination) return false;
+        var other = n.Edges[0] == e ? n.Edges[1] : n.Edges[0];
+        if (other == e || other.Layout != e.Layout || other.Kind != e.Kind || other.OneWay != 0 || e.OneWay != 0) return false;
+        return Vector2.Dot(e.LeaveDir(n), other.LeaveDir(n)) < -0.9f; // quasi opposti: la strada va dritta
     }
 
     /// <summary>
@@ -54,11 +85,14 @@ public sealed partial class Zone
             float s = s0 + (s1 - s0) * k / n;
             Vector3 c = EdgeLocal(e, s, offset);
             Vector3 right = EdgeLocal(e, s, offset + width * 0.5f), left = EdgeLocal(e, s, offset - width * 0.5f);
-            float y = HeightLocal(c.X, c.Z);
+            float y = HeightAnywhere(c.X, c.Z); // (il pezzetto a cavallo del bordo sporge nel pezzo accanto)
+            float top = RoadSurface(e, s, offset); // la lastra d'asfalto lì (senza il rialzo)
             // Asciutto e, per lo spartitraffico, non sui binari (lì si apre); il pezzo di bordo si decide dopo
             bool ok = y > WaterY + 0.2f
                       && (height <= 0f || Railway.Current.Distance(WX(c.X), WZ(c.Z)) > Railway.BallastHalf + 1f);
-            right.Y = left.Y = y + lift;
+            // Sopra l'asfalto (che tra i suoi vertici è piatto) e sopra il terreno (che lì sotto può fare una gobba):
+            // la vernice non sparisce mai sotto la lastra
+            right.Y = left.Y = MathF.Max(y, top) + lift;
             // Ogni pezzetto lo disegna il pezzo di territorio in cui cade il suo punto di mezzo (niente buchi sui bordi)
             if (k > 0 && ok && prevOk && InZone((prevC + c) * 0.5f, 0f))
             {
@@ -240,5 +274,132 @@ public sealed partial class Zone
         mb.Transform = old;
         AddCollider(p.X, p.Z, 0.06f);
         placed.Add((p.X, p.Z, 0.25f));
+    }
+
+    // ------------------------------------------------------------------ cartelli delle stazioni
+
+    /// <summary>
+    /// Dove la via della stazione si stacca dalla strada (o dove la stazione si affaccia su una via) c'è un cartello
+    /// blu col treno bianco, dipinto sulle due facce: lo vede chi arriva da entrambi i versi della strada.
+    /// </summary>
+    private void StationSigns(MeshBuilder mb, List<(float X, float Z, float R)> placed)
+    {
+        var net = RoadNetwork.Current;
+        foreach (var st in Railway.Current.Stations)
+        {
+            if (st.AccessJunction is not { } j || st.Forecourt is not { } f) continue;
+            Vector2 world;
+            if (Vector2.Distance(j, f) < 0.5f)
+            {
+                // La stazione si affaccia su una via: cartello sul ciglio, dalla parte della stazione
+                if (!net.Nearest(j, 4f, out var hit)) continue;
+                world = hit.Point + st.AccessDir * (hit.Edge.HalfWidth + Terrain.WalkWidth * 0.55f);
+            }
+            else
+            {
+                // All'imbocco della via della stazione, sul suo ciglio destro, qualche metro dopo l'incrocio
+                Vector2 q = j + st.AccessDir * 7f;
+                if (!net.Nearest(q, 5f, out var hit)) continue;
+                Vector2 t = hit.Edge.Tangent(hit.S);
+                Vector2 side = new(-t.Y, t.X);
+                if (Vector2.Dot(side, st.AccessRoadDir) < 0f) side = -side; // dalla parte da cui si arriva più spesso
+                world = hit.Point + side * (hit.Edge.HalfWidth + Terrain.WalkWidth * 0.55f);
+            }
+            var p = new Vector3(world.X - Origin.X, 0f, world.Y - Origin.Z);
+            if (!InZone(p, 0f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f) continue; // palo sottile: basta che stia nel pezzo
+            if (Railway.Current.Distance(world.X, world.Y) < Railway.BallastHalf + 1.5f) continue;
+            p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
+            StationSign(mb, p, st.AccessRoadDir);
+            AddCollider(p.X, p.Z, 0.06f);
+            placed.Add((p.X, p.Z, 0.3f));
+        }
+    }
+
+    /// <summary>Cartello "stazione": rettangolo blu con un treno bianco visto di fronte, sulle due facce.</summary>
+    private static void StationSign(MeshBuilder mb, Vector3 p, Vector2 facing)
+    {
+        float yaw = MathF.Atan2(facing.X, facing.Y);
+        Matrix4x4 old = mb.Transform;
+        mb.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(p) * old;
+        mb.BeginObject();
+        mb.AddPrism(Vector3.Zero, 0.03f, 0.027f, 1.75f, 6, Pole);
+        const float y = 1.5f;
+        mb.AddBox(new Vector3(0f, y, 0f), new Vector3(0.5f, 0.56f, 0.03f), SignBlue);
+        foreach (float z in new[] { -1f, 1f })
+        {
+            float f = z * 0.02f;
+            // Treno di fronte: cassa arrotondata in cima, parabrezza blu, due fari, carrelli e rotaie
+            mb.AddBox(new Vector3(0f, y + 0.03f, f), new Vector3(0.26f, 0.26f, 0.012f), SignWhite);
+            mb.AddBox(new Vector3(0f, y + 0.175f, f), new Vector3(0.2f, 0.04f, 0.012f), SignWhite);
+            mb.AddBox(new Vector3(0f, y + 0.08f, f * 1.4f), new Vector3(0.19f, 0.09f, 0.012f), SignBlue);
+            foreach (float sx in new[] { -1f, 1f })
+            {
+                mb.AddBox(new Vector3(sx * 0.075f, y - 0.05f, f * 1.4f), new Vector3(0.04f, 0.035f, 0.012f), SignBlue);
+                mb.AddBox(new Vector3(sx * 0.08f, y - 0.135f, f), new Vector3(0.05f, 0.05f, 0.012f), SignWhite); // ruote
+                mb.AddBox(new Vector3(sx * 0.1f, y - 0.2f, f), new Vector3(0.12f, 0.02f, 0.012f), SignWhite);   // binari
+            }
+        }
+        mb.EndObject();
+        mb.Transform = old;
+    }
+
+    // ------------------------------------------------------------------ semafori
+
+    /// <summary>Altezze (sopra il marciapiede) delle tre lenti del semaforo: rossa in alto, gialla, verde in basso.</summary>
+    public static readonly float[] SignalLensY = [2.12f, 1.9f, 1.68f];
+    public const float SignalLensZ = -0.115f;
+
+    /// <summary>
+    /// I semafori degli incroci che li hanno (vedi <see cref="TrafficLights.Has"/>): per ogni strada che entra
+    /// nell'incrocio un palo sul marciapiede alla destra di chi arriva, poco prima delle strisce, rivolto verso di lui.
+    /// Qui solo palo, cassonetto e lenti spente; quella accesa la aggiunge il gioco.
+    /// </summary>
+    private void TrafficSignals(MeshBuilder mb, List<(float X, float Z, float R)> placed)
+    {
+        var net = RoadNetwork.Current;
+        for (int i = X - 1; i <= X + 1; i++)
+            for (int j = Z - 1; j <= Z + 1; j++)
+                foreach (var n in net.NodesIn(i, j))
+                {
+                    if (!TrafficLights.Has(n)) continue;
+                    foreach (var e in n.Edges)
+                    {
+                        bool atA = e.A == n;
+                        int incoming = atA ? -1 : 1; // verso di marcia (lungo il tratto) di chi arriva al nodo
+                        if (!e.Lanes.Any(l => l.Dir == 0 || l.Dir == incoming)) continue; // senso unico in uscita
+                        float s = e.ToS(n, n.TrimFor(e) + 0.6f);
+                        if (s <= 0f || s >= e.Length) continue;
+                        Vector2 travel = e.Tangent(s) * incoming;
+                        var p = EdgeLocal(e, s, incoming * (e.HalfWidth + Terrain.WalkWidth * 0.6f));
+                        if (!InZone(p, 0f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f) continue;
+                        p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
+                        float yaw = MathF.Atan2(travel.X, travel.Y);
+                        SignalPost(mb, p, yaw);
+                        TrafficHeads.Add(new TrafficHead(p + Origin, yaw, n, TrafficLights.Group(n, e)));
+                        AddCollider(p.X, p.Z, 0.08f);
+                        placed.Add((p.X, p.Z, 0.3f));
+                    }
+                }
+    }
+
+    /// <summary>Palo con il cassonetto a tre lenti (spente) e le visiere; le lenti guardano verso -Z (chi arriva).</summary>
+    private static void SignalPost(MeshBuilder mb, Vector3 p, float yaw)
+    {
+        var housing = new Vector3(0.12f, 0.13f, 0.12f);
+        Vector3[] off = [new(0.30f, 0.06f, 0.05f), new(0.30f, 0.24f, 0.04f), new(0.05f, 0.24f, 0.08f)];
+        Matrix4x4 old = mb.Transform;
+        mb.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(p) * old;
+        mb.BeginObject();
+        mb.AddPrism(Vector3.Zero, 0.045f, 0.04f, 2.3f, 8, Pole);
+        mb.AddBox(new Vector3(0f, 1.9f, 0f), new Vector3(0.28f, 0.74f, 0.2f), housing);
+        mb.AddBox(new Vector3(0f, 1.9f, 0.11f), new Vector3(0.4f, 0.86f, 0.02f), housing * 0.8f); // pannello di contrasto
+        for (int k = 0; k < 3; k++)
+        {
+            float y = SignalLensY[k];
+            mb.AddBox(new Vector3(0f, y, SignalLensZ + 0.01f), new Vector3(0.15f, 0.15f, 0.02f), off[k]);
+            mb.AddBox(new Vector3(0f, y + 0.09f, SignalLensZ - 0.04f), new Vector3(0.18f, 0.025f, 0.1f), housing); // visiera
+        }
+        mb.EndObject();
+        mb.Transform = old;
     }
 }

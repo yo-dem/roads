@@ -201,6 +201,7 @@ public sealed class GameMap
         // 3. Le strade, tracciate dal gioco
         RoadBuilder.Build(net, map);
         Railway.Current = Railway.Build(net, map); // la ferrovia della città, dopo le strade
+        RoadBuilder.ConnectStations(net, map, Railway.Current); // e una via che porta a ogni stazione
         var gaps = net.FindGaps();
         if (gaps.Count > 0)
         {

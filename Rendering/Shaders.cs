@@ -115,6 +115,9 @@ public static class Shaders
         uniform vec3 uTailPos;       // stop: bagliore rosso a terra dietro l'auto (di notte, in frenata)
         uniform vec3 uTailDir;
         uniform float uTailGlow;
+        uniform int uLampCount;      // lampioni vicini: di notte fanno una pozza di luce calda sulla strada
+        uniform vec3 uLampPos[24];
+        uniform float uLampGlow;
 
         out vec4 FragColor;
 
@@ -182,6 +185,22 @@ public static class Shaders
                 float reach = 1.0 - smoothstep(0.5, 5.5, dist);
                 float facing = 0.4 + 0.6 * max(dot(n, -l), 0.0);
                 col += vColor * vec3(1.0, 0.12, 0.08) * behind * reach * reach * facing * uTailGlow;
+            }
+            // Lampioni: luce che scende dalla lampada e si allarga a terra, più forte proprio sotto
+            if (uLampGlow > 0.0 && uCloud == 0)
+            {
+                vec3 lamp = vec3(0.0);
+                for (int i = 0; i < uLampCount; i++)
+                {
+                    vec3 toFrag = vWorld - uLampPos[i];
+                    float dist = length(toFrag);
+                    vec3 l = toFrag / max(dist, 1e-3);
+                    float down = 0.35 + 0.65 * smoothstep(-0.2, 0.7, -l.y); // più luce verso il basso che di lato
+                    float reach = 1.0 - smoothstep(1.5, 8.5, dist);
+                    float facing = 0.3 + 0.7 * max(dot(n, -l), 0.0);
+                    lamp += reach * reach * down * facing;
+                }
+                col += vColor * vec3(1.0, 0.8, 0.5) * min(lamp, 1.6) * 1.3 * uLampGlow;
             }
             col = mix(col, vColor * 1.25, min(uEmissive, 1.0));
             // Oltre 1 la luce si fa più intensa restando del suo colore (stop in frenata: rosso pieno e acceso)

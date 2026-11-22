@@ -46,6 +46,10 @@ public sealed partial class Zone : IDisposable
     private MeshData? _opaqueData, _sceneryData, _waterData, _glowData;
     public List<Bridge> Bridges { get; } = new();
     public List<Vector3> Campfires { get; } = new(); // coordinate locali
+    /// <summary>Lampade dei lampioni (coordinate del mondo): di notte fanno luce sulla strada.</summary>
+    public List<Vector3> LampLights { get; } = new();
+    /// <summary>Teste dei semafori del pezzo: le lenti accese le disegna il gioco, fotogramma per fotogramma.</summary>
+    public List<TrafficHead> TrafficHeads { get; } = new();
 
     public Matrix4x4 Model => Matrix4x4.CreateTranslation(Origin);
 
@@ -158,6 +162,23 @@ public sealed partial class Zone : IDisposable
             : h00 + (h11 - h01) * u + (h01 - h00) * v;
     }
 
+    /// <summary>
+    /// Come <see cref="HeightLocal"/>, ma valida anche appena fuori dal pezzo: la griglia del terreno è la stessa per
+    /// tutti i pezzi, quindi oltre il bordo si interpola come farebbe il pezzo accanto (per i segni a cavallo del bordo).
+    /// </summary>
+    private float HeightAnywhere(float x, float z)
+    {
+        if (MathF.Abs(x) <= Half && MathF.Abs(z) <= Half) return HeightLocal(x, z);
+        float fx = (x + Half) / Cell, fz = (z + Half) / Cell;
+        int i = (int)MathF.Floor(fx), j = (int)MathF.Floor(fz);
+        float u = fx - i, v = fz - j;
+        float H(int a, int b) => HeightFn(-Half + a * Cell, -Half + b * Cell);
+        float h00 = H(i, j), h10 = H(i + 1, j), h01 = H(i, j + 1), h11 = H(i + 1, j + 1);
+        return u >= v
+            ? h00 + (h10 - h00) * u + (h11 - h10) * v
+            : h00 + (h11 - h01) * u + (h01 - h00) * v;
+    }
+
     private void TryAddClearing(Random rng)
     {
         for (int t = 0; t < 40; t++)
@@ -231,7 +252,7 @@ public sealed partial class Zone : IDisposable
         mb.AddTriangle(a, b, c, color);
     }
 
-    private const float RoadStep = 0.7f; // passo dei vertici lungo le strade
+    internal const float RoadStep = 0.7f; // passo dei vertici lungo le strade
 
     /// <summary>
     /// Le strade della rete che passano nel pezzo, come lastre con spessore (asfalto o terra battuta), più gli slarghi
@@ -366,7 +387,15 @@ public sealed partial class Zone : IDisposable
     private void BuildRoad(MeshBuilder mb, RoadEdge e)
     {
         foreach (var r in RoadRuns(e))
-            if (r.Count >= 2) Strip(mb, e, r);
+        {
+            if (r.Count < 2) continue;
+            // Sul bordo del pezzo la lastra sconfina appena nel pezzo accanto: le due lastre si sovrappongono e non resta
+            // la fessura (sottile come un capello, ma ci si vede l'erba) dovuta agli arrotondamenti delle coordinate
+            const float Overlap = 0.04f;
+            if (r[0] > 0.001f) r[0] = MathF.Max(0f, r[0] - Overlap);
+            if (r[^1] < e.Length - 0.001f) r[^1] = MathF.Min(e.Length, r[^1] + Overlap);
+            Strip(mb, e, r);
+        }
     }
 
     /// <summary>
@@ -526,6 +555,21 @@ public sealed partial class Zone : IDisposable
         }
     }
 
+    /// <summary>Il cerchio (centro e otto punti del contorno) tocca una superficie rialzata sopra il terreno?</summary>
+    private bool OnRaised(float x, float z, float r)
+    {
+        // Lontano da strade e binari il suolo non è mai rialzato: niente da controllare (è la gran parte dei casi)
+        if (PathDistance(x, z) > PathHalf + Terrain.WalkWidth + r + 0.5f
+            && Railway.Current.Distance(WX(x), WZ(z)) > Railway.BallastHalf + Railway.PlatformWidth + r + 1.5f) return false;
+        if (PathLift(x, z) > 0.001f) return true;
+        for (int k = 0; k < 8; k++)
+        {
+            float a = k * MathF.PI / 4f;
+            if (PathLift(x + MathF.Cos(a) * r, z + MathF.Sin(a) * r) > 0.001f) return true;
+        }
+        return false;
+    }
+
     /// <summary>Rialzo del sentiero in un punto locale (0 fuori dai sentieri o sui tratti bagnati).</summary>
     private float PathLift(float x, float z)
     {
@@ -580,6 +624,11 @@ public sealed partial class Zone : IDisposable
             float lim = Half - 0.5f;
             if (MathF.Abs(x) > lim || MathF.Abs(z) > lim) return false;
             if (PathDistance(x, z) < PathHalf + pathMargin + r) return false;
+            // Nei centri abitati le strade hanno il marciapiede (anche attorno agli incroci): si sta oltre
+            if (Terrain.Urban(WX(x), WZ(z)) >= Terrain.WalkFrom * 0.85f
+                && PathDistance(x, z) < PathHalf + Terrain.WalkWidth + 0.15f + r) return false;
+            // E mai su una superficie rialzata (marciapiede, sentiero, banchina, massicciata): né al centro né sul contorno
+            if (OnRaised(x, z, r)) return false;
             if (RiverDistance(x, z) < RiverHalf + 0.5f + r) return false;
             if (HeightLocal(x, z) < WaterY + 0.3f) return false; // niente alberi in mare
             if (NearLandmark(x, z, r + 0.5f)) return false;
@@ -661,6 +710,8 @@ public sealed partial class Zone : IDisposable
         // Prima le costruzioni (case, palazzi, lampioni, cascine): la vegetazione riempie quel che resta
         BuildStations(mb, glow, rng, placed);
         StreetFurniture(mb, rng, placed);
+        StationSigns(mb, placed);
+        TrafficSignals(mb, placed);
         BuildTown(mb, glow, rng, placed);
         BuildFarms(mb, glow, rng, placed);
 

@@ -706,6 +706,81 @@ public sealed class RoadBuilder
 
     // ------------------------------------------------------------------ collegamenti
 
+    /// <summary>
+    /// Dopo la ferrovia: a ogni stazione arriva una via asfaltata dalla strada più vicina. Parte da un piazzale dietro
+    /// il fabbricato (dalla parte della banchina) e non attraversa mai i binari. Poi la rete si riprepara.
+    /// </summary>
+    public static void ConnectStations(RoadNetwork net, GameMap map, Railway rail)
+    {
+        if (!rail.Exists || rail.Stations.Count == 0) return;
+        var b = new RoadBuilder(net, map);
+        foreach (var e in net.Edges) b.Occupy(e, CityComp);
+        // I binari non si attraversano: le celle della ferrovia (con un margine) sono vietate
+        for (int j = 0; j < b._h; j++)
+            for (int i = 0; i < b._w; i++)
+            {
+                Vector2 p = b.CellCenter(i, j);
+                if (rail.Distance(p.X, p.Y) < Railway.BallastHalf + Railway.PlatformWidth + 3f) b._blocked[j * b._w + i] = true;
+            }
+
+        // Piazzale lastricato subito dietro la banchina (ci si arriva a piedi dalla piazza)
+        const float Back = Railway.BallastHalf + 0.2f + Railway.PlatformWidth + 0.2f + RailStation.PlazaRadius;
+        foreach (var st in rail.Stations)
+        {
+            bool done = false;
+            foreach (float ds in new[] { 0f, 7f, -7f, 13f, -13f })
+            {
+                Vector2 t = rail.Tangent(st.S + ds), right = new(-t.Y, t.X);
+                Vector2 f = rail.At(st.S + ds) + right * st.Side * Back;
+                if (map.Sample(f.X, f.Y).Land < 0.97f || Terrain.RiverDistance(f.X, f.Y) < Zone.RiverHalf + 6f) continue;
+                if (rail.Distance(f.X, f.Y) < Back - 0.5f) continue; // l'anello curva: qui si avvicina di nuovo ai binari
+                if (map.Landmarks.Any(l => Vector2.Distance(f, l.Pos) < l.Radius + 6f)) continue;
+                if (b.NearestEdge(f) is { } near && near.Dist < RailStation.PlazaRadius + 7f)
+                {
+                    // Dietro la stazione passa già una via: il piazzale si affaccia su quella
+                    st.Forecourt = st.AccessJunction = near.Edge.At(near.S);
+                    st.AccessRoadDir = near.Edge.Tangent(near.S);
+                    st.AccessDir = -right * st.Side;
+                    Console.WriteLine($"  la {st.Name} si affaccia su una via che c'è già");
+                    done = true;
+                    break;
+                }
+
+                int comp = b._nextComp++;
+                var start = b.NewNode(f, comp);
+                var route = b.Route(f, c => b._occ[c] >= 0 && b._occ[c] != comp, null, comp);
+                if (route == null || route.Count > 45 || route.Any(p => rail.Distance(p.X, p.Y) < Railway.BallastHalf + 2.5f))
+                {
+                    net.Nodes.Remove(start);
+                    continue;
+                }
+                var end = b.AddRoad(route, start, RoadKind.Street, comp, snapEnd: true);
+                if (end == null || start.Degree == 0)
+                {
+                    net.Nodes.Remove(start);
+                    continue;
+                }
+                start.Destination = true;
+                start.Piazza = true;
+                st.Forecourt = f;
+                st.PlazaS = rail.Wrap(st.S + ds);
+                // L'innesto sulla rete: il primo incrocio che s'incontra uscendo dal piazzale
+                var e = start.Edges[0];
+                var junction = e.Other(start);
+                st.AccessJunction = junction.Pos;
+                st.AccessDir = e.LeaveDir(junction);
+                var main = junction.Edges.Where(x => x != e).Select(x => x.LeaveDir(junction)).ToList();
+                st.AccessRoadDir = main.Count > 0 ? main[0] : new Vector2(-st.AccessDir.Y, st.AccessDir.X);
+                Console.WriteLine($"  via per la {st.Name}: {e.Length:F0} unità, piazzale a {f.X:F0}, {f.Y:F0}");
+                done = true;
+                break;
+            }
+            if (!done) Console.WriteLine($"  {st.Name}: nessuna via d'accesso possibile");
+        }
+        net.Finish();
+        rail.PlaceStationBuildings(net);
+    }
+
     /// <summary>Statale dal capo del paese rivolto alla città fino alla prima strada che incontra in quella direzione.</summary>
     private void ConnectVillage(Settlement v, Vector2 hub, bool hasCity)
     {

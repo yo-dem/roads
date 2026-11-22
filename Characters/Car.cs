@@ -218,6 +218,9 @@ public sealed class Car : IDisposable
         mb.AddBox(new Vector3(0, 0.875f, -0.1f), new Vector3(0.5f, 0.03f, 0.5f), trim);
         foreach (float sx in new[] { -1f, 1f })
             mb.AddBox(new Vector3(sx * 0.465f, 0.44f, 0.05f), new Vector3(0.03f, 0.03f, 0.12f), trim);
+        // Cornice nera attorno agli stop, perché non si confondano col rosso della scocca
+        foreach (float sx in new[] { -1f, 1f })
+            mb.AddBox(new Vector3(sx * 0.31f, 0.41f, -0.79f), new Vector3(0.18f, 0.12f, 0.025f), new Vector3(0.05f, 0.05f, 0.05f));
         // Tubo di scarico
         mb.Transform = Matrix4x4.CreateRotationX(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0.28f, 0.2f, -0.92f);
         mb.AddPrism(Vector3.Zero, 0.045f, 0.045f, 0.12f, 6, dark);
@@ -231,7 +234,7 @@ public sealed class Car : IDisposable
 
         mb = new MeshBuilder();
         foreach (float sx in new[] { -1f, 1f })
-            mb.AddBox(new Vector3(sx * 0.31f, 0.41f, -0.795f), new Vector3(0.14f, 0.08f, 0.03f), new Vector3(0.95f, 0.15f, 0.12f));
+            mb.AddBox(new Vector3(sx * 0.31f, 0.41f, -0.795f), new Vector3(0.14f, 0.08f, 0.03f), new Vector3(1f, 0.45f, 0.1f));
         _tailLights = mb.Build(gl);
 
         // Luci di retromarcia: piccole, bianche, accanto agli stop (visibili solo in retro)

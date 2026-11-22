@@ -273,8 +273,9 @@ public sealed class Villager : IDisposable
         float now01 = _walkTime % 1f;
 
         // Sbuffi di polvere a ogni passo quando corre
-        if (_sprintWeight > 0.5f && (now01 < before01 || (before01 < 0.5f && now01 >= 0.5f)))
-            fx.Dust(Vector3.Transform(new Vector3(now01 < 0.5f ? -0.05f : 0.05f, 0, 0), RootMatrix), 1);
+        // (solo coi piedi a terra: in aria, durante un salto, non si solleva polvere; e sempre al livello del suolo)
+        if (!Airborne && _sprintWeight > 0.5f && (now01 < before01 || (before01 < 0.5f && now01 >= 0.5f)))
+            fx.Dust(Vector3.Transform(new Vector3(now01 < 0.5f ? -0.05f : 0.05f, 0, 0), RootMatrix) with { Y = _groundY }, 1);
     }
 
     private static Vector3 Flat(Vector3 v) => new(v.X, 0, v.Z);
