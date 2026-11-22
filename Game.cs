@@ -330,7 +330,18 @@ public sealed partial class Game : IDisposable
             // gira e viene verso la camera). Il mouse gira la visuale attorno a lui. Spazio: salto.
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
-                input = _camera.Right * moveX + _camera.Forward * moveY;
+            {
+                // Mentre la camera torna alle spalle, la direzione di corsa resta quella fissata nel mondo (altrimenti,
+                // essendo relativa alla camera, girerebbe con lei): finché non si lasciano i comandi o si cambia direzione
+                var raw = new Vector2(moveX, moveY);
+                if (_moveLock is { } lk && (raw.LengthSquared() < 0.04f
+                        || Vector2.Dot(Vector2.Normalize(raw), lk.Raw) < MathF.Cos(0.6f)))
+                    _moveLock = null;
+                input = _moveLock is { } held
+                    ? held.World * MathF.Min(1f, raw.Length())
+                    : _camera.Right * moveX + _camera.Forward * moveY;
+                _moveRaw = raw;
+            }
             _footYaw = _kid.Yaw;
             if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
@@ -394,13 +405,25 @@ public sealed partial class Game : IDisposable
         if (!_onTrain)
         {
             _camera.Unfix();
-            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato; quando
-            // invece viene verso la camera (S) non gira affatto: arretra con lui, che resta visto di fronte
+            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato. Quando
+            // invece viene verso la camera (S) lo si vede in faccia solo per poco: poi la camera gira e torna alle spalle
             _mouseLookIdle += dt;
             Vector3 kv = _kid.Velocity with { Y = 0f };
             float follow = 0f;
-            if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
-                follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
+            bool running = _onFoot && !_onTrain && kv.LengthSquared() > 0.5f;
+            float toward = running ? Vector3.Dot(Vector3.Normalize(kv), _camera.Forward) : 1f;
+            _faceTime = running && toward < -0.2f ? _faceTime + dt : 0f;
+            if (running && _mouseLookIdle > 0.6f)
+                follow = Noise.Smooth(-0.2f, 0.5f, toward);
+            if (_faceTime > FaceShowTime)
+            {
+                // Si fissa la direzione di corsa nel mondo, poi la camera gira (deciso: è mezzo giro)
+                if (_moveLock == null && _moveRaw.LengthSquared() > 0.04f)
+                    _moveLock = (Vector2.Normalize(_moveRaw), Vector3.Normalize(kv));
+                follow = MathF.Max(follow, 2.2f * Noise.Smooth(FaceShowTime, FaceShowTime + 0.4f, _faceTime));
+            }
+            else if (_moveLock != null && running && toward > 0.7f)
+                follow = MathF.Max(follow, 2.2f); // finisce di girarsi anche se nel frattempo si è mosso il mouse
             _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, _onFoot ? _kid.Yaw : _player.TravelYaw,
                            walk: _onFoot, follow: follow);
         }
@@ -1000,6 +1023,12 @@ public sealed partial class Game : IDisposable
     }
 
     private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
+
+    // A piedi verso la camera: il viso si vede per FaceShowTime, poi la camera torna alle spalle
+    private const float FaceShowTime = 1.0f;
+    private float _faceTime;                                   // da quanto il personaggio corre verso la camera
+    private Vector2 _moveRaw;                                  // comandi a piedi di questo istante (x = destra, y = avanti)
+    private (Vector2 Raw, Vector3 World)? _moveLock;           // direzione di corsa fissata nel mondo mentre la camera gira
 
     // ------------------------------------------------------------------ a bordo del treno
 
