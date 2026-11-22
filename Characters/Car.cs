@@ -302,10 +302,10 @@ public sealed class Car : IDisposable
     // Contro un ostacolo fisso (albero, muro, treno, riva) o molto pesante (una grossa roccia) l'auto rimbalza via
     // con una velocità proporzionale a quella d'impatto (la parte diretta contro l'ostacolo). Il rimbalzo è una
     // velocità a parte (_knock) che si somma alla marcia e si smorza da sola, come gomme che strisciano.
-    private const float BounceRestitution = 0.55f; // quota della velocità d'impatto restituita
+    private const float BounceRestitution = 0.7f;  // quota della velocità d'impatto restituita
     private const float BounceMinImpact = 1.5f;    // sotto questa velocità d'impatto niente rimbalzo (appoggiarsi non fa saltellare)
-    private const float BounceMax = 7f;            // tetto della velocità di rimbalzo
-    private const float KnockFriction = 5f;        // unità/s²: rallentamento del rimbalzo
+    private const float BounceMax = 9f;            // tetto della velocità di rimbalzo
+    private const float KnockFriction = 4f;        // unità/s²: rallentamento del rimbalzo
     private Vector3 _knock;
     private float _stun; // dopo un urto, per un attimo il gas non spinge (altrimenti rimanderebbe subito l'auto contro il muro)
 
