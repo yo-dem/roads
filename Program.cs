@@ -28,7 +28,8 @@ public static class Program
     ///   --punto x,z               punto da raggiungere già scelto (come un clic sulla mappa)
     ///   --salto secondi           (ripetibile) a piedi preme spazio: salto
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
-    ///   --banchina               appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
+    ///   --mouse pixel/s[,finoA]   in auto muove il mouse in orizzontale (sterzo col mouse); ripetibile, tratti in ordine
+    ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
     ///   --verifica-strade        genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
     /// </summary>
     public static void Main(string[] args)
@@ -117,6 +118,10 @@ public static class Program
                 case "--wasd" when i + 1 < args.Length:
                     var wv = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
                     d.Moves.Add((new Vector2(wv[0], wv[1]), wv.Length > 2 ? wv[2] : float.MaxValue));
+                    break;
+                case "--mouse" when i + 1 < args.Length:
+                    var mv = args[++i].Split(',').Select(s => float.Parse(s, inv)).ToArray();
+                    d.MouseSteer.Add((mv[0], mv.Length > 1 ? mv[1] : float.MaxValue));
                     break;
                 case "--banchina":
                     d.Platform = true;

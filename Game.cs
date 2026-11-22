@@ -37,6 +37,7 @@ public sealed class DebugOptions
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
     public List<(Vector2 Move, float Until)> Moves { get; } = new(); // WASD simulati: X = A/D, Y = S/W (test)
+    public List<(float PixelsPerSecond, float Until)> MouseSteer { get; } = new(); // mouse simulato in auto (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -261,6 +262,11 @@ public sealed partial class Game : IDisposable
             foreach (var (move, until) in _debug.Moves)
                 if (_time < until) { (moveX, moveY) = (move.X, move.Y); break; }
         UpdateMouseCapture();
+        // In auto, con la visuale da vicino, anche il mouse sterza (si somma ai tasti)
+        steerIn = Math.Clamp(steerIn + MouseSteering(dt), -1f, 1f);
+        if (_debug.MouseSteer.Count > 0 && _time > 0.5f && !_onFoot)
+            foreach (var (px, until) in _debug.MouseSteer)
+                if (_time < until) { LookAround(new Vector2(px * dt, 0f)); break; }
         Vector3 input = Vector3.Zero;
 
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
@@ -853,14 +859,29 @@ public sealed partial class Game : IDisposable
     private bool _mouseCaptured, _mouseSkip, _jumpQueued;
     private const float MouseYaw = 0.0045f, MousePitch = 0.0032f;
 
+    // Sterzo col mouse (in auto, visuale da vicino): ~600 pixel di movimento per sterzare al massimo; fermando il mouse
+    // il "volante" torna da solo al centro, piano (in circa un secondo e mezzo da tutto sterzato)
+    private const float MouseSteer = 1f / 600f, MouseSteerReturn = 0.7f, MouseSteerHold = 0.12f;
+    private float _mouseSteer, _mouseSteerIdle;
+
+    /// <summary>La sterzata data col mouse in questo istante (si somma ai tasti), con il ritorno al centro.</summary>
+    private float MouseSteering(float dt)
+    {
+        if (_onFoot || (!_mouseCaptured && _debug.MouseSteer.Count == 0)) { _mouseSteer = 0f; return 0f; }
+        _mouseSteerIdle += dt;
+        if (_mouseSteerIdle > MouseSteerHold)
+            _mouseSteer = MathF.Sign(_mouseSteer) * MathF.Max(0f, MathF.Abs(_mouseSteer) - MouseSteerReturn * dt);
+        return _mouseSteer;
+    }
+
     /// <summary>
-    /// A piedi (visuale da dietro) e in treno il puntatore è catturato: il mouse gira la visuale. Si libera con la
-    /// mappa aperta (per cliccarci), nella visuale lontana, in auto e se la finestra non è attiva.
+    /// Con la visuale da vicino il puntatore è catturato: a piedi e in treno il mouse gira la visuale, in auto sterza.
+    /// Si libera con la mappa aperta (per cliccarci), nella visuale lontana e se la finestra non è attiva.
     /// </summary>
     private void UpdateMouseCapture()
     {
         // (nelle prove automatiche con gli screenshot il puntatore resta libero)
-        bool want = _onFoot && !_farView && !_bigMap && _window.IsVisible && _debug.Shots.Count == 0;
+        bool want = !_farView && !_bigMap && _window.IsVisible && _debug.Shots.Count == 0;
         if (want == _mouseCaptured) return;
         _mouseCaptured = want;
         _mouseSkip = true;
@@ -872,6 +893,13 @@ public sealed partial class Game : IDisposable
     /// <summary>Il mouse ha mosso la visuale: attorno al personaggio, nella carrozza o seduti al finestrino.</summary>
     private void LookAround(Vector2 delta)
     {
+        if (!_onFoot)
+        {
+            // In auto il mouse è un volante poco sensibile: tanto movimento, poca sterzata
+            _mouseSteer = Math.Clamp(_mouseSteer + delta.X * MouseSteer, -1f, 1f);
+            if (MathF.Abs(delta.X) > 0.5f) _mouseSteerIdle = 0f;
+            return;
+        }
         if (_onTrain && _seat >= 0)
         {
             _lookPan = Math.Clamp(_lookPan - delta.X * MouseYaw, -1.4f, 1.4f);
