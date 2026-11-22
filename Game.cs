@@ -253,9 +253,9 @@ public sealed partial class Game : IDisposable
         float steerIn = (K(Key.Right, Key.D) ? 1f : 0f) - (K(Key.Left, Key.A) ? 1f : 0f);
         float throttleIn = (K(Key.Up, Key.W) ? 1f : 0f) - (K(Key.Down, Key.S) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
-        // A piedi: WASD (e spazio per saltare)
-        float moveX = (_keyboard.IsKeyPressed(Key.D) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.A) ? 1f : 0f);
-        float moveY = (_keyboard.IsKeyPressed(Key.W) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.S) ? 1f : 0f);
+        // A piedi: WASD o frecce (e spazio per saltare)
+        float moveX = (K(Key.D, Key.Right) ? 1f : 0f) - (K(Key.A, Key.Left) ? 1f : 0f);
+        float moveY = (K(Key.W, Key.Up) ? 1f : 0f) - (K(Key.S, Key.Down) ? 1f : 0f);
         bool jumpPressed = _jumpQueued || (_debug.Jumps.Count > 0 && _time >= _debug.Jumps[0] && _debug.Jumps.Remove(_debug.Jumps[0]));
         _jumpQueued = false;
         if (_debug.Moves.Count > 0 && _time > 0.5f)
@@ -295,8 +295,8 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            // A piedi si va con WASD rispetto alla visuale (che si gira col mouse): il personaggio si volta da solo
-            // nella direzione in cui cammina. Spazio: salto. (Le frecce servono all'auto.)
+            // A piedi si va con WASD o le frecce rispetto alla visuale (che si gira col mouse): il personaggio si volta da solo
+            // nella direzione in cui cammina. Spazio: salto.
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
                 input = _camera.Right * moveX + _camera.Forward * moveY;
@@ -796,7 +796,7 @@ public sealed partial class Game : IDisposable
     private static void VerifyAvenueUTurns()
     {
         var net = RoadNetwork.Current;
-        int tried = 0, turns = 0, crossTurn = 0, crossAfter = 0, intoHub = 0;
+        int tried = 0, turns = 0, crossTurn = 0, intoHub = 0;
         // Da che parte dello spartitraffico sta un punto, rispetto al viale e al suo verso A→B (0 se non è su un viale)
         float SideOf(Vector2 p, RoadEdge e)
         {
@@ -841,17 +841,9 @@ public sealed partial class Game : IDisposable
                             if (inHub && intoHub++ < 5)
                                 Console.WriteLine($"  inversione che entra nell'incrocio: viale {e.Id} a {p.X:F1}, {p.Y:F1}");
                         }
-                        // Dopo essersi girati (stessa corsia, verso opposto): dove porta l'aiuto in corsia?
-                        if (Characters.DriftLine.RoadFrame(new Vector3(p.X, 0f, p.Y), -travel, 5f, out var center, out _, out var aim, out _))
-                        {
-                            float sc = SideOf(new Vector2(center.X, center.Z), e), sa = SideOf(new Vector2(aim.X, aim.Z), e);
-                            if ((sc != 0f && sc != side) || (sa != 0f && sa != side))
-                                if (crossAfter++ < 5)
-                                    Console.WriteLine($"  dopo l'inversione l'aiuto porta oltre lo spartitraffico: viale {e.Id} a {p.X:F1}, {p.Y:F1}");
-                        }
                     }
         Console.WriteLine($"Verifica inversioni sui viali: {tried} prove, {turns} inversioni guidate, "
-                          + $"{crossTurn} oltre lo spartitraffico, {intoHub} dentro un incrocio, {crossAfter} con l'aiuto in corsia che porta di là");
+                          + $"{crossTurn} oltre lo spartitraffico, {intoHub} dentro un incrocio");
     }
 
     // ------------------------------------------------------------------ mouse e visuale a piedi
@@ -993,7 +985,7 @@ public sealed partial class Game : IDisposable
         string hint = _seat >= 0 ? "seduti: mouse per guardare, Invio per alzarsi"
             : NearSeat() >= 0 ? "Invio per sedersi"
             : _cabin.Y > Trains.DoorZ - 0.6f && _trains?.StoppedAt != null ? "Invio per scendere"
-            : "WASD per camminare, mouse per guardare; i sedili ai lati, la porta in fondo verso la locomotiva";
+            : "WASD o frecce per camminare, mouse per guardare; i sedili ai lati, la porta in fondo verso la locomotiva";
         return $"  |  in treno, {where}  |  {hint}";
     }
 

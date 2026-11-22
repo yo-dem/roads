@@ -163,20 +163,13 @@ public sealed class DriftLine
         float hubDist = probe.Length;
         if (hubDist >= TurnWindow) return null;
 
-        // L'aiuto c'è solo dove è ovvio dove si vuole andare: niente viali a doppia corsia né piazze (in città la
-        // svolta voluta è ambigua), e dal lato dello sterzo una sola strada da prendere. Altrimenti il freno a mano
-        // fa una derapata libera, senza assistenza.
-        if (hub.Piazza || c.Edge.Layout == RoadLayout.Avenue || atHub.Edge.Layout == RoadLayout.Avenue) return null;
+        // La svolta dal lato dello sterzo (se da quel lato ce n'è più d'una, la più netta). Nessuna: niente curva.
         Vector2 travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
-        var exits = Exits(hub, atHub.Edge, travelIn).ToList();
         float want = steer > 0.3f ? 1f : steer < -0.3f ? -1f : 0f;
-        var side = want != 0f
-            ? exits.Where(x => want * x.Right > SideDot).ToList()
-            : exits.Count == 1 && exits[0].Ahead <= StraightDot ? exits // senza sterzo: la strada curva per forza, si segue
-            : new();
-        // Nessuna svolta, più strade possibili da quel lato o un viale: derapata libera
-        if (side.Count != 1 || side[0].Edge.Layout == RoadLayout.Avenue) return null;
-        var turn = side[0];
+        if (want == 0f) return null;
+        var side = Exits(hub, atHub.Edge, travelIn).Where(x => want * x.Right > SideDot).ToList();
+        if (side.Count == 0) return null;
+        var turn = side.MaxBy(x => want * x.Right);
 
         var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
         float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
@@ -249,28 +242,6 @@ public sealed class DriftLine
         if (line._points.Count < 2) return null;
         // Sul viale la manovra resta nella propria metà carreggiata (lo spartitraffico è un bordo, non si scavalca)
         return line;
-    }
-
-    /// <summary>
-    /// Per il mantenimento di corsia: centro della corsia all'altezza dell'auto, direzione della strada nel verso
-    /// di marcia, punto del centro corsia <paramref name="lookahead"/> più avanti (segue le curve della strada) e
-    /// mezza larghezza della corsia. False se non si è su una strada o se si è dentro un incrocio (lì si deve poter
-    /// svoltare).
-    /// </summary>
-    public static bool RoadFrame(Vector3 pos, Vector3 travel, float lookahead, out Vector3 center, out Vector3 tangent,
-                                 out Vector3 aim, out float laneHalf)
-    {
-        center = tangent = aim = default;
-        laneHalf = 0f;
-        if (NearHub(pos) || !Locate(pos, travel, out var c)) return false;
-        center = To3(c.PointAt(c.S));
-        laneHalf = c.Edge.LaneHalf;
-        Vector2 t = c.Heading;
-        tangent = new Vector3(t.X, 0f, t.Y);
-        var probe = new DriftLine();
-        probe.Follow(c, lookahead, stopAtJunction: false, out _, out _);
-        aim = probe._points.Count > 0 ? probe._points[^1] : center + tangent * lookahead;
-        return true;
     }
 
     private static bool NearHub(Vector3 p)

@@ -6,7 +6,8 @@ using Silk.NET.OpenGL;
 namespace Roads.Characters;
 
 /// <summary>
-/// Automobilina giocattolo low poly. Si guida con le frecce, Shift per andare piano.
+/// Automobilina giocattolo low poly. Si guida con WASD o le frecce (e col mouse), Shift per andare piano, spazio per il
+/// freno a mano (derapata in curva, inversione a U o derapata libera: vedi StartManoeuvre).
 /// Guida "da auto": modello cinematico a bicicletta con raggio di sterzata minimo (non gira sul posto),
 /// retromarcia, collisione a due cerchi (muso e coda) con scivolamento sugli ostacoli, luci di stop e di retromarcia.
 /// Il modello guarda verso +Z locale.
@@ -35,62 +36,44 @@ public sealed class Car : IDisposable
     private const float WheelX = 0.47f;           // distanza delle ruote dal centro: sporgono un po' dalla scocca
     private const float WheelWidth = 0.22f;
 
-    // Freno a mano e derapata: la direzione di marcia (dove va l'auto) è separata dal muso (dove punta).
-    // Con aderenza piena coincidono; col freno a mano le ruote dietro perdono aderenza, il muso ruota più
-    // in fretta e la marcia lo insegue in ritardo: l'auto scivola di traverso finché l'aderenza non torna.
-    private const float GripFull = 28f;           // 1/s: con aderenza piena la marcia segue il muso quasi subito
-    private const float GripDrift = 1.1f;         // 1/s: col freno a mano tirato
-    private const float GripRecover = 2.2f;       // 1/s: rapidità con cui torna l'aderenza (uscita dalla derapata)
+    // Guida senza aiuti: la direzione di marcia segue il muso (quasi subito). Col freno a mano in velocità si fa una
+    // delle tre manovre (vedi StartManoeuvre): derapata in curva, inversione a U o derapata libera.
+    private const float Grip = 28f;               // 1/s: rapidità con cui la marcia segue il muso
     private const float DriftMinSpeed = 2.5f;     // sotto questa velocità il freno a mano frena e basta
-    private const float DriftYawBoost = 0.9f;     // quanto ruota in più il muso senza aderenza dietro
-    private const float DriftYawMax = 2.3f;       // rad/s: rotazione massima in derapata (oltre sarebbe un testacoda)
-    private const float DriftSteer = 0.42f;       // sterzo massimo in derapata (in velocità di solito è 0.14)
-    private const float DriftSteerRate = 2.6f;    // rad/s: in derapata si sterza e controsterza più svelti
-    private const float MaxDrift = 1.15f;         // rad: angolo massimo tra muso e marcia (oltre si gira su se stessi)
-    private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano
-    private const float DriftScrub = 2.4f;        // unità/s²: attrito delle gomme di traverso (per angolo pieno)
+    private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano (senza manovra)
+    private const float DecideWindow = 0.15f;     // s: se si sterza subito dopo aver tirato il freno a mano vale lo stesso
 
-    // Derapata assistita: col freno a mano in strada l'auto segue la traiettoria della strada (DriftLine) e
-    // attraversa l'incrocio verso la direzione scelta con lo sterzo, di traverso ma sempre in corsia.
-    private const float AssistMinSpeed = 5.5f;       // sotto questa velocità niente derapata guidata: il freno a mano fa da sé
+    // Derapata in curva: l'auto segue la traiettoria della strada (DriftLine) e si immette nella nuova strada
+    // dalla parte dello sterzo, di traverso ma sempre in corsia
+    private const float CornerMinSpeed = 5f;         // velocità minima per la derapata in curva
+    private const float CornerMargin = 2.5f;         // anticipo minimo oltre lo spazio di frenata
     private const float AssistFullSpeed = 9f;        // da questa velocità in su la derapata è piena (traverso massimo)
-    private const float AssistLetGo = 3f;            // se in curva si scende sotto questa velocità la guida lascia l'auto
     private const float AssistCornerSpeedMin = 5f;   // velocità in curva: almeno questa...
     private const float AssistCornerSpeedMax = 7.5f; // ...e al massimo questa (si frena prima dell'incrocio)
-    private const float AssistBrake = 9f;            // unità/s²: frenata automatica prima della curva
+    private const float AssistBrake = 9f;            // unità/s²: frenata prima della curva
     private const float AssistMaxAngle = 0.8f;       // rad: traverso in curva (≈46°)
     private const float AssistLeadIn = 6f;           // la coda inizia a scartare a questa distanza dalla curva
     private const float AssistLeadOut = 7f;          // dopo la curva l'auto si raddrizza in questa distanza
-    private const float AssistFlick = 0.3f;          // rad: "scarto" della coda tenendo il freno a mano prima della curva
     private const float AssistBodyRate = 14f;        // 1/s: prontezza della carrozzeria nel mettersi di traverso
-    // Derapata comandata davvero troppo tardi: nemmeno una frenata fortissima basterebbe a scendere alla velocità di
-    // curva prima dell'incrocio. Niente aiuto: l'auto tira dritto, esce di strada e l'erba la frena quasi del tutto.
-    private const float AssistLateBrake = 20f;       // unità/s²: frenata "di manica larghissima" per decidere se è tardi:
-                                                     // si rifiutano solo le derapate chiaramente impossibili
-    private const float MissedDrag = 9f;             // unità/s²: rallentamento fuori strada dopo la curva mancata
-    private const float MissedStopSpeed = 1.2f;      // la penalità finisce quando si è quasi fermi
-    // Sbandata della curva mancata: il muso viene strappato verso la svolta, la coda parte, l'auto scivola
-    // di traverso lungo la traiettoria che aveva e le gomme che strisciano mangiano la velocità
-    private const float SpinTime = 1.2f;             // s: durata della sbandata
-    private const float SpinYawRate = 1.0f;          // rad/s: rotazione del muso all'inizio della sbandata
-    private const float SpinMaxDrift = 1.75f;        // rad: in sbandata il traverso può superare quello di una derapata
-    private const float SpinScrub = 7f;              // unità/s²: attrito in più delle gomme di traverso
+    private const float DriftBoostMax = 2.2f;        // velocità extra massima in uscita da una derapata lunga
 
-    // Inversione a U col freno a mano (lontano dagli incroci, a velocità sostenuta): l'auto scivola lungo la
-    // corsia rallentando fino a fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso.
+    // Inversione a U (strada senza incroci davanti): l'auto scivola lungo la propria corsia rallentando fino a
+    // fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso
+    private const float UTurnMinSpeed = 6f;          // velocità minima per la manovra
+    private const float UTurnSlideMin = 4f;          // spazio di scivolata (cresce con la velocità)
+    private const float UTurnSlideMax = 8f;
+    private const float UTurnSlideShortest = 2.5f;   // in fondo a un vicolo cieco: sotto questo spazio niente inversione
+    private const float UTurnExitSpeed = 2.5f;       // a fine giro riparte già con questa velocità nel nuovo senso
+
+    // Derapata libera (tutti gli altri casi): l'auto scivola dritta fino a fermarsi in circa SlideTime secondi e la
+    // carrozzeria gira finché si tengono freno a mano e sterzo: SlideTurnRate rad/s, al massimo 180°
+    private const float SlideTime = 1.2f;
+    private const float SlideTurnRate = MathF.PI / 1.0f;
+
     // Bloccaggio delle ruote: insistendo sul freno in corsa le ruote si bloccano e l'auto striscia dritta
     private const float BrakeLockTime = 0.3f;        // s di freno tenuto premuto prima del bloccaggio
     private const float BrakeLocked = 8.5f;          // unità/s²: a ruote bloccate si frena un po' meno (si striscia)
     private const float LockedSteer = 0.12f;         // quota di sterzo che resta a ruote bloccate
-
-    private const float UTurnMinSpeed = 6f;          // velocità minima per la manovra
-    private const float UTurnFullSpeed = 10f;        // da questa velocità il giro è completo (180°); più piano gira meno
-    private const float UTurnMinAngle = 0.45f;       // quota di giro (di 180°) alla velocità minima
-    private const float UTurnSlideMin = 4f;          // spazio di scivolata (cresce con la velocità)
-    private const float UTurnSlideMax = 8f;
-    private const float UTurnSlideShortest = 2.5f;   // in un vicolo cieco: sotto questo spazio niente inversione guidata
-    private const float UTurnExitSpeed = 2.5f;       // a fine giro riparte già con questa velocità nel nuovo senso
-    private const float DriftBoostMax = 2.2f;       // velocità extra massima in uscita da una derapata lunga
 
     public Vector3 Position;
     public float Yaw;
@@ -153,53 +136,86 @@ public sealed class Car : IDisposable
     }
 
     private float _speed, _yawRate, _spin, _steer, _time, _accel;
-    private float _travelYaw, _grip = GripFull, _smokeTimer, _dirtTimer;
-    private bool _drifting;
-    private float _driftTime, _steerIn, _gasIn, _lineU, _flickSign, _lastHeading;
+    private float _travelYaw, _smokeTimer, _dirtTimer;
+    private float _driftTime, _steerIn, _gasIn, _lineU;
     private DriftLine? _line;
-    private bool _uturn;
-    private bool _tooLate;       // derapata rifiutata perché troppo tardi (fino al rilascio del freno a mano)
-    private float _spinTimer, _spinSide; // sbandata in corso (curva mancata) e verso di rotazione del muso
-    private float _missedTimer;  // curva mancata: finché > 0, fuori strada l'auto viene frenata forte
+    private Vector3 _lineOffset;
     private float _brakeHold, _steerLatch;
-
-    /// <summary>
-    /// La derapata è comandata troppo tardi? Vero se, anche frenando di <see cref="AssistLateBrake"/>, a inizio curva
-    /// si sarebbe ancora ben oltre la velocità massima di curva (già in curva: conta la velocità attuale).
-    /// </summary>
-    private static bool TooLate(DriftLine line, float u, float speed)
-    {
-        float d = line.CornerStart - u;
-        if (d < -0.5f) return true; // già dentro la curva: troppo tardi comunque
-        float reachable = MathF.Sqrt(AssistCornerSpeedMax * AssistCornerSpeedMax + 2f * AssistLateBrake * d);
-        return speed > reachable + 1f;
-    }
-
-    /// <summary>Se la derapata è troppo tardiva la rifiuta e fa partire la penalità della curva mancata.</summary>
-    private bool MissCorner(DriftLine line)
-    {
-        if (!TooLate(line, line.Project(Position), _speed)) return false;
-        _tooLate = true;
-        _missedTimer = 4f;
-        // Sbandata: il muso gira verso la strada che si voleva prendere (svolta a destra = yaw che diminuisce),
-        // più violenta quanto più si arriva forte
-        _spinTimer = SpinTime * Noise.Lerp(0.7f, 1f, Noise.Smooth(AssistMinSpeed, FastSpeed, _speed));
-        _spinSide = line.TurnSign != 0f ? -line.TurnSign : (_steerIn != 0f ? -MathF.Sign(_steerIn) : 1f);
-        return true;
-    }
 
     /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
     public bool WheelsLocked { get; private set; }
-    private float _uturnSide, _uturnLength, _uturnDecel, _uturnTime, _uturnSpeed, _uturnAngle, _driftPower;
 
-    /// <summary>In inversione a U col freno a mano.</summary>
-    public bool UTurning => _uturn;
-    private Vector3 _lineOffset;
+    // ------------------------------------------------------------------ freno a mano: le tre manovre
 
-    /// <summary>In derapata assistita (l'auto segue la strada di traverso).</summary>
-    public bool Drifting => _drifting;
-    /// <summary>Durata della derapata in corso (s).</summary>
-    public float DriftTime => _drifting ? _driftTime : 0f;
+    /// <summary>Cosa sta facendo l'auto col freno a mano.</summary>
+    private enum Manoeuvre { None, Corner, UTurn, Slide }
+    private Manoeuvre _manoeuvre;
+    private bool _prevHandbrake;
+    private float _decide = -1f;                    // da quanto si è tirato il freno a mano senza aver ancora deciso
+    private float _driftPower, _uturnSide, _uturnLength, _uturnDecel, _uturnTime, _uturnSpeed;
+    private float _slideSide, _slideAngle, _slideBase, _slideTravel, _slideDecel;
+
+    /// <summary>
+    /// La decisione, presa una volta sola quando si tira il freno a mano sterzando (lato <paramref name="side"/>):
+    /// <list type="number">
+    /// <item>da quel lato c'è una strada in cui svoltare, la velocità è giusta e c'è abbastanza anticipo per frenare
+    /// fino alla velocità di curva: derapata che immette nella nuova strada;</item>
+    /// <item>davanti la strada continua senza incroci (sul viale: nella propria metà carreggiata): inversione a U
+    /// completa nella carreggiata in cui si è;</item>
+    /// <item>in tutti gli altri casi: derapata libera, l'auto si mette di traverso e si ferma.</item>
+    /// </list>
+    /// </summary>
+    private void StartManoeuvre(float side)
+    {
+        Vector3 travel = Dir(_travelYaw);
+        _driftTime = 0f;
+        if (side != 0f && _speed >= CornerMinSpeed
+            && DriftLine.Plan(Position, travel, side) is { } corner && corner.TurnSign == side && InTime(corner))
+        {
+            _manoeuvre = Manoeuvre.Corner;
+            _driftPower = Noise.Smooth(CornerMinSpeed, AssistFullSpeed, _speed); // piano: poco di traverso
+            _line = corner;
+            _lineU = corner.Project(Position);
+            _lineOffset = Flat(Position - corner.At(_lineU)); // lo scarto dalla traiettoria si riassorbe in fretta
+            return;
+        }
+        if (side != 0f && _speed >= UTurnMinSpeed)
+        {
+            float length = Math.Clamp(_speed * 0.6f, UTurnSlideMin, UTurnSlideMax);
+            if (DriftLine.AlongRoad(Position, travel, length) is { } along
+                && along.Length - along.Project(Position) is var room && room >= UTurnSlideShortest)
+            {
+                length = MathF.Min(length, room); // in fondo a un vicolo cieco la scivolata si accorcia
+                _manoeuvre = Manoeuvre.UTurn;
+                _line = along;
+                _lineU = along.Project(Position);
+                _lineOffset = Flat(Position - along.At(_lineU));
+                _uturnLength = _lineU + length;
+                _uturnDecel = _speed * _speed / (2f * length); // si ferma esattamente a fine scivolata
+                _uturnTime = 2f * length / _speed;              // durata della scivolata (velocità che cala costante)
+                _uturnSpeed = _speed;
+                _uturnSide = -side;                             // sterzo a destra = giro in senso orario
+                return;
+            }
+        }
+        _manoeuvre = Manoeuvre.Slide;
+        _slideSide = side;
+        _slideAngle = 0f;
+        _slideBase = Yaw;
+        _slideTravel = _travelYaw;
+        _slideDecel = MathF.Max(_speed / SlideTime, 4f); // si ferma in circa SlideTime secondi
+    }
+
+    /// <summary>
+    /// C'è il giusto anticipo per la curva? Davanti all'inizio della curva serve lo spazio per frenare fino alla
+    /// velocità di curva, più un margine; troppo lontano no (la linea arriva a un incrocio solo entro la sua finestra).
+    /// </summary>
+    private bool InTime(DriftLine line)
+    {
+        float lead = line.CornerStart - line.Project(Position);
+        float brake = MathF.Max(0f, _speed * _speed - AssistCornerSpeedMax * AssistCornerSpeedMax) / (2f * AssistBrake);
+        return lead >= brake + CornerMargin;
+    }
 
     /// <summary>Freno a mano tirato (spazio): in velocità, con lo sterzo, fa partire la derapata.</summary>
     public bool Handbrake;
@@ -352,83 +368,6 @@ public sealed class Car : IDisposable
         return step;
     }
 
-    // ------------------------------------------------------------------ aiuto ai ponti
-    // I ponti sono stretti (1.8) e l'auto deve entrarci centrata e dritta. L'aiuto è discreto: piano quasi non
-    // si sente (si guida da sé), cresce con la velocità e alle velocità più alte allinea e centra con decisione.
-    private const float BridgeAssistReachSlow = 4f;   // a bassa velocità l'aiuto comincia vicino all'imbocco...
-    private const float BridgeAssistReachFast = 12f;  // ...ad alta velocità molto prima, per correggere con dolcezza
-    private const float BridgeAssistSpeedLow = 4f;    // sotto questa velocità l'aiuto è minimo
-    private const float BridgeAssistSpeedHigh = 11f;  // da questa velocità in su è pieno
-    private const float BridgeAssistMin = 0.12f;      // forza minima (a bassa velocità)
-    private const float BridgeAssistWidth = 3.5f; // fuori da questa distanza laterale l'aiuto non interviene
-
-    private float BridgeAssist(WorldMap world, float newYaw, float dt)
-    {
-        float fast = Noise.Smooth(BridgeAssistSpeedLow, BridgeAssistSpeedHigh, _speed);
-        float reach = Noise.Lerp(BridgeAssistReachSlow, BridgeAssistReachFast, fast);
-        var b = world.NearestBridge(Position, reach + 8f);
-        if (b == null) return newYaw;
-        Vector3 axis = b.Dir, perp = new(-axis.Z, 0f, axis.X), rel = Flat(Position - b.Center);
-        float along = Vector3.Dot(rel, axis), across = Vector3.Dot(rel, perp);
-        float toward = Vector3.Dot(Dir(_travelYaw), axis);
-        if (MathF.Abs(toward) < 0.35f || MathF.Abs(across) > BridgeAssistWidth) return newYaw;
-        float sign = MathF.Sign(toward);
-        float half = b.Span * 0.5f;
-        if (along * sign > half + 0.5f) return newYaw;            // già passati
-        float edge = MathF.Abs(along) - half;                      // negativo sul ponte
-        if (along * sign > 0f) edge = -1f;                        // dalla metà in poi si è sul ponte
-        if (edge > reach) return newYaw;
-        float strength = edge <= 0f ? 1f : 1f - Noise.Smooth(0.5f, reach, edge);
-        strength *= Noise.Lerp(BridgeAssistMin, 1f, fast);
-
-        // Si punta a un punto della mezzeria poco più avanti: muso e marcia ci si allineano
-        Vector3 aim = b.Center + axis * (along + sign * 3f);
-        float desired = MathF.Atan2(aim.X - Position.X, aim.Z - Position.Z);
-        float k = Noise.Damp(7f * strength, dt);
-        newYaw += Noise.WrapAngle(desired - newYaw) * k;
-        _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(desired - _travelYaw) * k);
-        _steer *= 1f - k; // ruote dritte
-
-        // Spostamento laterale verso il centro (solo se lì c'è posto)
-        Vector3 shift = -perp * across * Noise.Damp(2.5f * strength, dt);
-        if (Fits(world, Position + shift, newYaw)) Position += shift;
-        return newYaw;
-    }
-
-    // ------------------------------------------------------------------ mantenimento di corsia
-    // Aiuto in strada: lo sterzo segue da solo, con leggerezza, il centro della propria corsia (e quindi le curve);
-    // vicino al bordo l'aiuto cresce e riporta l'auto in corsia. Si vede: le ruote sterzano davvero.
-    // Il giocatore resta al comando: più sterza, meno l'aiuto conta. Spento agli incroci, col freno a mano,
-    // in derapata, attraversando la strada di traverso e quando si è ormai fuori strada.
-    private const float LaneFollow = 0.15f;   // peso dell'aiuto al centro della strada (segue la traiettoria)
-    private const float LaneEdge = 0.35f;     // peso dell'aiuto al bordo (rientro in corsia)
-    private const float LaneFree = 0.3f;      // da questa distanza dal centro corsia l'aiuto cresce...
-    private const float LaneFull = 1.3f;      // ...fino al bordo della strada
-    private const float LaneGone = 2.6f;      // oltre questa distanza si è fuori strada: niente aiuto
-
-    /// <summary>Sterzo che vorrebbe l'aiuto e il suo peso (0 = nessun aiuto).</summary>
-    private float LaneSteer(out float weight)
-    {
-        weight = 0f;
-        if (_speed < 2f || Handbrake || Sliding) return 0f;
-        float look = MathF.Max(5f, _speed * 0.7f);
-        if (!DriftLine.RoadFrame(Position, Dir(_travelYaw), look, out var center, out var tangent, out var aim, out float laneHalf))
-            return 0f;
-        if (Vector3.Dot(Dir(_travelYaw), tangent) < 0.75f) return 0f;            // attraversa la strada: libero
-        Vector3 perp = new(tangent.Z, 0f, -tangent.X);
-        float off = MathF.Abs(Vector3.Dot(Flat(Position - center), perp)); // dal centro della propria corsia
-        if (off > LaneGone) return 0f;
-        float full = MathF.Min(LaneFull, laneHalf + 0.2f); // sulle corsie strette l'aiuto cresce prima
-        weight = Noise.Lerp(LaneFollow, LaneEdge, Noise.Smooth(LaneFree, full, off))
-                 * (1f - Noise.Smooth(full + 0.6f, LaneGone, off));
-        // Inseguimento puro: curvatura dell'arco che porta al punto di mira al centro corsia
-        Vector3 to = Flat(aim - Position);
-        float dist = MathF.Max(to.Length(), 0.5f);
-        float diff = Noise.WrapAngle(MathF.Atan2(to.X, to.Z) - Yaw);
-        float curvature = 2f * MathF.Sin(diff) / dist;
-        return Math.Clamp(MathF.Atan(WheelBase * curvature), -ManualSteerLimit, ManualSteerLimit);
-    }
-
     /// <summary>Sta scivolando di traverso in modo visibile.</summary>
     public bool Sliding => MathF.Abs(DriftAngle) > 0.15f;
 
@@ -505,39 +444,27 @@ public sealed class Car : IDisposable
         _idleShake = Noise.Lerp(_idleShake, EngineOn ? 1f : 0f, Noise.Damp(6f, dt));
         float maxSpeed = slow ? SlowSpeed : FastSpeed;
 
-        // --- Sterzo e velocità desiderati
+        // --- Comandi: sterzo e gas. Niente aiuti: l'auto va dove la si guida.
         float wantSpeed = 0f;
         bool coasting = false;
-        // Dopo l'inversione a U lo sterzo tenuto per farla non conta finché non si rilascia il tasto,
-        // altrimenti l'auto, finito il giro, continuerebbe a girare oltre i 180°
+        // Dopo l'inversione a U lo sterzo tenuto per farla non conta finché non lo si rilascia (altrimenti l'auto,
+        // finito il giro, continuerebbe a girare)
         if (_steerLatch != 0f && MathF.Sign(drive.X) != _steerLatch) _steerLatch = 0f;
         if (_steerLatch != 0f) drive.X = 0f;
         _steerIn = Math.Clamp(drive.X, -1f, 1f);
         _gasIn = Math.Clamp(drive.Y, -1f, 1f);
-        // Sterzo a destra = rotazione oraria vista dall'alto = yaw che diminuisce
-        float limit = ManualSteerLimit;
-        if (Handbrake || Sliding) limit = MathF.Max(limit, DriftSteer); // in derapata si può sterzare (e controsterzare) di più
-        float wantSteer = -_steerIn * limit;
+        float wantSteer = -_steerIn * ManualSteerLimit; // sterzo a destra = rotazione oraria = yaw che diminuisce
         if (_gasIn > 0.1f) wantSpeed = maxSpeed;
         else if (_gasIn < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
         else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
-        // Freno a mano tirato: le ruote dietro sono bloccate, né gas né retromarcia muovono l'auto
-        // (se era già in corsa scivola e rallenta, così la derapata resta possibile)
-        if (Handbrake) { wantSpeed = 0f; coasting = true; }
-        // Mantenimento di corsia: lo sterzo si accompagna alla strada; chi sterza con decisione decide da sé
-        if (!_drifting && !_uturn)
-        {
-            float lane = LaneSteer(out float w);
-            w *= 1f - 0.65f * MathF.Abs(_steerIn);
-            wantSteer = Noise.Lerp(wantSteer, lane, w);
-        }
+        bool handbrake = Handbrake;
+        if (handbrake) { wantSpeed = 0f; coasting = true; }
 
-        // --- Dinamica: ruote che sterzano progressivamente, accelerazione e frenata lineari
+        // --- Ruote che sterzano progressivamente, accelerazione e frenata lineari
         // Le ruote arrivano a fine corsa in un tempo che cresce con la velocità: pronte da fermi, calme in velocità
         bool turningIn = MathF.Abs(wantSteer) > MathF.Abs(_steer) && wantSteer * _steer >= 0f;
         float ramp = Noise.Lerp(SteerRampSlow, SteerRampFast, MathF.Min(MathF.Abs(_speed) / FastSpeed, 1f));
         float steerRate = turningIn ? ManualSteerLimit / ramp : MathF.Max(MathF.Abs(_steer), ManualSteerLimit) / SteerReturn;
-        if (Handbrake || Sliding) steerRate = MathF.Max(steerRate, DriftSteerRate);
         _steer = MoveTowards(_steer, wantSteer, steerRate * dt);
         // Oltre la velocità massima (spinta di uscita dalla derapata) col gas si rallenta piano, senza frenare
         if (_gasIn > 0.1f && wantSpeed > 0f && _speed > wantSpeed) coasting = true;
@@ -551,93 +478,43 @@ public sealed class Car : IDisposable
         bool brakePedal = _gasIn < -0.1f && _speed > 0.3f;
         _brakeHold = brakePedal ? _brakeHold + dt : 0f;
         WheelsLocked = brakePedal && _brakeHold > BrakeLockTime && _speed > 1f;
-        _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? (WheelsLocked ? BrakeLocked : Brake) : push) * dt);
-        bool handbrake = Handbrake;
-        // In velocità il freno a mano serve a far scartare la coda, non a inchiodare: frena la metà
-        if (handbrake) _speed = MoveTowards(_speed, 0f, (_speed > DriftMinSpeed ? 0.5f : 1f) * HandbrakeDecel * dt);
-        // Di traverso le gomme strisciano e frenano, tanto più quanto è ampio l'angolo
-        _speed = MoveTowards(_speed, 0f, MathF.Abs(MathF.Sin(DriftAngle)) * DriftScrub * dt);
-        // Curva mancata: appena fuori strada l'erba frena forte, fin quasi a fermarsi (con polvere)
-        if (_missedTimer > 0f)
+        if (_manoeuvre == Manoeuvre.None)
         {
-            _missedTimer -= dt;
-            if (!world.IsRoad(Position) && _speed > 0f)
-            {
-                _speed = MoveTowards(_speed, 0f, MissedDrag * dt);
-                if (_speed > 2f && Random.Shared.NextSingle() < dt * 20f)
-                    fx.Dust(Vector3.Transform(new Vector3(0f, 0.05f, -0.4f), RootMatrix), 1);
-                if (_speed < MissedStopSpeed) _missedTimer = 0f;
-            }
+            _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? (WheelsLocked ? BrakeLocked : Brake) : push) * dt);
+            if (handbrake) _speed = MoveTowards(_speed, 0f, HandbrakeDecel * dt); // il freno a mano frena
         }
         UpdateGearbox(dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
         // Contro un ostacolo il motore non "tira": il suono resta al minimo, legato alla velocità vera
-        bool onGas = !braking && wantSpeed != 0f && _shiftTimer <= 0f && _blockedTimer <= 0f;
+        bool onGas = !braking && wantSpeed != 0f && _shiftTimer <= 0f && _blockedTimer <= 0f && _manoeuvre == Manoeuvre.None;
         Throttle = Noise.Lerp(Throttle, onGas ? 1f : 0f, Noise.Damp(onGas ? 6f : 18f, dt));
         if (_blockedTimer > 0f) Throttle = 0f;
         // Giri: dalla velocità nella marcia inserita; in partenza col gas il motore sale un po' (convertitore)
         float rpm = Gear < 0 ? MathF.Abs(_speed) / ReverseSpeed * 0.8f : GearRpm(Gear);
         Rpm = MathF.Max(rpm, IdleRpm + (_blockedTimer > 0f ? 0f : 0.2f * Throttle));
 
-        // Modello a bicicletta: la rotazione dipende dalla velocità (niente rotazioni sul posto)
-        // Aderenza: crolla col freno a mano in velocità, poi torna gradualmente (uscita morbida dalla derapata)
-        float gripTarget = handbrake && _speed > DriftMinSpeed ? GripDrift : GripFull;
-        if (MathF.Abs(_speed) < 1f) gripTarget = GripFull;
-        _grip = Noise.Lerp(_grip, gripTarget, Noise.Damp(gripTarget < _grip ? 12f : GripRecover, dt));
-        float slip = Math.Clamp((GripFull - _grip) / (GripFull - GripDrift), 0f, 1f);
-
-        // Innesco della derapata assistita: freno a mano in velocità su una strada (non durante un'inversione a U:
-        // nello slargo in fondo a un vicolo cieco, a metà giro, sostituirebbe la traiettoria e farebbe un secondo giro)
-        // Se è davvero troppo tardi niente aiuto (e niente inversione a U al suo posto) finché non si rilascia lo spazio:
-        // l'auto va lunga fuori strada. Rallentata, a metà curva non viene più "ripescata".
-        if (!handbrake) _tooLate = false;
-        if (!_drifting && !_uturn && !_tooLate && handbrake && _speed > AssistMinSpeed
-            && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } planned
-            && !MissCorner(planned))
+        // --- Freno a mano: una sola decisione, presa quando lo si tira (o un attimo dopo, se si sterza appena dopo)
+        if (handbrake && !_prevHandbrake && _manoeuvre == Manoeuvre.None && _speed > DriftMinSpeed) _decide = 0f;
+        _prevHandbrake = handbrake;
+        if (_decide >= 0f)
         {
-            _drifting = true;
-            // Quanto è "piena" la derapata dipende dalla velocità d'ingresso: piano si mette poco di traverso
-            _driftPower = Noise.Smooth(AssistMinSpeed, AssistFullSpeed, _speed);
-            _line = planned;
-            _lineU = planned.Project(Position);
-            _lineOffset = Flat(Position - planned.At(_lineU)); // lo scarto dalla traiettoria si riassorbe in fretta
-            _driftTime = 0f;
-            _flickSign = _steerIn != 0f ? -MathF.Sign(_steerIn) : 0f;
-            _lastHeading = planned.Heading(_lineU);
-        }
-
-        // Inversione a U: freno a mano sterzando a velocità sostenuta, dove non c'è un incrocio per svoltare
-        if (!_drifting && !_uturn && !_tooLate && handbrake && _speed > UTurnMinSpeed && MathF.Abs(_steerIn) > 0.3f)
-        {
-            float length = Math.Clamp(_speed * 0.6f, UTurnSlideMin, UTurnSlideMax);
-            if (DriftLine.AlongRoad(Position, Dir(_travelYaw), length) is { } along
-                && along.Length - along.Project(Position) is var room && room >= UTurnSlideShortest)
+            _decide += dt;
+            float side = MathF.Abs(_steerIn) > 0.3f ? MathF.Sign(_steerIn) : 0f;
+            if (!handbrake || _speed <= DriftMinSpeed) _decide = -1f;
+            else if (side != 0f || _decide > DecideWindow)
             {
-                length = MathF.Min(length, room); // in fondo a un vicolo cieco la scivolata si accorcia
-                _uturn = true;
-                _line = along;
-                _lineU = along.Project(Position);
-                _lineOffset = Flat(Position - along.At(_lineU));
-                _uturnLength = _lineU + length;
-                _uturnDecel = _speed * _speed / (2f * length); // si ferma esattamente a fine scivolata
-                _uturnTime = 2f * length / _speed;              // durata della scivolata (velocità che cala costante)
-                _uturnSpeed = _speed;
-                // Il giro dipende dalla velocità: completo solo se si arriva abbastanza forte, altrimenti l'auto si
-                // ferma di traverso a metà strada (come farebbe davvero), senza ripartire da sola
-                _uturnAngle = MathF.PI * Noise.Lerp(UTurnMinAngle, 1f, Noise.Smooth(UTurnMinSpeed, UTurnFullSpeed, _speed));
-                _uturnSide = -MathF.Sign(_steerIn);            // sterzo a destra = giro in senso orario
-                _driftTime = 0f;
+                _decide = -1f;
+                StartManoeuvre(side);
             }
         }
 
         float yawRate, newYaw;
         Vector3? railStep = null;
-        if (_line == null) { _uturn = false; _drifting = false; } // manovre senza traiettoria: mai "appese"
-        if (_uturn && _line != null)
+        if (_manoeuvre is Manoeuvre.Corner or Manoeuvre.UTurn && _line == null) _manoeuvre = Manoeuvre.None;
+        if (_manoeuvre == Manoeuvre.UTurn && _line != null)
         {
             var line = _line;
             // Scivolata lungo la corsia con frenata costante: si ferma esattamente a fine tratto
-            // (gas e freni non contano: la velocità della manovra è tenuta a parte)
             _speed = _uturnSpeed = MathF.Max(0f, _uturnSpeed - _uturnDecel * dt);
             _lineU = MathF.Min(_lineU + _speed * dt, _uturnLength);
             _lineOffset *= MathF.Exp(-4f * dt);
@@ -648,65 +525,43 @@ public sealed class Car : IDisposable
             // Rotazione di 180° distribuita sulla durata della scivolata (parte e finisce morbida)
             _driftTime += dt;
             float progress = Math.Clamp(_driftTime / _uturnTime, 0f, 1f);
-            newYaw = Noise.WrapAngle(heading + _uturnSide * _uturnAngle * Noise.Smooth(0f, 1f, progress));
+            newYaw = Noise.WrapAngle(heading + _uturnSide * MathF.PI * Noise.Smooth(0f, 1f, progress));
             yawRate = Noise.WrapAngle(newYaw - Yaw) / MathF.Max(dt, 1e-4f);
-            _grip = GripDrift;
             _steer = MoveTowards(_steer, -_uturnSide * MaxSteer, 5f * dt); // ruote in controsterzo
 
             if (progress >= 1f || _speed <= 0.05f || _blockedTimer > 0f)
             {
-                // Fine giro: muso e marcia nel senso opposto, si riparte subito
-                bool full = _uturnAngle > MathF.PI * 0.98f;
-                bool clean = _blockedTimer <= 0f && full;
-                _uturn = false;
+                // Fine giro: muso e marcia nel senso opposto, si riparte subito (se un urto l'ha interrotto, si resta così)
+                bool clean = _blockedTimer <= 0f;
+                _manoeuvre = Manoeuvre.None;
                 _line = null;
-                // Giro completo: muso esattamente nel verso opposto. Interrotto da un urto: l'auto resta com'è
-                // (prima scattava di colpo fino a 180°, anche se aveva girato solo a metà)
-                if (_blockedTimer <= 0f || progress > 0.85f) newYaw = Noise.WrapAngle(heading + _uturnSide * _uturnAngle);
+                if (clean || progress > 0.85f) newYaw = Noise.WrapAngle(heading + _uturnSide * MathF.PI);
                 yawRate = 0f;
                 _travelYaw = newYaw;
-                _grip = GripFull;
                 _steer = 0f;
                 _speed = clean ? UTurnExitSpeed : 0f;
                 Gear = 1;
-                if (full) _steerLatch = -_uturnSide; // il segno dello sterzo che ha avviato il giro
+                _steerLatch = -_uturnSide; // il segno dello sterzo che ha avviato il giro
             }
         }
-        else if (_drifting && _line != null)
+        else if (_manoeuvre == Manoeuvre.Corner && _line != null)
         {
-            // Lo sterzo decide la svolta finché non si è entrati in curva: se si è tirato il freno a mano un attimo
-            // prima di sterzare (o già in avvicinamento), la svolta scelta senza sterzo si corregge verso quel lato
-            float wantSide = MathF.Abs(_steerIn) > 0.3f ? MathF.Sign(_steerIn) : 0f;
-            if (wantSide != 0f && wantSide != _line.TurnSign && _lineU < _line.CornerStart
-                && DriftLine.Plan(Position, Dir(_travelYaw), _steerIn) is { } replanned && replanned.TurnSign == wantSide)
-            {
-                _line = replanned;
-                _lineU = replanned.Project(Position);
-                _lineOffset = Flat(Position - replanned.At(_lineU));
-                _lastHeading = replanned.Heading(_lineU);
-            }
             var line = _line;
-            // Prima della curva si frena da soli alla velocità giusta per farla di traverso
+            // Prima della curva si frena alla velocità giusta per farla di traverso (fa parte della manovra)
             if (_lineU < line.CornerEnd)
             {
                 float cornerSpeed = Math.Clamp(_speed, AssistCornerSpeedMin, AssistCornerSpeedMax);
                 if (_lineU > line.CornerStart - _speed * 0.9f && _speed > cornerSpeed)
                     _speed = MoveTowards(_speed, cornerSpeed, AssistBrake * dt);
-                // Entrati decisi e in tempo: fino alla curva e in curva la velocità non crolla sotto quella giusta (freno a mano e gomme
-                // di traverso altrimenti la mangerebbero tutta e l'auto si pianterebbe in mezzo all'incrocio).
-                // Entrati piano no: lì la derapata può spegnersi a metà, come sarebbe davvero
-                if (_driftPower > 0.4f)
-                    _speed = MathF.Max(_speed, MathF.Min(AssistCornerSpeedMin, _speed + 6f * dt));
+                // Fino alla curva e in curva la velocità non crolla sotto quella giusta (si attraversa l'incrocio)
+                _speed = MathF.Max(_speed, MathF.Min(AssistCornerSpeedMin, _speed + 6f * dt));
             }
 
             // L'auto avanza sulla traiettoria: marcia = direzione della strada, sempre in corsia
             _lineU += MathF.Abs(_speed) * dt;
             _lineOffset *= MathF.Exp(-4f * dt);
-            Vector3 target = line.At(_lineU) + _lineOffset;
-            railStep = Flat(target - Position);
+            railStep = Flat(line.At(_lineU) + _lineOffset - Position);
             float heading = line.Heading(_lineU);
-            float turnRate = Noise.WrapAngle(heading - _lastHeading) / MathF.Max(dt, 1e-4f);
-            _lastHeading = heading;
             _travelYaw = heading;
 
             // Carrozzeria di traverso secondo un profilo lungo la traiettoria: dritta in avvicinamento, la coda
@@ -717,28 +572,19 @@ public sealed class Car : IDisposable
             float angle = side * AssistMaxAngle * Noise.Lerp(0.35f, 1f, _driftPower) * MathF.Min(into, outOf);
             newYaw = Yaw + Noise.WrapAngle(heading + angle - Yaw) * Noise.Damp(AssistBodyRate, dt);
             yawRate = Noise.WrapAngle(newYaw - Yaw) / MathF.Max(dt, 1e-4f);
-            _grip = GripDrift;
-            // Ruote anteriori in controsterzo, come in una vera derapata (solo estetica)
             float slideNow = Noise.WrapAngle(newYaw - heading);
-            _steer = MoveTowards(_steer, Math.Clamp(-slideNow * 0.8f, -MaxSteer, MaxSteer), 5f * dt);
+            _steer = MoveTowards(_steer, Math.Clamp(-slideNow * 0.8f, -MaxSteer, MaxSteer), 5f * dt); // controsterzo
 
-            // Fine: curva superata e auto di nuovo dritta (senza freno a mano), fine linea, troppo lenti o urto
+            // Fine: curva superata e auto di nuovo dritta, fine linea o urto
             _driftTime += dt;
             bool done = _lineU > line.CornerEnd + AssistLeadOut && MathF.Abs(slideNow) < 0.12f;
-            if (done || _lineU > line.Length - 1f || _speed < AssistLetGo || _blockedTimer > 0f)
+            if (done || _lineU > line.Length - 1f || _blockedTimer > 0f)
             {
-                bool clean = done;
-                _drifting = false;
+                _manoeuvre = Manoeuvre.None;
                 _line = null;
-                if (clean)
-                {
-                    _grip = GripFull;
-                    _travelYaw = newYaw;
-                }
-                // Troppo lenti a metà curva: la guida lascia l'auto così com'è, di traverso e ancora senza aderenza;
-                // scivola nella direzione in cui andava e si raddrizza da sola (o con lo sterzo), niente curva "finta"
-                // Uscita pulita da una curva: spinta in avanti e fiammata dallo scarico (piena solo se si è entrati forte)
-                if (clean && _driftPower > 0.3f)
+                _travelYaw = newYaw;
+                // Uscita pulita: spinta in avanti e fiammata dallo scarico (piena solo se si è entrati forte)
+                if (done && _driftPower > 0.3f)
                 {
                     _speed += MathF.Min(1f + _driftTime * 0.5f, DriftBoostMax) * _driftPower;
                     for (int k = 0; k < 4; k++)
@@ -748,35 +594,40 @@ public sealed class Car : IDisposable
                 }
             }
         }
+        else if (_manoeuvre == Manoeuvre.Slide)
+        {
+            // Derapata libera: l'auto scivola dritta dove andava, rallentando fino a fermarsi, e la carrozzeria
+            // gira finché si tengono freno a mano e sterzo dallo stesso lato: un tocco la mette di traverso,
+            // tenendo a lungo arriva a 180°. Lasciati i tasti l'angolo resta quello raggiunto.
+            _driftTime += dt;
+            if (_slideSide == 0f && MathF.Abs(_steerIn) > 0.3f) _slideSide = MathF.Sign(_steerIn);
+            bool holding = handbrake && _slideSide != 0f && MathF.Abs(_steerIn) > 0.3f && MathF.Sign(_steerIn) == _slideSide;
+            if (holding) _slideAngle = MathF.Min(MathF.PI, _slideAngle + SlideTurnRate * dt);
+            _speed = MoveTowards(_speed, 0f, _slideDecel * dt);
+            _travelYaw = _slideTravel;
+            float target = Noise.WrapAngle(_slideBase - _slideSide * _slideAngle);
+            newYaw = Noise.WrapAngle(Yaw + Noise.WrapAngle(target - Yaw) * Noise.Damp(10f, dt));
+            yawRate = Noise.WrapAngle(newYaw - Yaw) / MathF.Max(dt, 1e-4f);
+            _steer = MoveTowards(_steer, _slideSide * MaxSteer * 0.8f, 5f * dt); // ruote in controsterzo
+            if (_speed < 0.25f || _blockedTimer > 0f)
+            {
+                // Ferma: muso e marcia coincidono di nuovo, si riparte da come si è
+                _manoeuvre = Manoeuvre.None;
+                _speed = 0f;
+                _travelYaw = newYaw;
+                _steer = 0f;
+                if (_slideAngle > MathF.PI * 0.9f) _steerLatch = _slideSide;
+            }
+        }
         else
         {
-            // A ruote bloccate le anteriori non direzionano: lo sterzo quasi non conta
-            float spin = 0f;
-            if (_spinTimer > 0f)
-            {
-                // Sbandata: niente aderenza dietro, il muso ruota da sé (si smorza col tempo e con la velocità persa)
-                _spinTimer -= dt;
-                spin = Noise.Smooth(0f, SpinTime * 0.6f, _spinTimer) * Math.Clamp(_speed / 6f, 0f, 1f);
-                _grip = MathF.Min(_grip, GripDrift * 0.6f);
-                _speed = MoveTowards(_speed, 0f, SpinScrub * MathF.Abs(MathF.Sin(DriftAngle)) * dt);
-                if (_speed < 0.8f) _spinTimer = 0f;
-            }
-            float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f)
-                                * (_spinTimer > 0f ? 0.45f : 1f); // in sbandata anche le anteriori strisciano
-            yawRate = gripYawRate * (1f + DriftYawBoost * slip);
-            // Senza aderenza la rotazione in più ha un tetto: si entra di traverso senza girarsi su se stessi
-            float yawCap = MathF.Max(MathF.Abs(gripYawRate), DriftYawMax);
-            yawRate = Math.Clamp(yawRate, -yawCap, yawCap);
-            yawRate += _spinSide * SpinYawRate * spin;
+            // Guida normale: modello a bicicletta, la rotazione dipende dalla velocità (niente rotazioni sul posto).
+            // A ruote bloccate le anteriori non direzionano: lo sterzo quasi non conta.
+            yawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f);
             newYaw = Yaw + yawRate * dt;
-            // La direzione di marcia insegue il muso con la rapidità data dall'aderenza
-            _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(newYaw - _travelYaw) * (1f - MathF.Exp(-_grip * dt)));
+            _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(newYaw - _travelYaw) * (1f - MathF.Exp(-Grip * dt)));
         }
-        float drift = Noise.WrapAngle(newYaw - _travelYaw);
-        float maxDrift = _spinTimer > 0f ? SpinMaxDrift : MaxDrift;
-        if (MathF.Abs(drift) > maxDrift) _travelYaw = Noise.WrapAngle(newYaw - MathF.Sign(drift) * maxDrift);
         BoostFlash = MathF.Max(0f, BoostFlash - dt * 2.5f);
-        if (railStep == null && _speed > 0.5f) newYaw = BridgeAssist(world, newYaw, dt);
         Vector3 step = railStep ?? Dir(_travelYaw) * (_speed * dt);
         step = PushObstacles(world, fx, step, newYaw, dt);
         float moved = step.LengthSquared() > 0f ? Move(world, step, newYaw) : 0f;
