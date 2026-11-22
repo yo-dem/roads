@@ -4,36 +4,23 @@ using Roads.World;
 namespace Roads.Characters;
 
 /// <summary>
-/// Traiettoria della derapata assistita: la mezzeria della strada su cui si viaggia fino al prossimo incrocio,
-/// una curva morbida dentro lo slargo verso la strada scelta (a sinistra, a destra o dritto), poi la mezzeria
-/// della nuova strada. L'auto la segue come su una rotaia: in derapata resta sempre in corsia.
-/// Le strade sono quelle della rete (<see cref="RoadNetwork"/>): agli incroci le uscite hanno angoli qualsiasi.
+/// Traiettoria lungo la propria corsia per l'inversione a U (spazio + indietro): l'auto ci scivola sopra mentre la
+/// carrozzeria gira di 180°. Agli incroci prosegue dritta; in fondo a un vicolo cieco si ferma.
+/// Le strade sono quelle della rete (<see cref="RoadNetwork"/>).
 /// </summary>
 public sealed class DriftLine
 {
     private const float Step = 0.5f;          // passo dei punti lungo la linea
-    private const float TurnWindow = 15f;     // l'aiuto alla derapata vede un incrocio entro questa distanza
-    private const float ExitLength = 26f;     // tratto di strada dopo la curva
     private const float MaxOffRoad = 2.8f;    // oltre questa distanza dalla mezzeria non si è "in strada"
     private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo
     private const float StraightDot = 0.8f;   // un'uscita è "dritto" se devia meno di ~37°
-    private const float SideDot = 0.3f;       // un'uscita è a destra/sinistra se ci punta almeno così
-    private const float HairpinDot = -0.55f;  // oltre ~125° rispetto a dove si va è un gomito, non una svolta
     private const float UTurnJunctionMargin = 3f; // niente inversione guidata se un incrocio è più vicino di scivolata + questo
     private const float UTurnShortest = 2.6f;    // sotto questo spazio di scivolata niente inversione guidata
 
     private readonly List<Vector3> _points = new();
     private readonly List<float> _cum = new();
 
-    /// <summary>Tratto (in lunghezza lungo la linea) della curva all'incrocio; senza svolta CornerEnd &lt; 0.</summary>
-    public float CornerStart { get; private set; } = -1f;
-    public float CornerEnd { get; private set; } = -1f;
-    public bool HasCorner => CornerEnd > 0f;
     public float Length => _cum.Count > 0 ? _cum[^1] : 0f;
-    /// <summary>La linea arriva fino a un incrocio raggiungibile entro la finestra (per scegliere la svolta dopo).</summary>
-    public bool HubAhead { get; private set; }
-    /// <summary>Lato della svolta scelta: +1 destra, -1 sinistra (come lo sterzo).</summary>
-    public float TurnSign { get; private set; }
 
     private static RoadNetwork Net => RoadNetwork.Current;
 
@@ -144,78 +131,6 @@ public sealed class DriftLine
         float side = Vector2.Dot(p - hit.Point, RightOf(hit.Edge.Tangent(hit.S) * dir));
         cursor = new Cursor(hit.Edge, hit.S, dir, NearestLane(hit.Edge, dir, side));
         return true;
-    }
-
-    /// <summary>
-    /// Traccia la linea partendo dalla strada su cui si trova l'auto. <paramref name="steer"/>: +1 destra,
-    /// -1 sinistra, 0 dritto (si sceglie la strada al prossimo incrocio, se esiste e se è abbastanza vicino).
-    /// Restituisce null se l'auto non è su una strada o se non c'è un incrocio vicino dove svoltare:
-    /// l'aiuto vale solo in prossimità degli incroci.
-    /// </summary>
-    public static DriftLine? Plan(Vector3 pos, Vector3 travel, float steer)
-    {
-        if (!Locate(pos, travel, out var c)) return null;
-        float want = steer > 0.3f ? 1f : steer < -0.3f ? -1f : 0f;
-        if (want == 0f) return null;
-
-        // La prima svolta dal lato dello sterzo entro la finestra: agli incroci che da quel lato non ne hanno si
-        // prosegue dritti e si guarda il successivo. Da quel lato si prende la svolta più netta, ma non i gomiti
-        // (strade che tornano indietro): quelli non sono una svolta.
-        var probe = new DriftLine();
-        var from = c;
-        Cursor atHub;
-        RoadNode hub;
-        Vector2 travelIn;
-        (RoadEdge Edge, Vector2 Dir, float Ahead, float Right) turn;
-        while (true)
-        {
-            probe.Follow(from, TurnWindow - probe.Length, stopAtJunction: true, out atHub, out _);
-            hub = atHub.Ahead;
-            if (atHub.ToAhead > 0.01f || hub.Degree < 2 || (hub.Degree == 2 && !hub.Piazza) || probe.Length >= TurnWindow)
-                return null;
-            travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
-            var exits = Exits(hub, atHub.Edge, travelIn).ToList();
-            var side = exits.Where(x => want * x.Right > SideDot && x.Ahead > HairpinDot).ToList();
-            if (side.Count > 0)
-            {
-                turn = side.MaxBy(x => want * x.Right);
-                break;
-            }
-            var straight = exits.Where(x => x.Ahead > StraightDot).OrderByDescending(x => x.Ahead).ToList();
-            if (straight.Count == 0) return null; // da qui non si prosegue dritti: niente svolta davanti
-            var next = straight[0].Edge;
-            float nd = next.A == hub ? 1f : -1f;
-            from = new Cursor(next, next.A == hub ? 0f : next.Length, nd, NearestLane(next, nd, atHub.Lane));
-        }
-        float hubDist = probe.Length;
-
-        var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
-        float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
-        // Fin quasi all'incrocio scelto, passando dritti per quelli prima
-        line.Follow(c, MathF.Max(hubDist - reach, 0f), stopAtJunction: false, out _, out _);
-        Vector3 p0 = line._points.Count > 0 ? line._points[^1] : To3(c.PointAt(c.S));
-        // Corsia d'uscita: girando a destra la più esterna, a sinistra la più interna (come si fa davvero)
-        float exitDir = turn.Edge.A == hub ? 1f : -1f;
-        var lanes = turn.Edge.TravelLanes(exitDir);
-        float exitLane = steer > 0.3f ? lanes.Max() : steer < -0.3f ? lanes.Min() : NearestLane(turn.Edge, exitDir, atHub.Lane);
-        var exitC = new Cursor(turn.Edge, turn.Edge.A == hub ? 0f : turn.Edge.Length, exitDir, exitLane);
-        float outS = MathF.Min(reach, turn.Edge.Length * 0.5f);
-        exitC = exitC with { S = exitC.S + exitC.Dir * outS };
-        Vector3 p2 = To3(exitC.PointAt(exitC.S));
-        // Punto di controllo: dove si incrociano le due corsie (per strade ad angolo retto è esatto)
-        Vector3 h = To3(hub.Pos + RightOf(travelIn) * atHub.Lane + RightOf(turn.Dir) * exitLane);
-
-        // Curva: Bézier quadratica col punto d'incontro delle corsie come controllo (resta dentro lo slargo)
-        line.Add(p0);
-        line.CornerStart = line.Length;
-        for (int k = 1; k <= 16; k++)
-        {
-            float u = k / 16f;
-            line.Add((1 - u) * (1 - u) * p0 + 2 * (1 - u) * u * h + u * u * p2);
-        }
-        line.CornerEnd = line.Length;
-        line.Follow(exitC, ExitLength, stopAtJunction: false, out _, out _);
-        return line._points.Count >= 4 ? line : null;
     }
 
     /// <summary>

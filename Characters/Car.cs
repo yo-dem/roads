@@ -7,7 +7,7 @@ namespace Roads.Characters;
 
 /// <summary>
 /// Automobilina giocattolo low poly. Si guida con WASD o le frecce (e col mouse), Shift per andare piano, spazio per il
-/// freno a mano: con lo sterzo derapata (con un aiuto leggero vicino agli incroci, vedi AssistDrift), con indietro
+/// freno a mano: il posteriore perde aderenza e lo sterzo fa sbandare l'auto (nessun aiuto); con indietro
 /// inversione a U (vedi StartUTurn).
 /// Guida "da auto": modello cinematico a bicicletta con raggio di sterzata minimo (non gira sul posto),
 /// retromarcia, collisione a due cerchi (muso e coda) con scivolamento sugli ostacoli, luci di stop e di retromarcia.
@@ -53,24 +53,9 @@ public sealed class Car : IDisposable
     private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano
     private const float DriftScrub = 2.4f;        // unità/s²: attrito delle gomme di traverso (per angolo pieno)
 
-    // Aiuto leggero vicino agli incroci: se tirando il freno a mano sterzando c'è una strada da quel lato entro
-    // DriftLine.TurnWindow, la direzione di marcia viene accompagnata verso la nuova strada e in curva il muso resta
-    // un po' dentro (la coda fuori). Tocca solo le direzioni, mai la posizione: entrando male si allarga lo stesso.
-    private const float AssistMinSpeed = 4.5f;    // sotto questa velocità niente aiuto
-    private const float AssistTravel = 6f;        // 1/s: quanto la marcia è accompagnata verso la traiettoria
-    private const float AssistAngle = 0.55f;      // rad: traverso che l'aiuto cerca in curva (≈30°)
-    private const float AssistBody = 5f;          // 1/s: quanto il muso è accompagnato verso quel traverso
-    private const float AssistYawMax = 1.6f;      // rad/s: con l'aiuto la rotazione data dallo sterzo ha questo tetto
-    private const float AssistCross = 1.1f;       // correzione della marcia per unità di scarto dalla traiettoria
-    private const float AssistCornerSpeed = 7f;   // in curva, entrando più forte, si scala a questa velocità...
-    private const float AssistCornerBrake = 8f;   // ...con questa frenata (unità/s²)
-    private const float AssistExit = 5f;          // l'aiuto finisce questo tratto dopo la fine della curva
-    private const float AssistMaxTime = 4f;       // s: in ogni caso l'aiuto non dura di più
-
-    // Comandi del freno a mano: spazio + indietro = inversione a U; spazio + sterzo = derapata (con l'aiuto se vicino
-    // a un incrocio). I tasti valgono in qualsiasi ordine entro DecideWindow.
+    // Freno a mano: il posteriore perde aderenza e basta (lo sterzo fa sbandare l'auto, nessun aiuto). Solo spazio +
+    // indietro, entro DecideWindow dalla pressione, fa l'inversione a U.
     private const float DecideWindow = 0.5f;      // s
-    private const float SteerGrace = 0.08f;       // s: lo sterzo decide dopo questo istante (se insieme c'è indietro, è un'inversione)
 
     // Inversione a U (spazio + indietro, sempre): l'auto scivola lungo la propria corsia rallentando fino a
     // fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso
@@ -162,54 +147,7 @@ public sealed class Car : IDisposable
     private float _decide = -1f;                    // da quanto si è tirato il freno a mano senza aver ancora deciso
     private float _uturnSide, _uturnLength, _uturnDecel, _uturnTime, _uturnSpeed;
     private float _grip = GripFull;                 // aderenza del posteriore (1/s)
-    private DriftLine? _assist;                     // traiettoria verso la strada in cui svoltare (solo come guida)
-    private float _assistTime;
 
-    /// <summary>
-    /// Spazio + sterzo (lato <paramref name="side"/>): la derapata è già partita (aderenza giù); se entro
-    /// DriftLine.TurnWindow c'è una strada da quel lato si accende l'aiuto leggero verso di essa.
-    /// </summary>
-    private void StartDrift(float side)
-    {
-        _assist = null;
-        if (side == 0f || _speed < AssistMinSpeed) return;
-        if (DriftLine.Plan(Position, Dir(_travelYaw), side) is { } corner && corner.TurnSign == side)
-        {
-            _assist = corner;
-            _assistTime = 0f;
-        }
-    }
-
-    /// <summary>
-    /// Aiuto leggero in derapata: la marcia viene accompagnata (non forzata) verso un punto della traiettoria poco più
-    /// avanti, e dentro la curva il muso verso un traverso naturale. La posizione resta quella che la fisica dà.
-    /// </summary>
-    private void AssistDrift(ref float newYaw, float dt)
-    {
-        var line = _assist!;
-        float u = line.Project(Position);
-        _assistTime += dt;
-        if (u > line.CornerEnd + AssistExit || _speed < 1.5f || _assistTime > AssistMaxTime || _blockedTimer > 0f)
-        {
-            _assist = null;
-            return;
-        }
-        // Direzione della traiettoria dove si è (un filo più avanti) più una correzione per lo scarto laterale: segue la
-        // curva senza tagliarla (mirare a un punto lontano farebbe tagliare lo spigolo dell'incrocio)
-        float tangent = line.Heading(u + 0.8f);
-        Vector3 on = line.At(u);
-        var right = new Vector3(-MathF.Cos(tangent), 0f, MathF.Sin(tangent)); // destra della traiettoria
-        float cross = Vector3.Dot(Flat(Position - on), right);                // > 0: l'auto è a destra della linea
-        float bearing = Noise.WrapAngle(tangent + MathF.Atan(AssistCross * cross));   // a destra → si corregge a sinistra
-        _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(bearing - _travelYaw) * Noise.Damp(AssistTravel, dt));
-        // In curva la coda resta fuori: il muso un po' più dentro della marcia (svolta a destra = yaw che diminuisce)
-        float inCorner = Noise.Smooth(line.CornerStart - 3f, line.CornerStart, u) * (1f - Noise.Smooth(line.CornerEnd, line.CornerEnd + 4f, u));
-        float body = Noise.WrapAngle(_travelYaw - line.TurnSign * AssistAngle * inCorner);
-        // Entrando forte, in curva si scala dolcemente a una velocità che la curva permette (come farebbe un pilota)
-        float nearCorner = Noise.Smooth(line.CornerStart - 6f, line.CornerStart - 1f, u) * (1f - Noise.Smooth(line.CornerEnd - 1f, line.CornerEnd, u));
-        if (_speed > AssistCornerSpeed) _speed = MoveTowards(_speed, AssistCornerSpeed, AssistCornerBrake * nearCorner * dt);
-        newYaw = Noise.WrapAngle(newYaw + Noise.WrapAngle(body - newYaw) * Noise.Damp(AssistBody, dt));
-    }
 
     /// <summary>
     /// Spazio + indietro: inversione a U, sempre e ovunque. In strada l'auto scivola lungo la propria corsia (sul viale
@@ -512,8 +450,8 @@ public sealed class Car : IDisposable
         float rpm = Gear < 0 ? MathF.Abs(_speed) / ReverseSpeed * 0.8f : GearRpm(Gear);
         Rpm = MathF.Max(rpm, IdleRpm + (_blockedTimer > 0f ? 0f : 0.2f * Throttle));
 
-        // --- Freno a mano: la derapata parte subito (fisica); entro mezzo secondo si decide il resto.
-        // Spazio + indietro: inversione a U. Spazio + sterzo: aiuto leggero se c'è una strada da quel lato.
+        // --- Freno a mano: il posteriore perde aderenza subito (vedi la fisica qui sotto). Se entro mezzo secondo si
+        // preme anche indietro: inversione a U.
         if (handbrake && !_prevHandbrake && _manoeuvre == Manoeuvre.None && _speed > DriftMinSpeed) _decide = 0f;
         _prevHandbrake = handbrake;
         if (_decide >= 0f)
@@ -524,14 +462,7 @@ public sealed class Car : IDisposable
             else if (_gasIn < -0.3f)
             {
                 _decide = -1f;
-                _assist = null;
                 StartUTurn(side);
-            }
-            // (lo sterzo decide dopo un istante: chi preme indietro insieme allo sterzo vuole l'inversione)
-            else if (side != 0f && _decide > SteerGrace)
-            {
-                _decide = -1f;
-                StartDrift(side);
             }
         }
 
@@ -584,12 +515,11 @@ public sealed class Car : IDisposable
             float gripYawRate = _speed * MathF.Tan(_steer) / WheelBase * (WheelsLocked ? LockedSteer : 1f);
             yawRate = gripYawRate * (1f + DriftYawBoost * slip);
             // Senza aderenza la rotazione in più ha un tetto: si va di traverso senza girarsi su se stessi
-            float yawCap = _assist != null ? AssistYawMax : MathF.Max(MathF.Abs(gripYawRate), DriftYawMax);
+            float yawCap = MathF.Max(MathF.Abs(gripYawRate), DriftYawMax);
             yawRate = Math.Clamp(yawRate, -yawCap, yawCap);
             newYaw = Noise.WrapAngle(Yaw + yawRate * dt);
             // La direzione di marcia insegue il muso con la rapidità data dall'aderenza
             _travelYaw = Noise.WrapAngle(_travelYaw + Noise.WrapAngle(newYaw - _travelYaw) * (1f - MathF.Exp(-_grip * dt)));
-            if (_assist != null) AssistDrift(ref newYaw, dt);
             // Traverso massimo: oltre, la marcia viene trascinata dal muso
             float drift = Noise.WrapAngle(newYaw - _travelYaw);
             if (MathF.Abs(drift) > MaxDrift) _travelYaw = Noise.WrapAngle(newYaw - MathF.Sign(drift) * MaxDrift);
