@@ -12,7 +12,7 @@ namespace Roads.Characters;
 public sealed class DriftLine
 {
     private const float Step = 0.5f;          // passo dei punti lungo la linea
-    private const float TurnWindow = 40f;     // la derapata in curva vede un incrocio entro questa distanza
+    private const float TurnWindow = 15f;     // l'aiuto alla derapata vede un incrocio entro questa distanza
     private const float ExitLength = 26f;     // tratto di strada dopo la curva
     private const float MaxOffRoad = 2.8f;    // oltre questa distanza dalla mezzeria non si è "in strada"
     private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo

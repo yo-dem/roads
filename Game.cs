@@ -34,6 +34,7 @@ public sealed class DebugOptions
     public bool BigMap;            // parte con la mappa grande aperta (test)
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
+    public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
     public List<(Vector2 Move, float Until)> Moves { get; } = new(); // WASD simulati: X = A/D, Y = S/W (test)
@@ -274,6 +275,7 @@ public sealed partial class Game : IDisposable
         if (_time > 0.5f)
             foreach (var (drive, until) in _debug.Drives)
                 if (_time < until) { (steerIn, throttleIn) = (drive.X, drive.Y); break; }
+        if (_time < _debug.PilotUntil && !_onFoot) steerIn = PilotSteer(); // test: si resta in corsia come un giocatore
         if (_debug.Slow) slow = true;
         while (_toggleIndex < _debug.Toggles.Count && _time >= _debug.Toggles[_toggleIndex])
         {
@@ -844,6 +846,20 @@ public sealed partial class Game : IDisposable
                     }
         Console.WriteLine($"Verifica inversioni sui viali: {tried} prove, {turns} inversioni guidate, "
                           + $"{crossTurn} oltre lo spartitraffico, {intoHub} dentro un incrocio");
+    }
+
+    /// <summary>
+    /// Solo per i test: lo sterzo che terrebbe l'auto in corsia (inseguimento di un punto della corsia poco più avanti),
+    /// come farebbe un giocatore prima di tirare il freno a mano.
+    /// </summary>
+    private float PilotSteer()
+    {
+        var travel = _player.Velocity.LengthSquared() > 0.01f ? _player.Velocity : new Vector3(MathF.Sin(_player.Yaw), 0f, MathF.Cos(_player.Yaw));
+        float look = MathF.Max(4f, MathF.Abs(_player.Speed) * 0.6f);
+        if (Characters.DriftLine.AlongRoad(_player.Position, travel, look, anywhere: true) is not { } line) return 0f;
+        var aim = line.At(line.Length);
+        float diff = Noise.WrapAngle(MathF.Atan2(aim.X - _player.Position.X, aim.Z - _player.Position.Z) - _player.Yaw);
+        return Math.Clamp(-diff * 3f, -1f, 1f); // sterzo a destra = yaw che diminuisce
     }
 
     // ------------------------------------------------------------------ mouse e visuale a piedi

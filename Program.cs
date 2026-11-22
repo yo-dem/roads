@@ -30,6 +30,7 @@ public static class Program
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
     ///   --mouse pixel/s[,finoA]   in auto muove il mouse in orizzontale (sterzo col mouse); ripetibile, tratti in ordine
     ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
+    ///   --pilota secondi          fino a quell'istante lo sterzo tiene da solo l'auto in corsia (per provare le derapate)
     ///   --verifica-strade        genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
     /// </summary>
     public static void Main(string[] args)
@@ -125,6 +126,9 @@ public static class Program
                     break;
                 case "--banchina":
                     d.Platform = true;
+                    break;
+                case "--pilota" when i + 1 < args.Length:
+                    d.PilotUntil = float.Parse(args[++i], inv);
                     break;
                 case "--verifica-strade":
                     d.VerifyRoads = true;
