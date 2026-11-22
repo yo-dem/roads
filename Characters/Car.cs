@@ -302,11 +302,12 @@ public sealed class Car : IDisposable
     // Contro un ostacolo fisso (albero, muro, treno, riva) o molto pesante (una grossa roccia) l'auto rimbalza via
     // con una velocità proporzionale a quella d'impatto (la parte diretta contro l'ostacolo). Il rimbalzo è una
     // velocità a parte (_knock) che si somma alla marcia e si smorza da sola, come gomme che strisciano.
-    private const float BounceRestitution = 0.45f; // quota della velocità d'impatto restituita
+    private const float BounceRestitution = 0.55f; // quota della velocità d'impatto restituita
     private const float BounceMinImpact = 1.5f;    // sotto questa velocità d'impatto niente rimbalzo (appoggiarsi non fa saltellare)
     private const float BounceMax = 7f;            // tetto della velocità di rimbalzo
-    private const float KnockFriction = 6f;        // unità/s²: rallentamento del rimbalzo
+    private const float KnockFriction = 5f;        // unità/s²: rallentamento del rimbalzo
     private Vector3 _knock;
+    private float _stun; // dopo un urto, per un attimo il gas non spinge (altrimenti rimanderebbe subito l'auto contro il muro)
 
     /// <summary>Il cerchio della carrozzeria in <paramref name="c"/> sta su terreno libero?</summary>
     private static bool Free(WorldMap world, Vector3 c) =>
@@ -344,7 +345,14 @@ public sealed class Car : IDisposable
         if (ObstacleNormal(world, tried, yaw) is not { } n) return false;
         float impact = -Vector3.Dot(velocity, n); // quanto si andava dritti contro l'ostacolo
         if (impact < BounceMinImpact) return false;
-        _knock = n * MathF.Min(impact * BounceRestitution, BounceMax);
+        // La marcia perde la parte diretta contro l'ostacolo (tutta se lo si prende in pieno, poca di striscio),
+        // altrimenti continuerebbe a spingere l'auto contro il muro annullando il rimbalzo
+        Vector3 drive = Dir(_travelYaw) * MathF.Sign(_speed);
+        float into = MathF.Max(0f, -Vector3.Dot(drive, n));
+        _speed *= (1f - into) * (1f - into);
+        _stun = Math.Clamp(impact * 0.05f, 0.15f, 0.5f);
+        // Del rimbalzo precedente resta solo la parte lungo il muro; quella nuova è proporzionale all'impatto
+        _knock = _knock - n * Vector3.Dot(_knock, n) + n * MathF.Min(impact * BounceRestitution, BounceMax);
         fx.Dust(Position - n * (HullOffset + HullRadius) * 0.8f + new Vector3(0f, 0.3f, 0f), impact > 6f ? 5 : 3);
         return true;
     }
@@ -473,6 +481,7 @@ public sealed class Car : IDisposable
         else if (_gasIn < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
         else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
         if (handbrake) { wantSpeed = 0f; coasting = true; }
+        if (_stun > 0f) { _stun -= dt; wantSpeed = 0f; coasting = true; } // appena rimbalzati: il motore non spinge
 
         // --- Ruote che sterzano progressivamente, accelerazione e frenata lineari
         // Le ruote arrivano a fine corsa in un tempo che cresce con la velocità: pronte da fermi, calme in velocità
