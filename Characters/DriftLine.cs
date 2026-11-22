@@ -12,12 +12,13 @@ namespace Roads.Characters;
 public sealed class DriftLine
 {
     private const float Step = 0.5f;          // passo dei punti lungo la linea
-    private const float TurnWindow = 24f;     // l'aiuto si attiva solo entro questa distanza da un incrocio
+    private const float TurnWindow = 40f;     // la derapata in curva vede un incrocio entro questa distanza
     private const float ExitLength = 26f;     // tratto di strada dopo la curva
     private const float MaxOffRoad = 2.8f;    // oltre questa distanza dalla mezzeria non si è "in strada"
     private const float DeadEndOverrun = 1.2f; // in fondo a un vicolo cieco si può scivolare fin poco oltre il centro dello slargo
     private const float StraightDot = 0.8f;   // un'uscita è "dritto" se devia meno di ~37°
     private const float SideDot = 0.3f;       // un'uscita è a destra/sinistra se ci punta almeno così
+    private const float HairpinDot = -0.55f;  // oltre ~125° rispetto a dove si va è un gomito, non una svolta
     private const float UTurnJunctionMargin = 3f; // niente inversione guidata se un incrocio è più vicino di scivolata + questo
     private const float UTurnShortest = 2.6f;    // sotto questo spazio di scivolata niente inversione guidata
 
@@ -154,26 +155,44 @@ public sealed class DriftLine
     public static DriftLine? Plan(Vector3 pos, Vector3 travel, float steer)
     {
         if (!Locate(pos, travel, out var c)) return null;
-
-        // Prossimo incrocio davanti (attraverso i nodi dove la via prosegue soltanto)
-        var probe = new DriftLine();
-        probe.Follow(c, TurnWindow, stopAtJunction: true, out var atHub, out _);
-        var hub = atHub.Ahead;
-        if (atHub.ToAhead > 0.01f || hub.Degree < 2 || (hub.Degree == 2 && !hub.Piazza)) return null;
-        float hubDist = probe.Length;
-        if (hubDist >= TurnWindow) return null;
-
-        // La svolta dal lato dello sterzo (se da quel lato ce n'è più d'una, la più netta). Nessuna: niente curva.
-        Vector2 travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
         float want = steer > 0.3f ? 1f : steer < -0.3f ? -1f : 0f;
         if (want == 0f) return null;
-        var side = Exits(hub, atHub.Edge, travelIn).Where(x => want * x.Right > SideDot).ToList();
-        if (side.Count == 0) return null;
-        var turn = side.MaxBy(x => want * x.Right);
+
+        // La prima svolta dal lato dello sterzo entro la finestra: agli incroci che da quel lato non ne hanno si
+        // prosegue dritti e si guarda il successivo. Da quel lato si prende la svolta più netta, ma non i gomiti
+        // (strade che tornano indietro): quelli non sono una svolta.
+        var probe = new DriftLine();
+        var from = c;
+        Cursor atHub;
+        RoadNode hub;
+        Vector2 travelIn;
+        (RoadEdge Edge, Vector2 Dir, float Ahead, float Right) turn;
+        while (true)
+        {
+            probe.Follow(from, TurnWindow - probe.Length, stopAtJunction: true, out atHub, out _);
+            hub = atHub.Ahead;
+            if (atHub.ToAhead > 0.01f || hub.Degree < 2 || (hub.Degree == 2 && !hub.Piazza) || probe.Length >= TurnWindow)
+                return null;
+            travelIn = atHub.Edge.Tangent(atHub.Dir > 0f ? atHub.Edge.Length : 0f) * atHub.Dir;
+            var exits = Exits(hub, atHub.Edge, travelIn).ToList();
+            var side = exits.Where(x => want * x.Right > SideDot && x.Ahead > HairpinDot).ToList();
+            if (side.Count > 0)
+            {
+                turn = side.MaxBy(x => want * x.Right);
+                break;
+            }
+            var straight = exits.Where(x => x.Ahead > StraightDot).OrderByDescending(x => x.Ahead).ToList();
+            if (straight.Count == 0) return null; // da qui non si prosegue dritti: niente svolta davanti
+            var next = straight[0].Edge;
+            float nd = next.A == hub ? 1f : -1f;
+            from = new Cursor(next, next.A == hub ? 0f : next.Length, nd, NearestLane(next, nd, atHub.Lane));
+        }
+        float hubDist = probe.Length;
 
         var line = new DriftLine { HubAhead = true, TurnSign = turn.Right >= 0f ? 1f : -1f };
         float reach = hub.HubRadius + 0.9f; // la curva parte e finisce poco fuori dallo slargo
-        line.Follow(c, MathF.Max(hubDist - reach, 0f), stopAtJunction: true, out _, out _);
+        // Fin quasi all'incrocio scelto, passando dritti per quelli prima
+        line.Follow(c, MathF.Max(hubDist - reach, 0f), stopAtJunction: false, out _, out _);
         Vector3 p0 = line._points.Count > 0 ? line._points[^1] : To3(c.PointAt(c.S));
         // Corsia d'uscita: girando a destra la più esterna, a sinistra la più interna (come si fa davvero)
         float exitDir = turn.Edge.A == hub ? 1f : -1f;

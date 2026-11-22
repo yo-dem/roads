@@ -41,12 +41,11 @@ public sealed class Car : IDisposable
     private const float Grip = 28f;               // 1/s: rapidità con cui la marcia segue il muso
     private const float DriftMinSpeed = 2.5f;     // sotto questa velocità il freno a mano frena e basta
     private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano (senza manovra)
-    private const float DecideWindow = 0.15f;     // s: se si sterza subito dopo aver tirato il freno a mano vale lo stesso
+    private const float DecideWindow = 0.5f;      // s: spazio e sterzo valgono in qualsiasi ordine, entro questo tempo
 
     // Derapata in curva: l'auto segue la traiettoria della strada (DriftLine) e si immette nella nuova strada
     // dalla parte dello sterzo, di traverso ma sempre in corsia
     private const float CornerMinSpeed = 5f;         // velocità minima per la derapata in curva
-    private const float CornerMargin = 2.5f;         // anticipo minimo oltre lo spazio di frenata
     private const float AssistFullSpeed = 9f;        // da questa velocità in su la derapata è piena (traverso massimo)
     private const float AssistCornerSpeedMin = 5f;   // velocità in curva: almeno questa...
     private const float AssistCornerSpeedMax = 7.5f; // ...e al massimo questa (si frena prima dell'incrocio)
@@ -158,8 +157,8 @@ public sealed class Car : IDisposable
     /// <summary>
     /// La decisione, presa una volta sola quando si tira il freno a mano sterzando (lato <paramref name="side"/>):
     /// <list type="number">
-    /// <item>da quel lato c'è una strada in cui svoltare, la velocità è giusta e c'è abbastanza anticipo per frenare
-    /// fino alla velocità di curva: derapata che immette nella nuova strada;</item>
+    /// <item>entro 40 unità c'è una strada in cui svoltare da quel lato e si va almeno a velocità 5: derapata che
+    /// immette nella nuova strada (presa presto si aspetta l'incrocio, presa tardi si frena forte e si svolta lo stesso);</item>
     /// <item>davanti la strada continua senza incroci (sul viale: nella propria metà carreggiata): inversione a U
     /// completa nella carreggiata in cui si è;</item>
     /// <item>in tutti gli altri casi: derapata libera, l'auto si mette di traverso e si ferma.</item>
@@ -170,7 +169,7 @@ public sealed class Car : IDisposable
         Vector3 travel = Dir(_travelYaw);
         _driftTime = 0f;
         if (side != 0f && _speed >= CornerMinSpeed
-            && DriftLine.Plan(Position, travel, side) is { } corner && corner.TurnSign == side && InTime(corner))
+            && DriftLine.Plan(Position, travel, side) is { } corner && corner.TurnSign == side)
         {
             _manoeuvre = Manoeuvre.Corner;
             _driftPower = Noise.Smooth(CornerMinSpeed, AssistFullSpeed, _speed); // piano: poco di traverso
@@ -204,17 +203,6 @@ public sealed class Car : IDisposable
         _slideBase = Yaw;
         _slideTravel = _travelYaw;
         _slideDecel = MathF.Max(_speed / SlideTime, 4f); // si ferma in circa SlideTime secondi
-    }
-
-    /// <summary>
-    /// C'è il giusto anticipo per la curva? Davanti all'inizio della curva serve lo spazio per frenare fino alla
-    /// velocità di curva, più un margine; troppo lontano no (la linea arriva a un incrocio solo entro la sua finestra).
-    /// </summary>
-    private bool InTime(DriftLine line)
-    {
-        float lead = line.CornerStart - line.Project(Position);
-        float brake = MathF.Max(0f, _speed * _speed - AssistCornerSpeedMax * AssistCornerSpeedMax) / (2f * AssistBrake);
-        return lead >= brake + CornerMargin;
     }
 
     /// <summary>Freno a mano tirato (spazio): in velocità, con lo sterzo, fa partire la derapata.</summary>
@@ -478,10 +466,12 @@ public sealed class Car : IDisposable
         bool brakePedal = _gasIn < -0.1f && _speed > 0.3f;
         _brakeHold = brakePedal ? _brakeHold + dt : 0f;
         WheelsLocked = brakePedal && _brakeHold > BrakeLockTime && _speed > 1f;
-        if (_manoeuvre == Manoeuvre.None)
+        // (mentre si aspetta lo sterzo per decidere la manovra la velocità resta quella: nessuna penalità)
+        if (_manoeuvre == Manoeuvre.None && _decide < 0f)
         {
             _speed = MoveTowards(_speed, wantSpeed, (coasting ? Coast : braking ? (WheelsLocked ? BrakeLocked : Brake) : push) * dt);
-            if (handbrake) _speed = MoveTowards(_speed, 0f, HandbrakeDecel * dt); // il freno a mano frena
+            // il freno a mano frena
+            if (handbrake) _speed = MoveTowards(_speed, 0f, HandbrakeDecel * dt);
         }
         UpdateGearbox(dt);
         _accel = (_speed - prevSpeed) / MathF.Max(dt, 1e-4f);
@@ -551,8 +541,12 @@ public sealed class Car : IDisposable
             if (_lineU < line.CornerEnd)
             {
                 float cornerSpeed = Math.Clamp(_speed, AssistCornerSpeedMin, AssistCornerSpeedMax);
-                if (_lineU > line.CornerStart - _speed * 0.9f && _speed > cornerSpeed)
-                    _speed = MoveTowards(_speed, cornerSpeed, AssistBrake * dt);
+                // Si frena quanto serve per arrivare alla velocità di curva all'inizio della curva: con calma se si è
+                // presa per tempo, forte se si è tirato il freno a mano tardi (niente "troppo tardi": si svolta comunque)
+                float lead = line.CornerStart - _lineU;
+                float need = lead > 0.3f ? (_speed * _speed - cornerSpeed * cornerSpeed) / (2f * lead) : float.MaxValue;
+                if (_speed > cornerSpeed && (_lineU > line.CornerStart - _speed * 0.9f || need > AssistBrake))
+                    _speed = MoveTowards(_speed, cornerSpeed, MathF.Max(AssistBrake, need) * dt);
                 // Fino alla curva e in curva la velocità non crolla sotto quella giusta (si attraversa l'incrocio)
                 _speed = MathF.Max(_speed, MathF.Min(AssistCornerSpeedMin, _speed + 6f * dt));
             }
