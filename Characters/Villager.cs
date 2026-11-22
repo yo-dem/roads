@@ -129,6 +129,8 @@ public sealed class Villager : IDisposable
         Position = from;
         Yaw = yaw;
         _velocity = Vector3.Zero;
+        _groundY = to.Y;
+        _air = _vy = 0f;
     }
 
     /// <summary>Rientra in auto: saltello verso <paramref name="door"/> rimpicciolendo, poi sparisce.</summary>
@@ -141,6 +143,23 @@ public sealed class Villager : IDisposable
         _velocity = Vector3.Zero;
         Vector3 d = Flat(door - Position);
         if (d.LengthSquared() > 1e-4f) Yaw = MathF.Atan2(d.X, d.Z);
+    }
+
+    // ------------------------------------------------------------------ salto
+
+    private const float JumpSpeed = 3.4f, Gravity = 11f;
+    private float _air, _vy, _airTime; // quota sopra il terreno, velocità verticale, tempo in aria
+    private float _groundY;
+
+    /// <summary>È in aria (sta saltando)?</summary>
+    public bool Airborne => _air > 0f || _vy > 0f;
+
+    /// <summary>Salta, se ha i piedi per terra (spazio).</summary>
+    public void Jump()
+    {
+        if (Hidden || Busy || Airborne) return;
+        _vy = JumpSpeed;
+        _airTime = 0f;
     }
 
     /// <summary>
@@ -228,7 +247,21 @@ public sealed class Villager : IDisposable
             }
             Position = p;
         }
-        Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
+        // Terreno sotto i piedi (morbido), più il salto: su con JumpSpeed, giù con la gravità, polvere all'atterraggio
+        _groundY = Noise.Lerp(_groundY == 0f ? Position.Y : _groundY, world.GroundHeight(Position), Noise.Damp(25f, dt));
+        if (Airborne)
+        {
+            _airTime += dt;
+            _vy -= Gravity * dt;
+            _air += _vy * dt;
+            if (_air <= 0f)
+            {
+                _air = 0f;
+                _vy = 0f;
+                fx.Dust(Position with { Y = _groundY }, 3);
+            }
+        }
+        Position.Y = _groundY + _air;
 
         // Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità
         float speed = new Vector2(_velocity.X, _velocity.Z).Length();
@@ -270,6 +303,13 @@ public sealed class Villager : IDisposable
         }
         // La corsa originale solleva il corpo di 0.2 a ogni passo (un quarto dell'altezza): troppo saltellante
         _pose.ScaleHeight(_rootNode, Noise.Lerp(1f, 0.3f, _sprintWeight), _model.RestTranslation(_rootNode).Y);
+        if (Airborne && _jump is { } jumpAir)
+        {
+            // In aria: la posa del salto, che sale nel primo istante e resta finché non si atterra
+            float flight = 2f * JumpSpeed / Gravity;
+            _model.Sample(jumpAir, MathF.Min(_airTime / flight, 0.99f) * jumpAir.Duration, _layer);
+            GlbModel.Blend(_pose, _layer, MathF.Min(1f, _airTime * 12f));
+        }
         if (_hop < 1f && _jump is { } jump)
         {
             // Durante il saltello dentro/fuori dall'auto: posa del salto

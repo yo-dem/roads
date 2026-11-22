@@ -34,7 +34,20 @@ public sealed class IsoCamera
     public float Chase { get; private set; }
 
     public float EffectiveYaw => Yaw + Noise.WrapAngle(_chaseYaw - Yaw) * Chase;
-    public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, WalkPitch, Walk), Chase);
+    public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, _walkPitch, Walk), Chase);
+
+    // A piedi la visuale si gira col mouse attorno al personaggio (non si rimette da sola alle sue spalle)
+    private float _walkPitch = WalkPitch;
+
+    /// <summary>
+    /// Ruota la visuale a piedi attorno al personaggio: <paramref name="dYaw"/> in orizzontale, <paramref name="dPitch"/>
+    /// in verticale (da quasi rasoterra, per guardare il paesaggio, a quasi dall'alto).
+    /// </summary>
+    public void Orbit(float dYaw, float dPitch)
+    {
+        _chaseYaw += dYaw;
+        _walkPitch = Math.Clamp(_walkPitch + dPitch, 0.03f, 1.25f);
+    }
     public float EffectiveDistance => _eye is { } eye
         ? Vector3.Distance(eye, Target)
         : Noise.Lerp(Distance, Noise.Lerp(ChaseDistance, WalkDistance, Walk), Chase);
@@ -118,7 +131,7 @@ public sealed class IsoCamera
 
         // Alle spalle dell'auto: la camera sta dalla parte opposta al muso
         float behind = heading + MathF.PI;
-        _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(4f, dt);
+        if (!walk) _chaseYaw += Noise.WrapAngle(behind - _chaseYaw) * Noise.Damp(4f, dt); // a piedi la gira il mouse
 
         Vector3 aim = follow + new Vector3(0, Noise.Lerp(0.8f, Noise.Lerp(ChaseLift, WalkLift, Walk), Chase), 0);
         Target = Vector3.Lerp(Target, aim, Noise.Damp(Noise.Lerp(5f, 9f, Chase), dt));

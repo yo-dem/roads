@@ -40,8 +40,12 @@ public static class Shaders
             float dist = length(a + ab * t - base.xz);         // distanza orizzontale raggio-asse
             float rayY = mix(uCameraPos.y, uFocus.y, t);       // quota del raggio in quel punto
             float r = aObject.z;
-            return (1.0 - smoothstep(r * 0.7 + 0.3, r + 1.4, dist))
-                 * (1.0 - smoothstep(top - 0.3, top + 0.8, rayY));
+            float onLine = (1.0 - smoothstep(r * 0.7 + 0.3, r + 1.4, dist))
+                         * (1.0 - smoothstep(top - 0.3, top + 0.8, rayY));
+            // Anche ciò che sta addosso alla camera (girando la visuale a piedi ci si finirebbe dentro)
+            float nearCam = (1.0 - smoothstep(r + 0.4, r + 1.8, length(base.xz - a)))
+                          * (1.0 - smoothstep(top, top + 0.6, uCameraPos.y));
+            return max(onLine, nearCam);
         }
 
         void main()

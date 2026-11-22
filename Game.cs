@@ -35,6 +35,8 @@ public sealed class DebugOptions
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
+    public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
+    public List<(Vector2 Move, float Until)> Moves { get; } = new(); // WASD simulati: X = A/D, Y = S/W (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -106,6 +108,7 @@ public sealed partial class Game : IDisposable
             if (key is Key.Number2 or Key.Keypad2) _farView = true;
             if (key == Key.F && !_onFoot) _player.Headlights = !_player.Headlights; // i fari si comandano solo da dentro l'auto
             if (key is Key.Enter or Key.KeypadEnter) ToggleOnFoot();
+            if (key == Key.Space && _onFoot) _jumpQueued = true; // a piedi lo spazio fa saltare (in auto è il freno a mano)
             if (key == Key.M) _bigMap = !_bigMap; // mappa dell'isola a tutto schermo
             if (key == Key.C) // cambia personaggio (con Shift: il precedente)
             {
@@ -119,14 +122,21 @@ public sealed partial class Game : IDisposable
             mouse.Scroll += (_, wheel) => _camera.Distance = Math.Clamp(_camera.Distance - wheel.Y * 1.2f, 8f, 32f);
             mouse.MouseMove += (_, pos) =>
             {
-                // Tasto destro premuto: trascinando si ruota la visuale attorno al personaggio
+                Vector2 delta = pos - _lastMouse;
+                _lastMouse = pos;
+                if (_mouseSkip) { _mouseSkip = false; return; } // appena catturato/liberato il puntatore salta
+                if (_mouseCaptured)
+                {
+                    // A piedi (e in treno) il mouse gira la visuale, senza tenere premuto niente
+                    LookAround(delta);
+                    return;
+                }
+                // Visuale lontana: tasto destro premuto e trascinando si ruota la visuale
                 if (_rightHeld)
                 {
-                    Vector2 delta = pos - _lastMouse;
                     _camera.Yaw -= delta.X * 0.008f;
                     _camera.Pitch = Math.Clamp(_camera.Pitch + delta.Y * 0.005f, 0.3f, 1.4f);
                 }
-                _lastMouse = pos;
             };
             mouse.MouseDown += (m, button) =>
             {
@@ -241,6 +251,15 @@ public sealed partial class Game : IDisposable
         float steerIn = (_keyboard.IsKeyPressed(Key.Right) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Left) ? 1f : 0f);
         float throttleIn = (_keyboard.IsKeyPressed(Key.Up) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Down) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
+        // A piedi: WASD (e spazio per saltare)
+        float moveX = (_keyboard.IsKeyPressed(Key.D) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.A) ? 1f : 0f);
+        float moveY = (_keyboard.IsKeyPressed(Key.W) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.S) ? 1f : 0f);
+        bool jumpPressed = _jumpQueued || (_debug.Jumps.Count > 0 && _time >= _debug.Jumps[0] && _debug.Jumps.Remove(_debug.Jumps[0]));
+        _jumpQueued = false;
+        if (_debug.Moves.Count > 0 && _time > 0.5f)
+            foreach (var (move, until) in _debug.Moves)
+                if (_time < until) { (moveX, moveY) = (move.X, move.Y); break; }
+        UpdateMouseCapture();
         Vector3 input = Vector3.Zero;
 
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
@@ -269,22 +288,13 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            if (_onTrain) input = Vector3.Zero; // a bordo non si cammina
+            // A piedi si va con WASD rispetto alla visuale (che si gira col mouse): il personaggio si volta da solo
+            // nella direzione in cui cammina. Spazio: salto. (Le frecce servono all'auto.)
+            if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
-            {
-                if (_farView)
-                {
-                    input = _camera.Right * steerIn + _camera.Forward * throttleIn;
-                    _footYaw = _kid.Yaw;
-                }
-                else
-                {
-                    _footYaw -= steerIn * FootTurnRate * dt;
-                    input = new Vector3(MathF.Sin(_footYaw), 0f, MathF.Cos(_footYaw)) * throttleIn;
-                    if (throttleIn < 0f) slow = true; // all'indietro piano
-                    face = _footYaw;
-                }
-            }
+                input = _camera.Right * moveX + _camera.Forward * moveY;
+            if (!_onTrain && jumpPressed) _kid.Jump();
+            _footYaw = _kid.Yaw;
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
             if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, face);
@@ -295,7 +305,7 @@ public sealed partial class Game : IDisposable
                 _onTrain = true;
                 _seat = -1;
                 _cabin = new Vector2(0f, Trains.DoorZ - 0.4f);
-                _cabinYaw = MathF.PI;
+                _cabinYaw = _cabinLook = MathF.PI;
                 if (_trains != null) _trains.Inside = true;
                 Console.WriteLine("In treno");
             }
@@ -319,7 +329,7 @@ public sealed partial class Game : IDisposable
         if (_trains != null)
         {
             _trains.PushOut(ref _player.Position, 1.05f);
-            if (_onTrain) RideTrain(dt, steerIn, throttleIn);
+            if (_onTrain) RideTrain(dt, moveX, moveY);
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
         Zone? spawned = _world.Update(dt, ActivePos);
@@ -728,7 +738,7 @@ public sealed partial class Game : IDisposable
             {
                 var s = Trains.Seats[_seat];
                 _cabin = new Vector2(0f, s.Z + 0.1f);
-                _cabinYaw = 0f;
+                _cabinYaw = _cabinLook = 0f;
                 _seat = -1;
                 return;
             }
@@ -736,7 +746,7 @@ public sealed partial class Game : IDisposable
             if (near >= 0)
             {
                 _seat = near;
-                _lookPan = 0f;
+                _lookPan = _lookTilt = 0f;
                 return;
             }
             if (_cabin.Y > Trains.DoorZ - 0.6f && _trains.AlightPoint(out var spot, out float yaw))
@@ -837,6 +847,39 @@ public sealed partial class Game : IDisposable
                           + $"{crossTurn} oltre lo spartitraffico, {intoHub} dentro un incrocio, {crossAfter} con l'aiuto in corsia che porta di là");
     }
 
+    // ------------------------------------------------------------------ mouse e visuale a piedi
+
+    private bool _mouseCaptured, _mouseSkip, _jumpQueued;
+    private const float MouseYaw = 0.0045f, MousePitch = 0.0032f;
+
+    /// <summary>
+    /// A piedi (visuale da dietro) e in treno il puntatore è catturato: il mouse gira la visuale. Si libera con la
+    /// mappa aperta (per cliccarci), nella visuale lontana, in auto e se la finestra non è attiva.
+    /// </summary>
+    private void UpdateMouseCapture()
+    {
+        // (nelle prove automatiche con gli screenshot il puntatore resta libero)
+        bool want = _onFoot && !_farView && !_bigMap && _window.IsVisible && _debug.Shots.Count == 0;
+        if (want == _mouseCaptured) return;
+        _mouseCaptured = want;
+        _mouseSkip = true;
+        foreach (var mouse in _input.Mice)
+            mouse.Cursor.CursorMode = !want ? CursorMode.Normal
+                : mouse.Cursor.IsSupported(CursorMode.Raw) ? CursorMode.Raw : CursorMode.Disabled;
+    }
+
+    /// <summary>Il mouse ha mosso la visuale: attorno al personaggio, nella carrozza o seduti al finestrino.</summary>
+    private void LookAround(Vector2 delta)
+    {
+        if (_onTrain && _seat >= 0)
+        {
+            _lookPan = Math.Clamp(_lookPan - delta.X * MouseYaw, -1.4f, 1.4f);
+            _lookTilt = Math.Clamp(_lookTilt - delta.Y * MousePitch, -0.6f, 0.5f);
+        }
+        else if (_onTrain) _cabinLook -= delta.X * MouseYaw;
+        else _camera.Orbit(-delta.X * MouseYaw, delta.Y * MousePitch);
+    }
+
     // ------------------------------------------------------------------ a bordo del treno
 
     private int _seat = -1;          // posto occupato (-1 in piedi)
@@ -861,12 +904,15 @@ public sealed partial class Game : IDisposable
         return best;
     }
 
+    private float _cabinLook = MathF.PI; // a bordo, in piedi: dove si guarda nella carrozza (0 = verso la marcia)
+    private float _lookTilt;             // seduti: sguardo più su o più giù
+
     /// <summary>
-    /// A bordo: in piedi si cammina nel corridoio come a piedi (frecce da "mini auto") e la camera segue da dietro,
-    /// dentro la carrozza; seduti la visuale è dagli occhi verso il finestrino e le frecce destra/sinistra girano lo
-    /// sguardo. Tutto in coordinate della carrozza, che poi si portano nel mondo: il treno si muove, noi con lui.
+    /// A bordo: in piedi si cammina nel corridoio con WASD rispetto a dove si guarda (il mouse gira lo sguardo) e la
+    /// camera segue da dietro, dentro la carrozza; seduti la visuale è dagli occhi verso il finestrino e il mouse gira
+    /// lo sguardo. Tutto in coordinate della carrozza, che poi si portano nel mondo: il treno si muove, noi con lui.
     /// </summary>
-    private void RideTrain(float dt, float steerIn, float throttleIn)
+    private void RideTrain(float dt, float moveX, float moveY)
     {
         if (_trains == null) return;
         var m = _trains.RideMatrix;
@@ -876,11 +922,11 @@ public sealed partial class Game : IDisposable
         if (_seat >= 0)
         {
             var s = Trains.Seats[_seat];
-            _lookPan = Math.Clamp(_lookPan - steerIn * 1.5f * dt, -1.3f, 1.3f);
-            // Occhi del personaggio seduto, sguardo fuori dal finestrino (girabile verso avanti o indietro)
+            // Occhi del personaggio seduto; lo sguardo parte dal finestrino e il mouse lo gira (avanti, indietro, su, giù)
             Vector3 eye = W(s.X - s.Side * 0.12f, Trains.Floor + 0.95f, s.Z - 0.08f);
             float a = _lookPan * s.Side;
-            Vector3 look = W(s.X + s.Side * MathF.Cos(a) * 3f, Trains.Floor + 0.85f, s.Z + MathF.Sin(_lookPan) * s.Side * 3f);
+            Vector3 look = W(s.X + s.Side * MathF.Cos(a) * 3f, Trains.Floor + 0.95f + MathF.Tan(_lookTilt) * 3f,
+                             s.Z + MathF.Sin(_lookPan) * s.Side * 3f);
             _kid.Hide();
             _kid.Position = W(s.X, Trains.Floor + 0.3f, s.Z); // per mappe e caricamento del territorio
             _kid.Yaw = carYaw;
@@ -888,30 +934,37 @@ public sealed partial class Game : IDisposable
             return;
         }
 
-        // In piedi: si gira con destra/sinistra, si va avanti/indietro con su/giù, dentro il corridoio
-        _cabinYaw -= steerIn * FootTurnRate * dt;
-        float speed = throttleIn * (throttleIn > 0f ? 1.3f : 0.7f);
-        var fwd = new Vector2(MathF.Sin(_cabinYaw), MathF.Cos(_cabinYaw));
-        _cabin += fwd * speed * dt;
+        // In piedi: WASD rispetto allo sguardo; il personaggio si volta da solo dove cammina
+        var look2 = new Vector2(MathF.Sin(_cabinLook), MathF.Cos(_cabinLook));
+        var right2 = new Vector2(-look2.Y, look2.X);
+        Vector2 move = look2 * moveY + right2 * moveX;
+        float speed = 0f;
+        if (move.LengthSquared() > 0.01f)
+        {
+            move = Vector2.Normalize(move);
+            speed = 1.3f;
+            _cabinYaw += Noise.WrapAngle(MathF.Atan2(move.X, move.Y) - _cabinYaw) * MathF.Min(1f, 14f * dt);
+            _cabin += move * speed * dt;
+        }
         _cabin.X = Math.Clamp(_cabin.X, -Trains.AisleHalf, Trains.AisleHalf);
         _cabin.Y = Math.Clamp(_cabin.Y, -Trains.CabinEnd, Trains.CabinEnd);
-        _kid.Ride(dt, W(_cabin.X, Trains.Floor, _cabin.Y), carYaw + _cabinYaw, MathF.Abs(speed));
+        _kid.Ride(dt, W(_cabin.X, Trains.Floor, _cabin.Y), carYaw + _cabinYaw, speed);
 
-        // Camera dentro la carrozza: dietro e sopra il personaggio, senza uscire dalle pareti
-        var back = _cabin - fwd * 1.5f;
+        // Camera dentro la carrozza: dietro e sopra il personaggio rispetto allo sguardo, senza uscire dalle pareti
+        var back = _cabin - look2 * 1.5f;
         back.X = Math.Clamp(back.X, -0.75f, 0.75f);
         back.Y = Math.Clamp(back.Y, -Trains.CabinEnd - 0.3f, Trains.CabinEnd + 0.3f);
-        _camera.Fix(W(back.X, Trains.Floor + 1.35f, back.Y), W(_cabin.X + fwd.X * 0.8f, Trains.Floor + 0.55f, _cabin.Y + fwd.Y * 0.8f));
+        _camera.Fix(W(back.X, Trains.Floor + 1.35f, back.Y), W(_cabin.X + look2.X * 0.8f, Trains.Floor + 0.55f, _cabin.Y + look2.Y * 0.8f));
     }
 
     /// <summary>Nel titolo, in treno: cosa si può fare, dove si è fermi e quando si riparte.</summary>
     private string TrainStatus()
     {
         string where = _trains?.StoppedAt is { } st ? $"fermi a {st.Name} (si riparte tra {_trains.DepartsIn:F0} s)" : "in viaggio";
-        string hint = _seat >= 0 ? "seduti: frecce per guardare, Invio per alzarsi"
+        string hint = _seat >= 0 ? "seduti: mouse per guardare, Invio per alzarsi"
             : NearSeat() >= 0 ? "Invio per sedersi"
             : _cabin.Y > Trains.DoorZ - 0.6f && _trains?.StoppedAt != null ? "Invio per scendere"
-            : "frecce per camminare; i sedili ai lati, la porta in fondo verso la locomotiva";
+            : "WASD per camminare, mouse per guardare; i sedili ai lati, la porta in fondo verso la locomotiva";
         return $"  |  in treno, {where}  |  {hint}";
     }
 
