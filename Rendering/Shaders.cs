@@ -36,12 +36,17 @@ public static class Shaders
             vec3 base = (uModel * vec4(aObject.x, aObjectY.x, aObject.y, 1.0)).xyz;
             float top = base.y + (aObjectY.y - aObjectY.x);
             vec2 a = uCameraPos.xz, ab = uFocus.xz - a;
-            float t = clamp(dot(base.xz - a, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
+            float tRaw = dot(base.xz - a, ab) / max(dot(ab, ab), 1e-4);
+            float t = clamp(tRaw, 0.0, 1.0);
             float dist = length(a + ab * t - base.xz);         // distanza orizzontale raggio-asse
             float rayY = mix(uCameraPos.y, uFocus.y, t);       // quota del raggio in quel punto
             float r = aObject.z;
+            // Solo ciò che sta tra la camera e il giocatore lo copre: quello che gli sta davanti (oltre di lui, guardando
+            // dalla camera) il giocatore lo vede, e resta opaco anche se ci è addosso
+            float beyond = (tRaw - 1.0) * length(ab);          // quanto il centro dell'oggetto è oltre il giocatore
             float onLine = (1.0 - smoothstep(r * 0.7 + 0.3, r + 1.4, dist))
-                         * (1.0 - smoothstep(top - 0.3, top + 0.8, rayY));
+                         * (1.0 - smoothstep(top - 0.3, top + 0.8, rayY))
+                         * (1.0 - smoothstep(-0.2, 0.4, beyond));
             // Anche ciò che sta addosso alla camera (girando la visuale a piedi ci si finirebbe dentro)
             float nearCam = (1.0 - smoothstep(r + 0.4, r + 1.8, length(base.xz - a)))
                           * (1.0 - smoothstep(top, top + 0.6, uCameraPos.y));
