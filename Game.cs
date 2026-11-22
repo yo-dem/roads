@@ -247,9 +247,10 @@ public sealed partial class Game : IDisposable
         if (_keyboard.IsKeyPressed(Key.R)) _camera.Yaw += 1.8f * dt; // (E è il clacson)
 
         // Tastiera = guida "da gioco di auto" in entrambe le visuali: sterzo e gas relativi all'auto
-        // Solo frecce (WASD non guidano più)
-        float steerIn = (_keyboard.IsKeyPressed(Key.Right) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Left) ? 1f : 0f);
-        float throttleIn = (_keyboard.IsKeyPressed(Key.Up) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.Down) ? 1f : 0f);
+        // Guida con le frecce o con WASD (W gas, S freno/retro, A/D sterzo): i due insiemi si possono usare insieme
+        bool K(Key a, Key b) => _keyboard.IsKeyPressed(a) || _keyboard.IsKeyPressed(b);
+        float steerIn = (K(Key.Right, Key.D) ? 1f : 0f) - (K(Key.Left, Key.A) ? 1f : 0f);
+        float throttleIn = (K(Key.Up, Key.W) ? 1f : 0f) - (K(Key.Down, Key.S) ? 1f : 0f);
         bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
         // A piedi: WASD (e spazio per saltare)
         float moveX = (_keyboard.IsKeyPressed(Key.D) ? 1f : 0f) - (_keyboard.IsKeyPressed(Key.A) ? 1f : 0f);
