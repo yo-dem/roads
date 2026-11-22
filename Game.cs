@@ -604,6 +604,7 @@ public sealed partial class Game : IDisposable
         SetLamps();
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
+        _lit.SetInt("uOnFoot", _onFoot ? 1 : 0);
 
         _farFog = null;
         SetFog(false);

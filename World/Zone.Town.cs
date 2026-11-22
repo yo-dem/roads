@@ -323,9 +323,10 @@ public sealed partial class Zone
                 mb.AddBox(new Vector3(w * 0.25f, h + 0.7f, -d * 0.15f), new Vector3(0.3f, 0.8f, 0.3f), new Vector3(0.6f, 0.36f, 0.3f));
         }
 
-        mb.EndObject();
+        mb.EndObject(building: true);
         // Le finestre accese sfumano col palazzo: stesso ingombro, non solo quello delle finestre
-        glow.EndObject(new Vector3(-w * 0.5f, -0.6f, -d * 0.5f), new Vector3(w * 0.5f, h + (city ? 0.5f : 1.6f), d * 0.5f));
+        glow.EndObject(new Vector3(-w * 0.5f, -0.6f, -d * 0.5f), new Vector3(w * 0.5f, h + (city ? 0.5f : 1.6f), d * 0.5f),
+                       building: true);
         mb.Transform = old;
         glow.Transform = oldGlow;
     }

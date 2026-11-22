@@ -20,6 +20,7 @@ public static class Shaders
         uniform int uSeeThrough;  // 0 = normale, 1 = scenario opaco, 2 = scenario trasparente
         uniform vec3 uCameraPos;
         uniform vec3 uFocus;      // punto da tenere sempre visibile (il giocatore)
+        uniform int uOnFoot;      // 1 = il giocatore è a piedi (le case non diventano trasparenti)
 
         out vec3 vColor;
         out vec3 vWorld;
@@ -32,7 +33,9 @@ public static class Shaders
         // Dipende solo da dati comuni a tutti i vertici dell'oggetto, quindi vale per l'oggetto intero.
         float objectFade()
         {
-            if (uSeeThrough == 0 || aObject.z <= 0.0) return 0.0;
+            if (uSeeThrough == 0 || aObject.z == 0.0) return 0.0;
+            // Raggio negativo = edificio: a piedi le case restano sempre solide (solo in auto diventano trasparenti)
+            if (aObject.z < 0.0 && uOnFoot == 1) return 0.0;
             vec3 base = (uModel * vec4(aObject.x, aObjectY.x, aObject.y, 1.0)).xyz;
             float top = base.y + (aObjectY.y - aObjectY.x);
             vec2 a = uCameraPos.xz, ab = uFocus.xz - a;
@@ -40,7 +43,7 @@ public static class Shaders
             float t = clamp(tRaw, 0.0, 1.0);
             float dist = length(a + ab * t - base.xz);         // distanza orizzontale raggio-asse
             float rayY = mix(uCameraPos.y, uFocus.y, t);       // quota del raggio in quel punto
-            float r = aObject.z;
+            float r = abs(aObject.z);
             // Solo ciò che sta tra la camera e il giocatore lo copre: quello che gli sta davanti (oltre di lui, guardando
             // dalla camera) il giocatore lo vede, e resta opaco anche se ci è addosso
             float beyond = (tRaw - 1.0) * length(ab);          // quanto il centro dell'oggetto è oltre il giocatore

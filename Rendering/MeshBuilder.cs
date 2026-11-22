@@ -67,15 +67,17 @@ public sealed class MeshBuilder
     /// Chiude l'oggetto e scrive nei suoi vertici il suo ingombro (cilindro verticale), usato dallo shader
     /// per renderlo trasparente per intero quando copre il giocatore.
     /// </summary>
-    public void EndObject() => EndObject(null);
+    /// <param name="building">Edificio: a piedi non diventa trasparente (vedi lo shader).</param>
+    public void EndObject(bool building = false) => EndObject(null, building);
 
     /// <summary>
     /// Come <see cref="EndObject()"/>, ma con un ingombro dato (coordinate prima di <see cref="Transform"/>): serve a
     /// parti staccate di un oggetto (le finestre accese di un palazzo) che devono sfumare insieme a lui.
     /// </summary>
-    public void EndObject(Vector3 boundsMin, Vector3 boundsMax) => EndObject((boundsMin, boundsMax));
+    public void EndObject(Vector3 boundsMin, Vector3 boundsMax, bool building = false) =>
+        EndObject((boundsMin, boundsMax), building);
 
-    private void EndObject((Vector3 Min, Vector3 Max)? bounds)
+    private void EndObject((Vector3 Min, Vector3 Max)? bounds, bool building)
     {
         int start = _objectStart, end = (int)VertexCount;
         _objectStart = -1;
@@ -106,7 +108,7 @@ public sealed class MeshBuilder
             int o = v * ObjectFloats;
             _objects[o] = cx;
             _objects[o + 1] = cz;
-            _objects[o + 2] = radius;
+            _objects[o + 2] = building ? -radius : radius; // il segno distingue gli edifici
             _objects[o + 3] = min.Y;
             _objects[o + 4] = max.Y;
         }
