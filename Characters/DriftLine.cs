@@ -222,9 +222,18 @@ public sealed class DriftLine
     /// Linea lungo la mezzeria della strada su cui si viaggia, per <paramref name="length"/> unità davanti
     /// (per l'inversione a U: l'auto scivola lungo la corsia mentre si gira). Null se non si è in strada.
     /// </summary>
-    public static DriftLine? AlongRoad(Vector3 pos, Vector3 travel, float length)
+    public static DriftLine? AlongRoad(Vector3 pos, Vector3 travel, float length, bool anywhere = false)
     {
         if (!Locate(pos, travel, out var c)) return null;
+        if (anywhere)
+        {
+            // Inversione chiesta col suo comando (spazio + indietro): si fa sempre, anche vicino o dentro un incrocio,
+            // seguendo la propria corsia (agli incroci si va dritti; in fondo a un vicolo ci si ferma)
+            var open = new DriftLine();
+            open.Follow(c, length, stopAtJunction: false, out var stop, out bool closed);
+            if (closed) open.Add(To3(stop.Edge.At(stop.S) + stop.Edge.Tangent(stop.S) * stop.Dir * DeadEndOverrun));
+            return open._points.Count >= 2 ? open : null;
+        }
         // Inversione guidata solo dove è ovvia: lontano dagli incroci, né davanti né sotto l'auto (lì il freno a mano
         // potrebbe voler dire "svolta": derapata libera). Vale su ogni strada, viali e sensi unici compresi.
         if (NearHub(pos)) return null;
@@ -260,6 +269,16 @@ public sealed class DriftLine
         }
         if (line._points.Count < 2) return null;
         // Sul viale la manovra resta nella propria metà carreggiata (lo spartitraffico è un bordo, non si scavalca)
+        return line;
+    }
+
+    /// <summary>Linea dritta da <paramref name="pos"/> nella direzione di marcia (inversione fuori strada).</summary>
+    public static DriftLine Straight(Vector3 pos, Vector3 travel, float length)
+    {
+        var line = new DriftLine();
+        var d = Vector3.Normalize(new Vector3(travel.X, 0f, travel.Z));
+        var p = new Vector3(pos.X, 0f, pos.Z);
+        for (float t = 0f; t <= length + 2f; t += Step) line.Add(p + d * t);
         return line;
     }
 

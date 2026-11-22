@@ -41,7 +41,8 @@ public sealed class Car : IDisposable
     private const float Grip = 28f;               // 1/s: rapidità con cui la marcia segue il muso
     private const float DriftMinSpeed = 2.5f;     // sotto questa velocità il freno a mano frena e basta
     private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano (senza manovra)
-    private const float DecideWindow = 0.5f;      // s: spazio e sterzo valgono in qualsiasi ordine, entro questo tempo
+    private const float DecideWindow = 0.5f;      // s: spazio e l'altro tasto valgono in qualsiasi ordine, entro questo tempo
+    private const float SteerGrace = 0.08f;       // s: lo sterzo decide dopo questo istante (se insieme c'è indietro, è un'inversione)
 
     // Derapata in curva: l'auto segue la traiettoria della strada (DriftLine) e si immette nella nuova strada
     // dalla parte dello sterzo, di traverso ma sempre in corsia
@@ -56,12 +57,10 @@ public sealed class Car : IDisposable
     private const float AssistBodyRate = 14f;        // 1/s: prontezza della carrozzeria nel mettersi di traverso
     private const float DriftBoostMax = 2.2f;        // velocità extra massima in uscita da una derapata lunga
 
-    // Inversione a U (strada senza incroci davanti): l'auto scivola lungo la propria corsia rallentando fino a
+    // Inversione a U (spazio + indietro, sempre): l'auto scivola lungo la propria corsia rallentando fino a
     // fermarsi mentre la carrozzeria gira di 180°, poi riparte nell'altro senso
-    private const float UTurnMinSpeed = 6f;          // velocità minima per la manovra
     private const float UTurnSlideMin = 4f;          // spazio di scivolata (cresce con la velocità)
     private const float UTurnSlideMax = 8f;
-    private const float UTurnSlideShortest = 2.5f;   // in fondo a un vicolo cieco: sotto questo spazio niente inversione
     private const float UTurnExitSpeed = 2.5f;       // a fine giro riparte già con questa velocità nel nuovo senso
 
     // Derapata libera (tutti gli altri casi): l'auto scivola dritta fino a fermarsi in circa SlideTime secondi e la
@@ -155,14 +154,10 @@ public sealed class Car : IDisposable
     private float _slideSide, _slideAngle, _slideBase, _slideTravel, _slideDecel;
 
     /// <summary>
-    /// La decisione, presa una volta sola quando si tira il freno a mano sterzando (lato <paramref name="side"/>):
-    /// <list type="number">
-    /// <item>entro 40 unità c'è una strada in cui svoltare da quel lato e si va almeno a velocità 5: derapata che
-    /// immette nella nuova strada (presa presto si aspetta l'incrocio, presa tardi si frena forte e si svolta lo stesso);</item>
-    /// <item>davanti la strada continua senza incroci (sul viale: nella propria metà carreggiata): inversione a U
-    /// completa nella carreggiata in cui si è;</item>
-    /// <item>in tutti gli altri casi: derapata libera, l'auto si mette di traverso e si ferma.</item>
-    /// </list>
+    /// Spazio + sterzo (lato <paramref name="side"/>): se entro 40 unità c'è una strada in cui svoltare da quel lato e
+    /// si va almeno a velocità 5, derapata che immette nella nuova strada (presa presto si aspetta l'incrocio, presa
+    /// tardi si frena forte e si svolta lo stesso); altrimenti derapata libera, l'auto si mette di traverso e si ferma.
+    /// (L'inversione a U ha il suo comando: spazio + indietro, vedi <see cref="StartUTurn"/>.)
     /// </summary>
     private void StartManoeuvre(float side)
     {
@@ -178,31 +173,36 @@ public sealed class Car : IDisposable
             _lineOffset = Flat(Position - corner.At(_lineU)); // lo scarto dalla traiettoria si riassorbe in fretta
             return;
         }
-        if (side != 0f && _speed >= UTurnMinSpeed)
-        {
-            float length = Math.Clamp(_speed * 0.6f, UTurnSlideMin, UTurnSlideMax);
-            if (DriftLine.AlongRoad(Position, travel, length) is { } along
-                && along.Length - along.Project(Position) is var room && room >= UTurnSlideShortest)
-            {
-                length = MathF.Min(length, room); // in fondo a un vicolo cieco la scivolata si accorcia
-                _manoeuvre = Manoeuvre.UTurn;
-                _line = along;
-                _lineU = along.Project(Position);
-                _lineOffset = Flat(Position - along.At(_lineU));
-                _uturnLength = _lineU + length;
-                _uturnDecel = _speed * _speed / (2f * length); // si ferma esattamente a fine scivolata
-                _uturnTime = 2f * length / _speed;              // durata della scivolata (velocità che cala costante)
-                _uturnSpeed = _speed;
-                _uturnSide = -side;                             // sterzo a destra = giro in senso orario
-                return;
-            }
-        }
         _manoeuvre = Manoeuvre.Slide;
         _slideSide = side;
         _slideAngle = 0f;
         _slideBase = Yaw;
         _slideTravel = _travelYaw;
         _slideDecel = MathF.Max(_speed / SlideTime, 4f); // si ferma in circa SlideTime secondi
+    }
+
+    /// <summary>
+    /// Spazio + indietro: inversione a U, sempre e ovunque. In strada l'auto scivola lungo la propria corsia (sul viale
+    /// nella propria metà; agli incroci dritta), fuori strada dritta; intanto la carrozzeria gira di 180° verso
+    /// sinistra, o dal lato dello sterzo se lo si tiene (<paramref name="side"/>), poi riparte nell'altro senso.
+    /// </summary>
+    private void StartUTurn(float side)
+    {
+        Vector3 travel = Dir(_travelYaw);
+        float length = Math.Clamp(_speed * 0.6f, UTurnSlideMin, UTurnSlideMax);
+        var line = DriftLine.AlongRoad(Position, travel, length, anywhere: true) ?? DriftLine.Straight(Position, travel, length);
+        float room = line.Length - line.Project(Position);
+        length = Math.Clamp(MathF.Min(length, room), 1.5f, UTurnSlideMax); // in fondo a un vicolo la scivolata si accorcia
+        _driftTime = 0f;
+        _manoeuvre = Manoeuvre.UTurn;
+        _line = line;
+        _lineU = line.Project(Position);
+        _lineOffset = Flat(Position - line.At(_lineU));
+        _uturnLength = _lineU + length;
+        _uturnDecel = _speed * _speed / (2f * length); // si ferma esattamente a fine scivolata
+        _uturnTime = 2f * length / _speed;              // durata della scivolata (velocità che cala costante)
+        _uturnSpeed = _speed;
+        _uturnSide = side != 0f ? -side : 1f;           // di serie verso sinistra; sterzo a destra = senso orario
     }
 
     /// <summary>Freno a mano tirato (spazio): in velocità, con lo sterzo, fa partire la derapata.</summary>
@@ -483,15 +483,23 @@ public sealed class Car : IDisposable
         float rpm = Gear < 0 ? MathF.Abs(_speed) / ReverseSpeed * 0.8f : GearRpm(Gear);
         Rpm = MathF.Max(rpm, IdleRpm + (_blockedTimer > 0f ? 0f : 0.2f * Throttle));
 
-        // --- Freno a mano: una sola decisione, presa quando lo si tira (o un attimo dopo, se si sterza appena dopo)
+        // --- Freno a mano: una sola decisione, presa quando lo si tira (o entro mezzo secondo, se l'altro tasto arriva
+        // dopo). Spazio + indietro: inversione a U. Spazio + sterzo: svolta in derapata (o derapata libera).
         if (handbrake && !_prevHandbrake && _manoeuvre == Manoeuvre.None && _speed > DriftMinSpeed) _decide = 0f;
         _prevHandbrake = handbrake;
         if (_decide >= 0f)
         {
             _decide += dt;
             float side = MathF.Abs(_steerIn) > 0.3f ? MathF.Sign(_steerIn) : 0f;
+            bool back = _gasIn < -0.3f;
             if (!handbrake || _speed <= DriftMinSpeed) _decide = -1f;
-            else if (side != 0f || _decide > DecideWindow)
+            else if (back)
+            {
+                _decide = -1f;
+                StartUTurn(side);
+            }
+            // (lo sterzo decide dopo un istante: chi preme indietro insieme allo sterzo vuole l'inversione)
+            else if ((side != 0f && _decide > SteerGrace) || _decide > DecideWindow)
             {
                 _decide = -1f;
                 StartManoeuvre(side);
