@@ -326,32 +326,21 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            // A piedi i comandi sono relativi al personaggio (come l'auto) e la camera gli sta alle spalle:
-            // avanti corre, destra/sinistra curva (da fermo gira sul posto), indietro fa dietrofront (mezzo giro rapido) e,
-            // tenendolo premuto, poi corre nella nuova direzione. Il mouse guarda attorno, poi la camera torna dietro.
+            // A piedi come in GTA: WASD o frecce rispetto alla visuale, e il personaggio si volta da solo dove corre. Ma
+            // indietro non lo fa venire verso la camera: alla pressione si gira e la camera gira con lui (il viso non si
+            // vede); finché indietro resta premuto vale "avanti" nella nuova direzione, rispetto alla visuale girata.
+            // Lasciato indietro, si torna ai comandi rispetto alla camera. Il mouse gira la visuale attorno a lui.
             float? face = null;
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
             {
                 bool back = moveY < -0.3f;
-                if (back && !_backHeld && _aboutFace == 0f)
-                    _aboutFace = MathF.PI * (moveX > 0.3f ? -1f : 1f); // di serie verso sinistra; con destra tenuta, verso destra
-                _backHeld = back;
-                if (_aboutFace != 0f)
-                {
-                    // Dietrofront: gira sul posto (il passo si ferma) in AboutFaceTime
-                    float step = MathF.Sign(_aboutFace) * MathF.Min(MathF.Abs(_aboutFace), MathF.PI / AboutFaceTime * dt);
-                    _footYaw = Noise.WrapAngle(_footYaw + step);
-                    _aboutFace -= step;
-                    if (MathF.Abs(_aboutFace) < 1e-4f) _aboutFace = 0f;
-                }
-                else
-                {
-                    _footYaw = Noise.WrapAngle(_footYaw - moveX * FootTurnRate * dt); // destra = senso orario
-                    float run = back ? -moveY : MathF.Max(0f, moveY); // dopo il dietrofront, indietro tenuto = avanti
-                    input = new Vector3(MathF.Sin(_footYaw), 0f, MathF.Cos(_footYaw)) * run;
-                }
-                face = _footYaw;
+                if (back && _flip == null)
+                    _flip = (-_camera.Forward with { Y = 0f }, -_camera.Right with { Y = 0f }); // la visuale di dopo il giro
+                else if (!back) _flip = null;
+                input = _flip is { } fl
+                    ? Vector3.Normalize(fl.Forward) * -moveY + Vector3.Normalize(fl.Right) * moveX
+                    : _camera.Right * moveX + _camera.Forward * moveY;
             }
             if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
@@ -415,17 +404,19 @@ public sealed partial class Game : IDisposable
         if (!_onTrain)
         {
             _camera.Unfix();
-            // A piedi la camera sta alle spalle del personaggio: se si è guardato attorno col mouse, ci torna dopo un attimo
-            // (subito se si muove o si gira); durante il dietrofront gira con lui
+            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato. Col
+            // dietrofront (indietro premuto) gira subito, insieme al personaggio, fino alla visuale opposta
             _mouseLookIdle += dt;
-            float follow = 0f;
-            if (_onFoot && !_onTrain)
+            Vector3 kv = _kid.Velocity with { Y = 0f };
+            float follow = 0f, heading = _onFoot ? _kid.Yaw : _player.TravelYaw;
+            if (_onFoot && !_onTrain && _flip is { } fl)
             {
-                bool active = _aboutFace != 0f || MathF.Abs(moveX) > 0.1f || MathF.Abs(moveY) > 0.1f;
-                if (_aboutFace != 0f) follow = 3f;
-                else if (_mouseLookIdle > 0.6f) follow = active ? 2.5f : 0.8f;
+                heading = MathF.Atan2(fl.Forward.X, fl.Forward.Z);
+                follow = 4f;
             }
-            _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, _onFoot ? _footYaw : _player.TravelYaw,
+            else if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
+                follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
+            _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, heading,
                            walk: _onFoot, follow: follow);
         }
         UpdateMap(dt);
@@ -1025,10 +1016,8 @@ public sealed partial class Game : IDisposable
 
     private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
 
-    // A piedi: comandi relativi al personaggio (vedi OnUpdate)
-    private const float AboutFaceTime = 0.3f;  // s: durata del dietrofront
-    private float _aboutFace;                  // angolo del dietrofront ancora da girare (0 = nessuno)
-    private bool _backHeld;                    // indietro era già premuto (il dietrofront parte alla pressione)
+    // A piedi: col dietrofront (indietro premuto) la visuale di dopo il giro, rispetto alla quale si corre finché lo si tiene
+    private (Vector3 Forward, Vector3 Right)? _flip;
 
     // ------------------------------------------------------------------ a bordo del treno
 
