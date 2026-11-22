@@ -606,6 +606,7 @@ public sealed partial class Game : IDisposable
         _lit.SetVector3("uCameraPos", _camera.Position);
         _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
         _lit.SetInt("uOnFoot", _onFoot ? 1 : 0);
+        _lit.SetInt("uCamInside", _cameraInside && !_onTrain ? 1 : 0);
 
         _farFog = null;
         SetFog(false);
@@ -1008,29 +1009,43 @@ public sealed partial class Game : IDisposable
     private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
 
     /// <summary>
-    /// La camera non entra in case e punti di riferimento. Lungo la linea dal punto guardato alla camera si cerca il primo
-    /// punto dentro un edificio: lì si ferma. Se così finirebbe addosso al giocatore (muro subito dietro di lui) prima si
-    /// alza, guardando più dall'alto, fino a trovare abbastanza spazio. Aggiorna la camera.
+    /// La camera non entra in case e punti di riferimento. Lungo la linea dalla testa del giocatore (non dal punto guardato,
+    /// che sta un po' avanti nella direzione di corsa e, correndo contro un muro, ci finirebbe dentro) alla camera si cerca
+    /// il primo punto dentro un edificio, e la camera si ferma prima. Ma mai più vicino di una distanza minima, per non
+    /// finire dentro il giocatore: se il muro è più vicino di così, la camera resta dentro l'edificio e lo shader rende
+    /// trasparente quell'edificio (vedi _cameraInside). Si avvicina subito, torna indietro con calma.
     /// </summary>
     private void AvoidWalls(float dt)
     {
-        if (_farView || _camera.Fixed) { _camera.StepLift(0f, dt); _camera.Clip(null, dt); return; }
-        float dist = _camera.EffectiveDistance, need = MathF.Min(dist, 2f);
-        float want = 1.6f; // se nessuna direzione va bene: dall'alto, quasi in verticale
-        foreach (float lift in new[] { 0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.3f, 1.6f })
-            if ((FreeAlong(_camera.BackDir(lift), dist) ?? dist) >= need) { want = lift; break; }
-        float now = _camera.StepLift(want, dt);
-        _camera.Clip(FreeAlong(_camera.BackDir(now), dist), dt);
+        _cameraInside = false;
+        if (_farView || _camera.Fixed) { _camera.ClipPoint = null; _clipDist = float.MaxValue; return; }
+        Vector3 origin = new(ActivePos.X, _camera.Target.Y, ActivePos.Z);
+        Vector3 desired = _camera.DesiredPosition;
+        float len = Vector3.Distance(origin, desired);
+        if (len < 0.01f) { _camera.ClipPoint = null; return; }
+        Vector3 dir = (desired - origin) / len;
+        float minDist = MathF.Min(len, _onFoot ? 1.4f : 3f); // mai dentro il giocatore (o l'auto)
+        float want = FreeAlong(origin, dir, len) is { } free ? MathF.Max(free, minDist) : len;
+        _clipDist = want < MathF.Min(_clipDist, len) ? want : MathF.Min(want, MathF.Min(_clipDist, len) + 5f * dt);
+        if (_clipDist >= len - 0.01f)
+        {
+            _clipDist = float.MaxValue;
+            _camera.ClipPoint = null;
+        }
+        else _camera.ClipPoint = origin + dir * _clipDist;
+        _cameraInside = _world.InsideSolid(_camera.Position, 0.15f);
     }
 
-    /// <summary>Fin dove si può andare dal punto guardato lungo <paramref name="dir"/> senza entrare in un edificio.</summary>
-    private float? FreeAlong(Vector3 dir, float dist)
+    private float _clipDist = float.MaxValue;
+    private bool _cameraInside; // la camera è dentro (o addosso a) un edificio: a piedi solo allora le case sbiadiscono
+
+    /// <summary>Fin dove si può andare da <paramref name="from"/> lungo <paramref name="dir"/> senza entrare in un edificio.</summary>
+    private float? FreeAlong(Vector3 from, Vector3 dir, float dist)
     {
-        const float Margin = 0.12f; // la camera resta un po' fuori dal muro (il piano vicino non lo taglia)
-        Vector3 from = _camera.Target;
-        for (float s = 0.2f; s <= dist; s += 0.15f)
+        const float Margin = 0.3f; // la camera resta un po' fuori dal muro (il piano vicino non lo taglia)
+        for (float s = 0.3f; s <= dist; s += 0.12f)
             if (_world.InsideSolid(from + dir * s, Margin))
-                return MathF.Max(0.2f, s - 0.15f);
+                return MathF.Max(0f, s - 0.12f);
         return null;
     }
 

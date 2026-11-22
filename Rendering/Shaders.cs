@@ -20,7 +20,8 @@ public static class Shaders
         uniform int uSeeThrough;  // 0 = normale, 1 = scenario opaco, 2 = scenario trasparente
         uniform vec3 uCameraPos;
         uniform vec3 uFocus;      // punto da tenere sempre visibile (il giocatore)
-        uniform int uOnFoot;      // 1 = il giocatore è a piedi (le case non diventano trasparenti)
+        uniform int uOnFoot;      // 1 = il giocatore è a piedi (le case sbiadiscono solo se la camera ci finisce dentro)
+        uniform int uCamInside;   // 1 = la camera è dentro un edificio (il muro era troppo vicino al giocatore)
 
         out vec3 vColor;
         out vec3 vWorld;
@@ -34,8 +35,6 @@ public static class Shaders
         float objectFade()
         {
             if (uSeeThrough == 0 || aObject.z == 0.0) return 0.0;
-            // Raggio negativo = edificio: a piedi le case restano sempre solide (solo in auto diventano trasparenti)
-            if (aObject.z < 0.0 && uOnFoot == 1) return 0.0;
             vec3 base = (uModel * vec4(aObject.x, aObjectY.x, aObject.y, 1.0)).xyz;
             float top = base.y + (aObjectY.y - aObjectY.x);
             vec2 a = uCameraPos.xz, ab = uFocus.xz - a;
@@ -53,6 +52,10 @@ public static class Shaders
             // Anche ciò che sta addosso alla camera (girando la visuale a piedi ci si finirebbe dentro)
             float nearCam = (1.0 - smoothstep(r + 0.4, r + 1.8, length(base.xz - a)))
                           * (1.0 - smoothstep(top, top + 0.6, uCameraPos.y));
+            // Raggio negativo = edificio. A piedi le case restano solide: la camera non ci entra (si avvicina al giocatore).
+            // Solo se il muro è troppo vicino e la camera ci finisce dentro, sbiadisce l'edificio che la contiene
+            if (aObject.z < 0.0 && uOnFoot == 1)
+                return uCamInside == 1 ? 1.0 - smoothstep(r * 1.2, r * 1.5, length(base.xz - a)) : 0.0;
             return max(onLine, nearCam);
         }
 
