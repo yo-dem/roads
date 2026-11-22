@@ -14,6 +14,7 @@ public sealed class Villager : IDisposable
 {
     private const float RunSpeed = 3.0f;    // andatura normale
     private const float SlowSpeed = 1.5f;   // con Shift
+    private const float TurnStep = 0.45f;   // girandosi sul posto: velocità di passo (unità/s) per ogni rad/s di rotazione
     public const float Radius = 0.2f;
     private const float HopTime = 0.32f;    // durata del saltello dentro/fuori dall'auto
 
@@ -231,8 +232,10 @@ public sealed class Villager : IDisposable
         // Levetta del controller: poco inclinata si cammina piano (i tasti danno sempre la velocità piena)
         float amount = MathF.Min(1f, input.Length());
         _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed * amount : 0f), Noise.Damp(14f, dt));
+        float yawBefore = Yaw;
         if (face is { } f) Yaw += Noise.WrapAngle(f - Yaw) * MathF.Min(1f, 20f * dt);
         else if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
+        float turnRate = dt > 0f ? MathF.Abs(Noise.WrapAngle(Yaw - yawBefore)) / dt : 0f; // rad/s
 
         // Movimento con "scivolamento" lungo gli ostacoli
         Vector3 step = new(_velocity.X * dt, 0, _velocity.Z * dt);
@@ -267,8 +270,10 @@ public sealed class Villager : IDisposable
 
         // Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità
         float speed = new Vector2(_velocity.X, _velocity.Z).Length();
-        _move = Noise.Lerp(_move, speed, Noise.Damp(10f, dt));
-        _walkWeight = Noise.Lerp(_walkWeight, Math.Clamp(speed / 0.6f, 0f, 1f), Noise.Damp(12f, dt));
+        // Girandosi sul posto i piedi fanno dei passetti: la rotazione conta come una camminata (mai una corsa)
+        float stepping = MathF.Max(speed, MathF.Min(turnRate * TurnStep, 1.3f));
+        _move = Noise.Lerp(_move, stepping, Noise.Damp(10f, dt));
+        _walkWeight = Noise.Lerp(_walkWeight, Math.Clamp(stepping / 0.6f, 0f, 1f), Noise.Damp(12f, dt));
         _sprintWeight = Noise.Lerp(_sprintWeight, Math.Clamp((speed - 1.7f) / 1.0f, 0f, 1f), Noise.Damp(8f, dt));
         float before01 = _walkTime % 1f;
         _walkTime += dt * MathF.Min(MathF.Max(_move, 0.5f) * 0.95f, 2.1f); // cicli al secondo (due passi per ciclo)
