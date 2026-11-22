@@ -73,10 +73,36 @@ public sealed class IsoCamera
 
     public bool Fixed => _eye != null;
 
-    public Vector3 Position => _eye ?? Target + new Vector3(
-        MathF.Sin(EffectiveYaw) * MathF.Cos(EffectivePitch),
-        MathF.Sin(EffectivePitch),
-        MathF.Cos(EffectiveYaw) * MathF.Cos(EffectivePitch)) * EffectiveDistance;
+    public Vector3 Position => _eye ?? Target + BackDir(_lift) * MathF.Min(EffectiveDistance, _clip);
+
+    /// <summary>
+    /// Direzione dal punto guardato verso la camera, alzata di <paramref name="lift"/> radianti rispetto all'inclinazione
+    /// normale (per scavalcare un muro troppo vicino).
+    /// </summary>
+    public Vector3 BackDir(float lift)
+    {
+        float pitch = MathF.Min(EffectivePitch + lift, 1.555f); // fino a quasi in verticale
+        return new(MathF.Sin(EffectiveYaw) * MathF.Cos(pitch), MathF.Sin(pitch), MathF.Cos(EffectiveYaw) * MathF.Cos(pitch));
+    }
+
+    // Muri: la camera non entra negli edifici. Se dietro il giocatore c'è poco spazio si alza (guarda più dall'alto, _lift)
+    // e si avvicina (_clip): subito, così non si vede mai dentro; quando si libera torna con calma com'era.
+    private float _clip = float.MaxValue, _lift;
+
+    /// <summary>Quanto è alzata ora la camera per i muri: sale subito fino a <paramref name="want"/>, scende piano.</summary>
+    public float StepLift(float want, float dt) =>
+        _lift = want > _lift ? want : MathF.Max(want, _lift - 0.9f * dt);
+
+    /// <summary>
+    /// Il primo ostacolo lungo la linea giocatore → camera è a <paramref name="free"/> dal punto guardato (null: nessuno).
+    /// </summary>
+    public void Clip(float? free, float dt)
+    {
+        float want = free ?? float.MaxValue;
+        float now = MathF.Min(_clip, EffectiveDistance);
+        _clip = want < now ? want : MathF.Min(want, now + 6f * dt);
+        if (free == null && _clip >= EffectiveDistance) _clip = float.MaxValue;
+    }
 
     /// <summary>Direzioni sul piano orizzontale, usate per il movimento relativo alla camera.</summary>
     public Vector3 Forward

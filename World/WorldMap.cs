@@ -165,6 +165,20 @@ public sealed class WorldMap : IDisposable
     public bool IsRoad(Vector3 p) => ZoneAt(p)?.IsRoad(p) ?? false;
 
     /// <summary>
+    /// Il punto (allargato di <paramref name="margin"/>) sta dentro un edificio o un punto di riferimento? Per la camera:
+    /// non deve mai entrarci. Si guardano anche i pezzi accanto (un edificio vicino al bordo può sconfinare).
+    /// </summary>
+    public bool InsideSolid(Vector3 p, float margin)
+    {
+        const float reach = 16f; // metà dell'edificio più grande + margine
+        foreach (var zone in _zones.Values)
+            if (CellDistance(zone.X, zone.Z, p) < margin + reach && zone.InsideBuilding(p, margin)) return true;
+        foreach (var l in GameMap.Current.Landmarks)
+            if (l.Hits(new Vector2(p.X, p.Z), margin)) return true;
+        return false;
+    }
+
+    /// <summary>
     /// Un cerchio in movimento (l'auto) urta rocce e cespugli: li spinge via secondo le masse e restituisce la
     /// propria velocità ridotta. Ritorna la velocità d'impatto più forte (0 se nessun urto) e il punto d'urto.
     /// </summary>

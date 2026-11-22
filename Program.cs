@@ -28,7 +28,7 @@ public static class Program
     ///   --punto x,z               punto da raggiungere già scelto (come un clic sulla mappa)
     ///   --salto secondi           (ripetibile) a piedi preme spazio: salto
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
-    ///   --mouse pixel/s[,finoA]   in auto muove il mouse in orizzontale (sterzo col mouse); ripetibile, tratti in ordine
+    ///   --mouse pixel/s[,finoA]   muove il mouse in orizzontale (in auto sterza, a piedi gira la visuale); ripetibile, tratti in ordine
     ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
     ///   --pilota secondi          fino a quell'istante lo sterzo tiene da solo l'auto in corsia (per provare le derapate)
     ///   --verifica-strade        genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce

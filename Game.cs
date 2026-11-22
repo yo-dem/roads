@@ -297,7 +297,7 @@ public sealed partial class Game : IDisposable
         UpdateMouseCapture();
         // In auto, con la visuale da vicino, anche il mouse sterza (si somma ai tasti)
         steerIn = Math.Clamp(steerIn + MouseSteering(dt), -1f, 1f);
-        if (_debug.MouseSteer.Count > 0 && _time > 0.5f && !_onFoot)
+        if (_debug.MouseSteer.Count > 0 && _time > 0.5f)
             foreach (var (px, until) in _debug.MouseSteer)
                 if (_time < until) { LookAround(new Vector2(px * dt, 0f)); break; }
         Vector3 input = Vector3.Zero;
@@ -407,6 +407,7 @@ public sealed partial class Game : IDisposable
                 follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
             _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, heading,
                            walk: _onFoot, follow: follow);
+            AvoidWalls(dt);
         }
         UpdateMap(dt);
         if (_engine != null) _engine.Horn = !_onFoot && (_keyboard.IsKeyPressed(Key.E) || pad.Horn); // clacson (solo in auto)
@@ -1005,6 +1006,33 @@ public sealed partial class Game : IDisposable
     }
 
     private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
+
+    /// <summary>
+    /// La camera non entra in case e punti di riferimento. Lungo la linea dal punto guardato alla camera si cerca il primo
+    /// punto dentro un edificio: lì si ferma. Se così finirebbe addosso al giocatore (muro subito dietro di lui) prima si
+    /// alza, guardando più dall'alto, fino a trovare abbastanza spazio. Aggiorna la camera.
+    /// </summary>
+    private void AvoidWalls(float dt)
+    {
+        if (_farView || _camera.Fixed) { _camera.StepLift(0f, dt); _camera.Clip(null, dt); return; }
+        float dist = _camera.EffectiveDistance, need = MathF.Min(dist, 2f);
+        float want = 1.6f; // se nessuna direzione va bene: dall'alto, quasi in verticale
+        foreach (float lift in new[] { 0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.3f, 1.6f })
+            if ((FreeAlong(_camera.BackDir(lift), dist) ?? dist) >= need) { want = lift; break; }
+        float now = _camera.StepLift(want, dt);
+        _camera.Clip(FreeAlong(_camera.BackDir(now), dist), dt);
+    }
+
+    /// <summary>Fin dove si può andare dal punto guardato lungo <paramref name="dir"/> senza entrare in un edificio.</summary>
+    private float? FreeAlong(Vector3 dir, float dist)
+    {
+        const float Margin = 0.12f; // la camera resta un po' fuori dal muro (il piano vicino non lo taglia)
+        Vector3 from = _camera.Target;
+        for (float s = 0.2f; s <= dist; s += 0.15f)
+            if (_world.InsideSolid(from + dir * s, Margin))
+                return MathF.Max(0.2f, s - 0.15f);
+        return null;
+    }
 
 
     // ------------------------------------------------------------------ a bordo del treno

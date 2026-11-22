@@ -140,6 +140,7 @@ public sealed partial class Zone
                 BuildBuilding(mb, glow, rng, new Vector3(b.X, baseY, b.Z), st.BuildingYaw, 7.2f, 4.4f, 2.7f, false, new Vector3(0.93f, 0.84f, 0.62f));
                 AddBoxCollider(foot);
                 _buildings.Add(foot);
+                _buildingTops.Add(baseY + 2.7f + 1.8f); // tetto compreso
                 placed.Add((b.X, b.Z, foot.Reach));
             }
         }

@@ -14,6 +14,7 @@ public sealed partial class Zone
 
     private readonly List<Footprint>?[,] _boxBuckets = new List<Footprint>?[BucketCount, BucketCount];
     private readonly List<Footprint> _buildings = new();
+    private readonly List<float> _buildingTops = new(); // quota del tetto di ciascun edificio (stesso ordine)
 
     /// <summary>Registra un ingombro (coordinate locali) in tutti i secchielli che può toccare.</summary>
     private void AddBoxCollider(Footprint f)
@@ -22,6 +23,23 @@ public sealed partial class Zone
         for (int i = BucketIndex(f.Center.X - reach); i <= BucketIndex(f.Center.X + reach); i++)
             for (int j = BucketIndex(f.Center.Y - reach); j <= BucketIndex(f.Center.Y + reach); j++)
                 (_boxBuckets[i, j] ??= new()).Add(f);
+    }
+
+    /// <summary>
+    /// Il punto (coordinate del mondo), allargato di <paramref name="margin"/>, sta dentro un edificio di questo pezzo,
+    /// sotto il tetto? Serve a non far entrare la camera nelle case.
+    /// </summary>
+    public bool InsideBuilding(Vector3 world, float margin)
+    {
+        var p = new Vector2(world.X - Origin.X, world.Z - Origin.Z);
+        for (int i = 0; i < _buildings.Count; i++)
+        {
+            var f = _buildings[i];
+            if (world.Y > _buildingTops[i] + margin) continue;
+            if (Vector2.DistanceSquared(p, f.Center) > (f.Reach + margin) * (f.Reach + margin)) continue;
+            if (f.Hits(p, margin)) return true;
+        }
+        return false;
     }
 
     private bool HitsBox(float x, float z, float radius)
@@ -130,6 +148,7 @@ public sealed partial class Zone
             BuildBuilding(mb, glow, rng, new Vector3(center.X, baseY, center.Z), yaw, w, d, h, city);
             AddBoxCollider(foot);
             _buildings.Add(foot);
+            _buildingTops.Add(baseY + h + (city ? 0.6f : 1.8f)); // tetto compreso
             placed.Add((center.X, center.Z, foot.Reach));
             s += w + (city ? 0.2f + rng.NextSingle() * 0.8f : 1.2f + rng.NextSingle() * 3f);
         }
@@ -181,6 +200,7 @@ public sealed partial class Zone
             BuildBuilding(mb, glow, rng, new Vector3(center.X, baseY, center.Z), yaw, w, d, h, false, walls);
             AddBoxCollider(foot);
             _buildings.Add(foot);
+            _buildingTops.Add(baseY + h + 1.8f); // tetto compreso
             placed.Add((center.X, center.Z, foot.Reach));
         }
     }
