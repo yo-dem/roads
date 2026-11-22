@@ -47,7 +47,7 @@ public sealed partial class Zone
             Radius = radius,
             Mass = kind == Push.Rock ? 3.5f * volume : 0.35f * volume,
             Friction = kind == Push.Rock ? 4.5f : 9f,
-            Restitution = kind == Push.Rock ? 0.15f : 0.05f,
+            Restitution = kind == Push.Rock ? 0.4f : 0.05f,  // una roccia grossa fa rimbalzare l'auto
             IndexStart = indexStart,
             IndexCount = indexCount,
         };

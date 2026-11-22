@@ -73,7 +73,7 @@ public sealed class Car : IDisposable
 
     /// <summary>Velocità con segno (negativa in retromarcia).</summary>
     public float Speed => _speed;
-    public Vector3 Velocity => Dir(_travelYaw) * _speed;
+    public Vector3 Velocity => Dir(_travelYaw) * _speed + _knock;
     public float MaxSpeed => FastSpeed;
     /// <summary>Fari accesi (tasto F).</summary>
     public bool Headlights;
@@ -298,6 +298,57 @@ public sealed class Car : IDisposable
     // proporzione al volume, il cespuglio poco) e l'auto perde la velocità che cede all'oggetto.
     private const float CarMass = 1.5f;
 
+    // ------------------------------------------------------------------ rimbalzo negli urti
+    // Contro un ostacolo fisso (albero, muro, treno, riva) o molto pesante (una grossa roccia) l'auto rimbalza via
+    // con una velocità proporzionale a quella d'impatto (la parte diretta contro l'ostacolo). Il rimbalzo è una
+    // velocità a parte (_knock) che si somma alla marcia e si smorza da sola, come gomme che strisciano.
+    private const float BounceRestitution = 0.45f; // quota della velocità d'impatto restituita
+    private const float BounceMinImpact = 1.5f;    // sotto questa velocità d'impatto niente rimbalzo (appoggiarsi non fa saltellare)
+    private const float BounceMax = 7f;            // tetto della velocità di rimbalzo
+    private const float KnockFriction = 6f;        // unità/s²: rallentamento del rimbalzo
+    private Vector3 _knock;
+
+    /// <summary>Il cerchio della carrozzeria in <paramref name="c"/> sta su terreno libero?</summary>
+    private static bool Free(WorldMap world, Vector3 c) =>
+        world.IsWalkable(c, HullRadius) && !Railway.Current.OnPlatform(new Vector2(c.X, c.Z), HullRadius);
+
+    /// <summary>
+    /// Normale (orizzontale, verso l'esterno) dell'ostacolo che blocca l'auto nella posa tentata: per ogni cerchio
+    /// bloccato si cercano tutt'intorno le direzioni libere e se ne fa la media. Qualunque sia l'ostacolo (cerchio,
+    /// muro ruotato, treno, acqua) la media punta dalla parte in cui c'è posto. Null se non la si trova.
+    /// </summary>
+    private static Vector3? ObstacleNormal(WorldMap world, Vector3 pos, float yaw)
+    {
+        Vector3 f = Dir(yaw) * HullOffset, sum = Vector3.Zero;
+        foreach (var c in new[] { pos + f, pos - f })
+        {
+            if (Free(world, c)) continue;
+            foreach (float reach in new[] { 0.25f, 0.5f })
+            {
+                Vector3 local = Vector3.Zero;
+                for (int i = 0; i < 16; i++)
+                {
+                    float a = i * MathF.Tau / 16f;
+                    Vector3 d = new(MathF.Sin(a), 0f, MathF.Cos(a));
+                    if (Free(world, c + d * reach)) local += d;
+                }
+                if (local.LengthSquared() > 1e-4f) { sum += Vector3.Normalize(local); break; }
+            }
+        }
+        return sum.LengthSquared() > 1e-4f ? Vector3.Normalize(sum) : null;
+    }
+
+    /// <summary>Rimbalzo contro un ostacolo fisso: <paramref name="velocity"/> è la velocità con cui ci si è andati contro.</summary>
+    private bool Bounce(WorldMap world, Particles fx, Vector3 tried, float yaw, Vector3 velocity)
+    {
+        if (ObstacleNormal(world, tried, yaw) is not { } n) return false;
+        float impact = -Vector3.Dot(velocity, n); // quanto si andava dritti contro l'ostacolo
+        if (impact < BounceMinImpact) return false;
+        _knock = n * MathF.Min(impact * BounceRestitution, BounceMax);
+        fx.Dust(Position - n * (HullOffset + HullRadius) * 0.8f + new Vector3(0f, 0.3f, 0f), impact > 6f ? 5 : 3);
+        return true;
+    }
+
     private Vector3 PushObstacles(WorldMap world, Particles fx, Vector3 step, float newYaw, float dt)
     {
         float len = step.Length();
@@ -315,11 +366,18 @@ public sealed class Car : IDisposable
 
         // La velocità ceduta all'oggetto si perde: il passo si accorcia (mai all'indietro)
         Vector2 dir = new Vector2(step.X, step.Z) / len;
-        float kept = MathF.Max(0f, Vector2.Dot(velocity, dir)) * dt;
+        float along = Vector2.Dot(velocity, dir), kept = MathF.Max(0f, along) * dt;
         if (kept < len)
         {
             _speed *= kept / len;
+            _knock *= kept / len;
             step *= kept / len;
+        }
+        // Un oggetto molto più pesante dell'auto la respinge: la velocità che torna indietro diventa rimbalzo
+        if (along < 0f && velocity.Length() > BounceMinImpact * BounceRestitution)
+        {
+            _knock += new Vector3(velocity.X, 0f, velocity.Y);
+            if (_knock.Length() > BounceMax) _knock = Vector3.Normalize(_knock) * BounceMax;
         }
         return step;
     }
@@ -525,8 +583,12 @@ public sealed class Car : IDisposable
             if (MathF.Abs(drift) > MaxDrift) _travelYaw = Noise.WrapAngle(newYaw - MathF.Sign(drift) * MaxDrift);
             yawRate = Noise.WrapAngle(newYaw - Yaw) / MathF.Max(dt, 1e-4f);
         }
-        Vector3 step = railStep ?? Dir(_travelYaw) * (_speed * dt);
+        // Il rimbalzo di un urto si somma alla marcia e si smorza da solo
+        float knock = _knock.Length();
+        _knock = knock > KnockFriction * dt ? _knock * ((knock - KnockFriction * dt) / knock) : Vector3.Zero;
+        Vector3 step = (railStep ?? Dir(_travelYaw) * (_speed * dt)) + _knock * dt;
         step = PushObstacles(world, fx, step, newYaw, dt);
+        Vector3 from = Position;
         float moved = step.LengthSquared() > 0f ? Move(world, step, newYaw) : 0f;
         _yawRate = Noise.Lerp(_yawRate, yawRate, Noise.Damp(10f, dt));
 
@@ -535,7 +597,18 @@ public sealed class Car : IDisposable
         // l'auto restava ferma con la velocità di prima "in memoria" e, appena libera, ripartiva da sola.)
         float expected = step.Length(); // il passo tentato (già ridotto da eventuali oggetti spinti)
         if (expected > 1e-6f && moved < expected * 0.999f)
+        {
             _speed *= moved / expected;
+            _knock *= moved / expected;
+            // Urto forte contro un ostacolo fisso: l'auto rimbalza via (e un'inversione a U in corso finisce lì)
+            if (dt > 0f && Bounce(world, fx, from + step, newYaw, step / dt) && _manoeuvre == Manoeuvre.UTurn)
+            {
+                _manoeuvre = Manoeuvre.None;
+                _line = null;
+                _speed = 0f;
+                _travelYaw = Yaw;
+            }
+        }
 
         // Bloccata mentre vuole muoversi (motore al minimo, fine delle manovre assistite)
         bool pushing = MathF.Abs(wantSpeed) > 0.1f;
