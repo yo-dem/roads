@@ -326,21 +326,15 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            // A piedi come in GTA: WASD o frecce rispetto alla visuale, e il personaggio si volta da solo dove corre. Ma
-            // indietro non lo fa venire verso la camera: alla pressione si gira e la camera gira con lui (il viso non si
-            // vede); finché indietro resta premuto vale "avanti" nella nuova direzione, rispetto alla visuale girata.
-            // Lasciato indietro, si torna ai comandi rispetto alla camera. Il mouse gira la visuale attorno a lui.
+            // A piedi come in GTA: WASD o frecce rispetto alla visuale, e il personaggio si volta da solo dove corre. Con
+            // indietro (S, levetta giù) invece indietreggia: resta di spalle alla camera e cammina all'indietro verso di
+            // lei (anche in diagonale). Il mouse gira la visuale attorno a lui.
             float? face = null;
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
             {
-                bool back = moveY < -0.3f;
-                if (back && _flip == null)
-                    _flip = (-_camera.Forward with { Y = 0f }, -_camera.Right with { Y = 0f }); // la visuale di dopo il giro
-                else if (!back) _flip = null;
-                input = _flip is { } fl
-                    ? Vector3.Normalize(fl.Forward) * -moveY + Vector3.Normalize(fl.Right) * moveX
-                    : _camera.Right * moveX + _camera.Forward * moveY;
+                input = _camera.Right * moveX + _camera.Forward * moveY;
+                if (moveY < -0.3f) face = MathF.Atan2(_camera.Forward.X, _camera.Forward.Z);
             }
             if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
@@ -404,17 +398,12 @@ public sealed partial class Game : IDisposable
         if (!_onTrain)
         {
             _camera.Unfix();
-            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato. Col
-            // dietrofront (indietro premuto) gira subito, insieme al personaggio, fino alla visuale opposta
+            // Come in GTA la camera, se il mouse è fermo, torna piano alle spalle di chi corre in avanti o di lato; quando
+            // invece indietreggia verso la camera non gira: arretra con lui, che resta di spalle
             _mouseLookIdle += dt;
             Vector3 kv = _kid.Velocity with { Y = 0f };
             float follow = 0f, heading = _onFoot ? _kid.Yaw : _player.TravelYaw;
-            if (_onFoot && !_onTrain && _flip is { } fl)
-            {
-                heading = MathF.Atan2(fl.Forward.X, fl.Forward.Z);
-                follow = 4f;
-            }
-            else if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
+            if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
                 follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
             _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, heading,
                            walk: _onFoot, follow: follow);
@@ -1016,8 +1005,6 @@ public sealed partial class Game : IDisposable
 
     private float _mouseLookIdle = 10f; // s dall'ultimo movimento del mouse a piedi
 
-    // A piedi: col dietrofront (indietro premuto) la visuale di dopo il giro, rispetto alla quale si corre finché lo si tiene
-    private (Vector3 Forward, Vector3 Right)? _flip;
 
     // ------------------------------------------------------------------ a bordo del treno
 
