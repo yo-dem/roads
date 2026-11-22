@@ -14,6 +14,7 @@ public sealed class Villager : IDisposable
 {
     private const float RunSpeed = 3.0f;    // andatura normale
     private const float SlowSpeed = 1.5f;   // con Shift
+    private const float BackSpeed = 1.4f;   // indietreggiando
     public const float Radius = 0.2f;
     private const float HopTime = 0.32f;    // durata del saltello dentro/fuori dall'auto
 
@@ -27,6 +28,7 @@ public sealed class Villager : IDisposable
 
     private Vector3 _velocity;
     private float _time, _move;
+    private bool _backward; // sta indietreggiando
 
     // Saltello: da _hopFrom a _hopTo, crescendo (uscita) o rimpicciolendo (entrata)
     private float _hop = 1f;
@@ -230,6 +232,9 @@ public sealed class Villager : IDisposable
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;
         // Levetta del controller: poco inclinata si cammina piano (i tasti danno sempre la velocità piena)
         float amount = MathF.Min(1f, input.Length());
+        // Indietreggiare (guarda da una parte e si muove dalla parte opposta): si cammina, piano, mai di corsa
+        _backward = moving && face is { } fy && Vector3.Dot(dir, new Vector3(MathF.Sin(fy), 0f, MathF.Cos(fy))) < -0.3f;
+        if (_backward) maxSpeed = MathF.Min(maxSpeed, BackSpeed);
         _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed * amount : 0f), Noise.Damp(14f, dt));
         if (face is { } f) Yaw += Noise.WrapAngle(f - Yaw) * MathF.Min(1f, 20f * dt);
         else if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
@@ -269,9 +274,12 @@ public sealed class Villager : IDisposable
         float speed = new Vector2(_velocity.X, _velocity.Z).Length();
         _move = Noise.Lerp(_move, speed, Noise.Damp(10f, dt));
         _walkWeight = Noise.Lerp(_walkWeight, Math.Clamp(speed / 0.6f, 0f, 1f), Noise.Damp(12f, dt));
-        _sprintWeight = Noise.Lerp(_sprintWeight, Math.Clamp((speed - 1.7f) / 1.0f, 0f, 1f), Noise.Damp(8f, dt));
+        _sprintWeight = Noise.Lerp(_sprintWeight, _backward ? 0f : Math.Clamp((speed - 1.7f) / 1.0f, 0f, 1f), Noise.Damp(8f, dt));
         float before01 = _walkTime % 1f;
-        _walkTime += dt * MathF.Min(MathF.Max(_move, 0.5f) * 0.95f, 2.1f); // cicli al secondo (due passi per ciclo)
+        // Cicli al secondo (due passi per ciclo); indietreggiando la camminata va al contrario
+        float cycles = dt * MathF.Min(MathF.Max(_move, 0.5f) * 0.95f, 2.1f);
+        _walkTime += _backward ? -cycles * 1.3f : cycles;
+        if (_walkTime < 0f) _walkTime += 1000f; // resta positivo (le animazioni si campionano col modulo)
         float now01 = _walkTime % 1f;
 
         // Sbuffi di polvere a ogni passo quando corre
