@@ -228,7 +228,9 @@ public sealed class Villager : IDisposable
         bool moving = input.LengthSquared() > 0.01f;
 
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;
-        _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed : 0f), Noise.Damp(14f, dt));
+        // Levetta del controller: poco inclinata si cammina piano (i tasti danno sempre la velocità piena)
+        float amount = MathF.Min(1f, input.Length());
+        _velocity = Vector3.Lerp(_velocity, dir * (moving ? maxSpeed * amount : 0f), Noise.Damp(14f, dt));
         if (face is { } f) Yaw += Noise.WrapAngle(f - Yaw) * MathF.Min(1f, 20f * dt);
         else if (moving) Yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Z) - Yaw) * MathF.Min(1f, 16f * dt);
 

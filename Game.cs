@@ -103,6 +103,7 @@ public sealed partial class Game : IDisposable
         _gl = _window.CreateOpenGL();
         _input = _window.CreateInput();
         _keyboard = _input.Keyboards[0];
+        SetupGamepads();
         _keyboard.KeyDown += (_, key, _) =>
         {
             if (key == Key.Escape) _window.Close();
@@ -278,6 +279,16 @@ public sealed partial class Game : IDisposable
         // A piedi: WASD o frecce (e spazio per saltare)
         float moveX = (K(Key.D, Key.Right) ? 1f : 0f) - (K(Key.A, Key.Left) ? 1f : 0f);
         float moveY = (K(Key.W, Key.Up) ? 1f : 0f) - (K(Key.S, Key.Down) ? 1f : 0f);
+        // Controller (si somma alla tastiera): vedi Game.Gamepad.cs
+        var pad = ReadPad();
+        steerIn = Math.Clamp(steerIn + pad.SteerX, -1f, 1f);
+        throttleIn = Math.Clamp(throttleIn + pad.Gas - pad.Brake, -1f, 1f);
+        slow |= pad.Slow;
+        moveX = Math.Clamp(moveX + pad.MoveX, -1f, 1f);
+        moveY = Math.Clamp(moveY + pad.MoveY, -1f, 1f);
+        PadLook(pad.Look, dt);
+        if (pad.ZoomIn || pad.ZoomOut)
+            _camera.Distance = Math.Clamp(_camera.Distance + (pad.ZoomOut ? 12f : -12f) * dt, 8f, 32f);
         bool jumpPressed = _jumpQueued || (_debug.Jumps.Count > 0 && _time >= _debug.Jumps[0] && _debug.Jumps.Remove(_debug.Jumps[0]));
         _jumpQueued = false;
         if (_debug.Moves.Count > 0 && _time > 0.5f)
@@ -347,7 +358,7 @@ public sealed partial class Game : IDisposable
         {
             // Guida con le frecce; rilasciati i tasti l'auto prosegue per inerzia, senza frenare da sola.
             // Freno a mano (spazio): tirato in velocità con lo sterzo fa entrare in curva in derapata
-            _player.Handbrake = _keyboard.IsKeyPressed(Key.Space)
+            _player.Handbrake = _keyboard.IsKeyPressed(Key.Space) || pad.Handbrake
                                 || (_time >= _debug.HandbrakeFrom && _time < _debug.HandbrakeUntil);
             _player.Update(dt, new Vector2(steerIn, throttleIn), slow, _world, _particles);
         }
@@ -394,7 +405,7 @@ public sealed partial class Game : IDisposable
                            walk: _onFoot, follow: follow);
         }
         UpdateMap(dt);
-        if (_engine != null) _engine.Horn = !_onFoot && _keyboard.IsKeyPressed(Key.E); // clacson (solo in auto)
+        if (_engine != null) _engine.Horn = !_onFoot && (_keyboard.IsKeyPressed(Key.E) || pad.Horn); // clacson (solo in auto)
         _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
 
         _day.Update(dt);

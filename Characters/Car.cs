@@ -480,7 +480,13 @@ public sealed class Car : IDisposable
         float limit = ManualSteerLimit;
         if (handbrake || Sliding) limit = MathF.Max(limit, DriftSteer);
         float wantSteer = -_steerIn * limit; // sterzo a destra = rotazione oraria = yaw che diminuisce
-        if (_gasIn > 0.1f) wantSpeed = maxSpeed;
+        if (_gasIn > 0.1f)
+        {
+            // Gas dosabile (grilletto del controller; i tasti danno sempre tutto gas): a metà corsa, metà velocità.
+            // Oltre quella velocità si rallenta da soli, senza frenare.
+            wantSpeed = maxSpeed * Math.Clamp((_gasIn - 0.1f) / 0.8f, 0f, 1f);
+            if (_speed > wantSpeed) coasting = true;
+        }
         else if (_gasIn < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
         else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
         if (handbrake) { wantSpeed = 0f; coasting = true; }
