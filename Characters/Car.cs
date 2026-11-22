@@ -50,8 +50,8 @@ public sealed class Car : IDisposable
     private const float DriftSteer = 0.42f;       // sterzo massimo in derapata (in velocità di solito è molto meno)
     private const float DriftSteerRate = 2.6f;    // rad/s: in derapata si sterza e controsterza più svelti
     private const float MaxDrift = 1.15f;         // rad: angolo massimo tra muso e marcia (oltre si girerebbe su se stessi)
-    private const float HandbrakeDecel = 3.2f;    // unità/s²: rallentamento del freno a mano
-    private const float DriftScrub = 2.4f;        // unità/s²: attrito delle gomme di traverso (per angolo pieno)
+    private const float HandbrakeDecel = 4.5f;    // unità/s²: il freno a mano è un freno: rallenta forte
+    private const float DriftScrub = 3.5f;        // unità/s²: attrito delle gomme di traverso (per angolo pieno)
 
     // Freno a mano: il posteriore perde aderenza e basta (lo sterzo fa sbandare l'auto, nessun aiuto). Solo spazio +
     // indietro, entro DecideWindow dalla pressione, fa l'inversione a U.
