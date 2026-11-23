@@ -40,6 +40,7 @@ public sealed class DebugOptions
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
     public List<(Vector2 Move, float Until)> Moves { get; } = new(); // WASD simulati: X = A/D, Y = S/W (test)
     public List<(float PixelsPerSecond, float Until)> MouseSteer { get; } = new(); // mouse simulato in auto (test)
+    public List<(float PixelsPerSecond, float Until)> MouseY { get; } = new();     // mouse simulato in verticale (test)
 }
 
 public sealed partial class Game : IDisposable
@@ -82,6 +83,8 @@ public sealed partial class Game : IDisposable
 
     private readonly List<DrawItem> _opaque = new();
     private readonly List<DrawItem> _water = new();
+    private readonly List<DrawItem> _ghost = new(); // il personaggio quando è trasparente (guardando il cielo da sotto)
+    private float _kidAlpha = 1f;
     private readonly Random _rng = new();
     private float _time;
     private double _titleTimer;
@@ -305,6 +308,9 @@ public sealed partial class Game : IDisposable
         if (_debug.MouseSteer.Count > 0 && _time > 0.5f)
             foreach (var (px, until) in _debug.MouseSteer)
                 if (_time < until) { LookAround(new Vector2(px * dt, 0f)); break; }
+        if (_debug.MouseY.Count > 0 && _time > 0.5f)
+            foreach (var (py, until) in _debug.MouseY)
+                if (_time < until) { LookAround(new Vector2(0f, py * dt)); break; }
         Vector3 input = Vector3.Zero;
 
         if (_debug.Walk is { } walk && _time > 0.5f && _time < _debug.WalkUntil)
@@ -427,6 +433,17 @@ public sealed partial class Game : IDisposable
             _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, heading,
                            walk: _onFoot, follow: follow);
             AvoidWalls(dt);
+            // A piedi la camera può scendere quasi a terra (guardando in su): mai sotto il terreno, e la visuale passa
+            // sopra prati e scarpate tra lei e il personaggio
+            if (!_onFoot) _camera.Floor = _camFloor = float.MinValue;
+            else
+            {
+                float floor = TerrainFloor();
+                _camFloor = floor >= _camFloor ? floor : Noise.Lerp(_camFloor, floor, Noise.Damp(4f, dt));
+                _camera.Floor = _camFloor;
+            }
+            // Guardando il cielo da sotto il personaggio sta davanti alla camera: diventa quasi trasparente
+            _kidAlpha = 1f - 0.8f * Noise.Smooth(0.06f, 0.4f, _camera.LookUp);
         }
         UpdateMap(dt);
         if (_engine != null) _engine.Horn = !_onFoot && (_keyboard.IsKeyPressed(Key.H) || pad.Horn); // clacson: H (solo in auto)
@@ -493,6 +510,7 @@ public sealed partial class Game : IDisposable
         _viewProj = viewProj;
         _opaque.Clear();
         _water.Clear();
+        _ghost.Clear();
         // Finestre, lampioni e lanterne: accesi col buio
         float night = Noise.Smooth(0.3f, 0.75f, 1f - _day.Daylight);
 
@@ -537,7 +555,7 @@ public sealed partial class Game : IDisposable
         _clouds.Collect(_cloudItems, _camera.Target, _time);
 
         _player.Collect(_opaque);
-        _kid.Collect(_opaque);
+        _kid.Collect(_kidAlpha < 0.99f ? _ghost : _opaque);
         _particles.Collect(_opaque);
     }
 
@@ -574,6 +592,11 @@ public sealed partial class Game : IDisposable
             _depth.SetMatrix("uModel", item.Model);
             item.Mesh.Draw();
         }
+        foreach (var item in _ghost) // anche trasparente, il personaggio fa ombra
+        {
+            _depth.SetMatrix("uModel", item.Model);
+            item.Mesh.Draw();
+        }
         _gl.Disable(EnableCap.PolygonOffsetFill);
 
         // --- 2. Scena principale ---
@@ -602,6 +625,7 @@ public sealed partial class Game : IDisposable
         }
 
         _lit.Use();
+        _lit.SetFloat("uAlpha", 1f);
         _lit.SetMatrix("uProj", proj);
         _lit.SetMatrix("uView", _camera.View);
         _lit.SetMatrix("uLightSpace", lightSpace);
@@ -688,6 +712,22 @@ public sealed partial class Game : IDisposable
         DrawSeeThrough();
         _gl.DepthFunc(DepthFunction.Less);
         _lit.SetInt("uSeeThrough", 0);
+
+        // --- 5. Il personaggio trasparente: come sopra, prima la profondità e poi il colore della sola superficie davanti ---
+        if (_ghost.Count > 0)
+        {
+            _gl.ColorMask(false, false, false, false);
+            _gl.DepthMask(true);
+            DrawGhost();
+            _gl.ColorMask(true, true, true, true);
+            _gl.DepthMask(false);
+            _gl.DepthFunc(DepthFunction.Lequal);
+            _lit.SetFloat("uAlpha", _kidAlpha);
+            DrawGhost();
+            _lit.SetFloat("uAlpha", 1f);
+            _gl.DepthFunc(DepthFunction.Less);
+            _lit.SetInt("uSmooth", 0);
+        }
 
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
@@ -1056,6 +1096,25 @@ public sealed partial class Game : IDisposable
     }
 
     private float _clipDist = float.MaxValue;
+    private float _camFloor = float.MinValue;
+
+    /// <summary>
+    /// A piedi, quota minima della camera: sopra il terreno sotto di lei e abbastanza alta perché la linea di vista verso
+    /// il personaggio passi sopra prati e scarpate in mezzo (con la visuale rasoterra, o guardando in su, la camera sta
+    /// quasi a terra e una gobba del prato coprirebbe tutto).
+    /// </summary>
+    private float TerrainFloor()
+    {
+        Vector3 cam = _camera.ClipPoint ?? _camera.DesiredPosition, from = new(ActivePos.X, _camera.Target.Y, ActivePos.Z);
+        float floor = _world.GroundOrObstacle(cam) + 0.2f;
+        for (float t = 0.3f; t < 0.99f; t += 0.07f)
+        {
+            var p = Vector3.Lerp(from, cam, t);
+            float need = _world.GroundOrObstacle(p) + 0.15f;
+            if (need > p.Y) floor = MathF.Max(floor, from.Y + (need - from.Y) / t);
+        }
+        return floor;
+    }
     private bool _cameraInside; // la camera è dentro (o addosso a) un edificio: a piedi solo allora le case sbiadiscono
 
     /// <summary>Fin dove si può andare da <paramref name="from"/> lungo <paramref name="dir"/> senza entrare in un edificio.</summary>
@@ -1063,8 +1122,12 @@ public sealed partial class Game : IDisposable
     {
         const float Margin = 0.3f; // la camera resta un po' fuori dal muro (il piano vicino non lo taglia)
         for (float s = 0.3f; s <= dist; s += 0.12f)
-            if (_world.InsideSolid(from + dir * s, Margin))
+        {
+            var p = from + dir * s;
+            // A piedi anche rocce e cespugli (non diventano trasparenti): con la camera bassa la si porta davanti a loro
+            if (_world.InsideSolid(p, Margin) || (_onFoot && _world.ObstacleTop(p) is { } top && p.Y < top + 0.15f))
                 return MathF.Max(0f, s - 0.12f);
+        }
         return null;
     }
 
@@ -1163,6 +1226,17 @@ public sealed partial class Game : IDisposable
 
     private bool _onTrain;   // il personaggio viaggia in treno
     private bool _boarding;  // sta saltando sulla carrozza
+
+    private void DrawGhost()
+    {
+        foreach (var item in _ghost)
+        {
+            _lit.SetMatrix("uModel", item.Model);
+            _lit.SetInt("uSmooth", item.Smooth ? 1 : 0);
+            _lit.SetFloat("uEmissive", item.Emissive);
+            item.Mesh.Draw();
+        }
+    }
 
     private void DrawSeeThrough()
     {

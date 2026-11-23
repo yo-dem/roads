@@ -109,6 +109,31 @@ public sealed partial class Zone
             }
     }
 
+    /// <summary>
+    /// Quota della cima della roccia o del cespuglio che sta sopra il punto (coordinate del mondo), o null se non ce n'è.
+    /// Serve alla camera bassa a piedi: questi oggetti non diventano trasparenti, la visuale ci passa sopra.
+    /// </summary>
+    public float? ObstacleTop(Vector3 world)
+    {
+        float x = world.X - Origin.X, z = world.Z - Origin.Z;
+        if (MathF.Abs(x) >= Half || MathF.Abs(z) >= Half) return null;
+        var bucket = _movBuckets[BucketIndex(x), BucketIndex(z)];
+        if (bucket == null) return null;
+        float? top = null;
+        foreach (int i in bucket)
+        {
+            var m = _movables[i];
+            if (m.Kind == Push.Pole) continue; // i pali sono sottili: non coprono la visuale
+            Vector2 p = MovablePos(m);
+            float dx = x - p.X, dz = z - p.Y, r = m.Radius + 0.15f;
+            if (dx * dx + dz * dz >= r * r) continue;
+            // Un cespuglio è alto circa 1.75 volte il suo ingombro, una roccia un po' meno
+            float h = HeightLocal(p.X, p.Y) + PathLift(p.X, p.Y) + m.Radius * 1.8f;
+            top = MathF.Max(top ?? h, h);
+        }
+        return top;
+    }
+
     /// <summary>Un cerchio (coordinate locali) tocca un oggetto spostabile (escluso <paramref name="except"/>)?</summary>
     private bool HitsMovable(float x, float z, float radius, int except = -1)
     {

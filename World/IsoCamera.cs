@@ -34,10 +34,23 @@ public sealed class IsoCamera
     public float Chase { get; private set; }
 
     public float EffectiveYaw => Yaw + Noise.WrapAngle(_chaseYaw - Yaw) * Chase;
-    public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, _walkPitch, Walk), Chase);
+    public float EffectivePitch => Noise.Lerp(Pitch, Noise.Lerp(ChasePitch, MathF.Max(_walkPitch, 0f), Walk), Chase);
 
     // A piedi la visuale si gira col mouse attorno al personaggio
     private float _walkPitch = WalkPitch;
+
+    // Abbassando la visuale a piedi oltre la rasoterra la camera scende quasi a terra, si accosta al personaggio e
+    // guarda in su, verso il cielo
+    private const float MinWalkPitch = -0.95f;
+    private const float LookUpDrop = 0.38f;    // di quanto scende sotto il punto guardato (che sta a WalkLift dai piedi)
+    private const float LookUpCloser = 0.45f;  // quanto si accorcia la distanza, guardando del tutto in su
+    private const float LookUpGain = 0.85f;     // angolo verso l'alto per radiante di mouse oltre la rasoterra
+
+    /// <summary>Quanto si guarda in su a piedi (radianti oltre la rasoterra; 0 = visuale normale).</summary>
+    public float LookUp => Chase * Walk * MathF.Max(0f, -_walkPitch);
+
+    /// <summary>La camera non scende sotto questa quota (il terreno sotto di lei, la decide il gioco).</summary>
+    public float Floor = float.MinValue;
 
     /// <summary>
     /// Ruota la visuale a piedi attorno al personaggio: <paramref name="dYaw"/> in orizzontale, <paramref name="dPitch"/>
@@ -46,11 +59,12 @@ public sealed class IsoCamera
     public void Orbit(float dYaw, float dPitch)
     {
         _chaseYaw += dYaw;
-        _walkPitch = Math.Clamp(_walkPitch + dPitch, 0.03f, 1.25f);
+        _walkPitch = Math.Clamp(_walkPitch + dPitch, MinWalkPitch, 1.25f);
     }
     public float EffectiveDistance => _eye is { } eye
         ? Vector3.Distance(eye, Target)
-        : Noise.Lerp(Distance, Noise.Lerp(ChaseDistance, WalkDistance, Walk), Chase);
+        : Noise.Lerp(Distance, Noise.Lerp(ChaseDistance, WalkDistance, Walk), Chase)
+          * (1f - LookUpCloser * Noise.Smooth(0f, -MinWalkPitch, LookUp));
 
     // Visuale fissa (dentro il vagone): occhio e punto guardato li decide il gioco, fotogramma per fotogramma
     private Vector3? _eye;
@@ -73,13 +87,38 @@ public sealed class IsoCamera
 
     public bool Fixed => _eye != null;
 
-    public Vector3 Position => _eye ?? ClipPoint ?? DesiredPosition;
+    public Vector3 Position
+    {
+        get
+        {
+            if (_eye is { } eye) return eye;
+            var p = ClipPoint ?? DesiredPosition;
+            return p with { Y = MathF.Max(p.Y, Floor) };
+        }
+    }
 
     /// <summary>Dove starebbe la camera senza muri.</summary>
     public Vector3 DesiredPosition => _eye ?? Target + new Vector3(
         MathF.Sin(EffectiveYaw) * MathF.Cos(EffectivePitch),
         MathF.Sin(EffectivePitch),
-        MathF.Cos(EffectiveYaw) * MathF.Cos(EffectivePitch)) * EffectiveDistance;
+        MathF.Cos(EffectiveYaw) * MathF.Cos(EffectivePitch)) * EffectiveDistance
+        - new Vector3(0f, LookUpDrop * Noise.Smooth(0f, 0.3f, LookUp), 0f);
+
+    /// <summary>
+    /// Il punto guardato: di solito il giocatore; guardando in su si alza sopra di lui, tanto più quanto più si abbassa
+    /// la visuale col mouse, così il cielo riempie lo schermo.
+    /// </summary>
+    public Vector3 LookAt
+    {
+        get
+        {
+            float up = LookUp;
+            if (_eye != null || up <= 0f) return Target;
+            var p = Position;
+            float flat = MathF.Max(0.5f, new Vector2(Target.X - p.X, Target.Z - p.Z).Length());
+            return Target + new Vector3(0f, flat * MathF.Tan(MathF.Min(up * LookUpGain, 0.95f)), 0f);
+        }
+    }
 
     /// <summary>
     /// Se un muro sta tra il giocatore e la camera, il gioco la avvicina qui (sulla linea giocatore → camera); null se la
@@ -149,5 +188,5 @@ public sealed class IsoCamera
         Target = Vector3.Lerp(Target, aim, Noise.Damp(Noise.Lerp(5f, 9f, Chase), dt));
     }
 
-    public Matrix4x4 View => Matrix4x4.CreateLookAt(Position, Target, Vector3.UnitY);
+    public Matrix4x4 View => Matrix4x4.CreateLookAt(Position, LookAt, Vector3.UnitY);
 }

@@ -112,6 +112,7 @@ public static class Shaders
         uniform float uFogFar;
         uniform float uFogMax;       // nebbia massima: 1 di solito, meno per i punti di riferimento (si vedono da lontano)
         uniform float uEmissive;
+        uniform float uAlpha;        // opacità dell'oggetto (il personaggio sbiadisce guardando in su da sotto)
         uniform float uTime;
         uniform int uWater;
         uniform int uCloud;
@@ -249,7 +250,7 @@ public static class Shaders
             else
                 fog = max(fog, 1.0 - smoothstep(-12.0, -2.5, vWorld.y)); // ciò che sta sotto le isole sfuma
             fog = min(fog, uFogMax);
-            FragColor = vec4(mix(col, skyColor(toFrag / d), fog), alpha);
+            FragColor = vec4(mix(col, skyColor(toFrag / d), fog), alpha * uAlpha);
         }
         """.Replace("//SKY", SkyGlsl);
 

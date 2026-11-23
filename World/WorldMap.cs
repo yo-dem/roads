@@ -224,6 +224,16 @@ public sealed class WorldMap : IDisposable
 
     public float GroundHeight(Vector3 p) => ZoneAt(p)?.GroundHeight(p) ?? 0f;
 
+    /// <summary>Il terreno o, se c'è, la cima della roccia o del cespuglio in quel punto (per la camera bassa a piedi).</summary>
+    public float? ObstacleTop(Vector3 p) => ZoneAt(p)?.ObstacleTop(p);
+
+    public float GroundOrObstacle(Vector3 p)
+    {
+        if (ZoneAt(p) is not { } zone) return 0f;
+        float g = zone.GroundHeight(p);
+        return zone.ObstacleTop(p) is { } top ? MathF.Max(g, top) : g;
+    }
+
     public void Dispose()
     {
         foreach (var z in _zones.Values) z.Dispose();
