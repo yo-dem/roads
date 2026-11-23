@@ -23,7 +23,7 @@ public sealed class DebugOptions
     public bool Slow;
     public bool Mute;
     public string? Character; // personaggio di partenza (test)
-    public List<float> Toggles { get; } = new(); // istanti in cui premere Invio (test)
+    public List<float> Toggles { get; } = new(); // istanti in cui premere E (test)
     public Vector2? Start;         // punto di partenza (test): x e riga della strada est-ovest
     public float? Hour;            // ora di partenza (test)
     public bool Lights;            // fari accesi da subito (test)
@@ -35,6 +35,7 @@ public sealed class DebugOptions
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
+    public bool AimPole;           // l'auto parte puntata contro il palo abbattibile più vicino (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
     public List<(Vector2 Move, float Until)> Moves { get; } = new(); // WASD simulati: X = A/D, Y = S/W (test)
@@ -65,7 +66,7 @@ public sealed partial class Game : IDisposable
 
     private WorldMap _world = null!;
     private Car _player = null!;
-    private Villager _kid = null!;   // il personaggino: scende e sale dall'auto con Invio
+    private Villager _kid = null!;   // il personaggino: scende e sale dall'auto con E
     private bool _onFoot;
 
     // Chi si sta comandando in questo momento: l'auto o il personaggino a piedi
@@ -108,10 +109,12 @@ public sealed partial class Game : IDisposable
         {
             if (key == Key.Escape) _window.Close();
             // La visuale cambia solo con questi tasti e resta quella scelta
+            // Tasti: E sali/scendi, F fari, H clacson (vedi sotto), V visuale, Shift corsa, Ctrl passo lento, spazio salto
             if (key is Key.Number1 or Key.Keypad1) _farView = false;
             if (key is Key.Number2 or Key.Keypad2) _farView = true;
+            if (key == Key.V) _farView = !_farView;
             if (key == Key.F && !_onFoot) _player.Headlights = !_player.Headlights; // i fari si comandano solo da dentro l'auto
-            if (key is Key.Enter or Key.KeypadEnter) ToggleOnFoot();
+            if (key is Key.E or Key.Enter or Key.KeypadEnter) ToggleOnFoot(); // E (o Invio): sali o scendi dall'auto
             if (key == Key.Space && _onFoot) _jumpQueued = true; // a piedi lo spazio fa saltare (in auto è il freno a mano)
             if (key == Key.M) _bigMap = !_bigMap; // mappa dell'isola a tutto schermo
             if (key == Key.C) // cambia personaggio (con Shift: il precedente)
@@ -268,14 +271,15 @@ public sealed partial class Game : IDisposable
 
         // Rotazione della visuale lontana
         if (_keyboard.IsKeyPressed(Key.Q)) _camera.Yaw -= 1.8f * dt;
-        if (_keyboard.IsKeyPressed(Key.R)) _camera.Yaw += 1.8f * dt; // (E è il clacson)
+        if (_keyboard.IsKeyPressed(Key.R)) _camera.Yaw += 1.8f * dt; // (E sale e scende dall'auto)
 
         // Tastiera = guida "da gioco di auto" in entrambe le visuali: sterzo e gas relativi all'auto
         // Guida con le frecce o con WASD (W gas, S freno/retro, A/D sterzo): i due insiemi si possono usare insieme
         bool K(Key a, Key b) => _keyboard.IsKeyPressed(a) || _keyboard.IsKeyPressed(b);
         float steerIn = (K(Key.Right, Key.D) ? 1f : 0f) - (K(Key.Left, Key.A) ? 1f : 0f);
         float throttleIn = (K(Key.Up, Key.W) ? 1f : 0f) - (K(Key.Down, Key.S) ? 1f : 0f);
-        bool slow = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
+        bool slow = _keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight); // passo lento
+        bool sprint = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight); // a piedi: corsa
         // A piedi: WASD o frecce (e spazio per saltare)
         float moveX = (K(Key.D, Key.Right) ? 1f : 0f) - (K(Key.A, Key.Left) ? 1f : 0f);
         float moveY = (K(Key.W, Key.Up) ? 1f : 0f) - (K(Key.S, Key.Down) ? 1f : 0f);
@@ -283,7 +287,8 @@ public sealed partial class Game : IDisposable
         var pad = ReadPad();
         steerIn = Math.Clamp(steerIn + pad.SteerX, -1f, 1f);
         throttleIn = Math.Clamp(throttleIn + pad.Gas - pad.Brake, -1f, 1f);
-        slow |= pad.Slow;
+        slow |= pad.Slow && _onFoot; // (in auto la levetta poco inclinata sterza piano, non rallenta)
+        sprint |= pad.Sprint;
         moveX = Math.Clamp(moveX + pad.MoveX, -1f, 1f);
         moveY = Math.Clamp(moveY + pad.MoveY, -1f, 1f);
         PadLook(pad.Look, dt);
@@ -315,6 +320,24 @@ public sealed partial class Game : IDisposable
             _toggleIndex++;
         }
 
+        if (_debug.AimPole && _time > 0.3f && !_onFoot)
+        {
+            // Test: l'auto sulla strada a 10 unità dal palo più vicino, puntata contro di lui
+            _debug.AimPole = false;
+            Vector3? best = null;
+            foreach (var zone in _world.Zones)
+                foreach (var pole in zone.PoleBases())
+                    if (best == null || Vector3.DistanceSquared(pole, _player.Position) < Vector3.DistanceSquared(best.Value, _player.Position))
+                        best = pole;
+            if (best is { } target && RoadNetwork.Current.Nearest(new Vector2(target.X, target.Z), 8f, out var hit))
+            {
+                Vector2 t = hit.Edge.Tangent(hit.S), from = hit.Point - t * 10f;
+                Vector2 aim = Vector2.Normalize(new Vector2(target.X, target.Z) - from);
+                _player.Place(new Vector3(from.X, _player.Position.Y, from.Y), MathF.Atan2(aim.X, aim.Y));
+                Console.WriteLine($"Test: auto puntata contro il palo in {target.X:F1}, {target.Z:F1}");
+            }
+        }
+
         if (_onFoot)
         {
             // L'auto resta parcheggiata a motore spento.
@@ -326,20 +349,16 @@ public sealed partial class Game : IDisposable
                 _kid.Yaw = _footYaw = platformYaw + MathF.PI;
                 _debug.Platform = false;
             }
-            // A piedi come in GTA: WASD o frecce rispetto alla visuale, e il personaggio si volta da solo dove corre. Con
-            // indietro (S, levetta giù) invece indietreggia: resta di spalle alla camera e cammina all'indietro verso di
-            // lei (anche in diagonale). Il mouse gira la visuale attorno a lui.
-            float? face = null;
+            // A piedi come in GTA 5: WASD o frecce (levetta sinistra) rispetto alla visuale, e il personaggio si volta
+            // sempre da solo dove va: con indietro si gira e corre verso la camera, non indietreggia mai. Shift (✕) corre,
+            // Ctrl (levetta appena inclinata) va piano. Il mouse (levetta destra) gira la visuale attorno a lui.
             if (_onTrain) input = Vector3.Zero; // a bordo cammina RideTrain
             else if (input == Vector3.Zero)
-            {
                 input = _camera.Right * moveX + _camera.Forward * moveY;
-                if (moveY < -0.3f) face = MathF.Atan2(_camera.Forward.X, _camera.Forward.Z);
-            }
             if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
-            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, face);
+            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, sprint: sprint && !slow);
             if (_kid.Hidden && _boarding)
             {
                 // Il saltello sulla carrozza è finito: si è dentro, davanti alla porta, rivolti verso i sedili
@@ -410,7 +429,7 @@ public sealed partial class Game : IDisposable
             AvoidWalls(dt);
         }
         UpdateMap(dt);
-        if (_engine != null) _engine.Horn = !_onFoot && (_keyboard.IsKeyPressed(Key.E) || pad.Horn); // clacson (solo in auto)
+        if (_engine != null) _engine.Horn = !_onFoot && (_keyboard.IsKeyPressed(Key.H) || pad.Horn); // clacson: H (solo in auto)
         _engine?.Update(dt, _player.Rpm, _player.Throttle, running: _player.EngineOn, skid: _player.Skid);
 
         _day.Update(dt);
@@ -798,7 +817,7 @@ public sealed partial class Game : IDisposable
     // ------------------------------------------------------------------ scendere e salire dall'auto
 
     /// <summary>
-    /// Invio: se si guida e l'auto è (quasi) ferma, il personaggino salta fuori dalla portiera del guidatore
+    /// E (o Invio, △ sul controller): se si guida e l'auto è (quasi) ferma, il personaggino salta fuori dalla portiera del guidatore
     /// (o da quella opposta se è bloccata) e il motore si spegne; se si è a piedi vicino all'auto, ci risale.
     /// </summary>
     private void ToggleOnFoot()
@@ -1131,16 +1150,16 @@ public sealed partial class Game : IDisposable
     private string TrainStatus()
     {
         string where = _trains?.StoppedAt is { } st ? $"fermi a {st.Name} (si riparte tra {_trains.DepartsIn:F0} s)" : "in viaggio";
-        string hint = _seat >= 0 ? "seduti: mouse per guardare, Invio per alzarsi"
-            : NearSeat() >= 0 ? "Invio per sedersi"
-            : _cabin.Y > Trains.DoorZ - 0.6f && _trains?.StoppedAt != null ? "Invio per scendere"
+        string hint = _seat >= 0 ? "seduti: mouse per guardare, E per alzarsi"
+            : NearSeat() >= 0 ? "E per sedersi"
+            : _cabin.Y > Trains.DoorZ - 0.6f && _trains?.StoppedAt != null ? "E per scendere"
             : "WASD o frecce per camminare, mouse per guardare; i sedili ai lati, la porta in fondo verso la locomotiva";
         return $"  |  in treno, {where}  |  {hint}";
     }
 
     /// <summary>Nel titolo, a piedi accanto al treno fermo: si può salire.</summary>
     private string BoardHint() =>
-        _trains != null && _trains.CanBoard(new Vector2(_kid.Position.X, _kid.Position.Z), out _) ? "  (Invio per salire sul treno)" : "";
+        _trains != null && _trains.CanBoard(new Vector2(_kid.Position.X, _kid.Position.Z), out _) ? "  (E per salire sul treno)" : "";
 
     private bool _onTrain;   // il personaggio viaggia in treno
     private bool _boarding;  // sta saltando sulla carrozza

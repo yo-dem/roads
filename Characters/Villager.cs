@@ -12,8 +12,9 @@ namespace Roads.Characters;
 /// </summary>
 public sealed class Villager : IDisposable
 {
-    private const float RunSpeed = 3.0f;    // andatura normale
-    private const float SlowSpeed = 1.5f;   // con Shift
+    private const float RunSpeed = 3.0f;    // andatura normale (corsetta)
+    private const float SlowSpeed = 1.5f;   // passo lento (Ctrl, levetta appena inclinata)
+    private const float SprintSpeed = 4.6f; // corsa (Shift, ✕)
     private const float TurnStep = 0.45f;   // girandosi sul posto: velocità di passo (unità/s) per ogni rad/s di rotazione
     private const float BackSpeed = 1.4f;   // indietreggiando
     public const float Radius = 0.2f;
@@ -201,12 +202,13 @@ public sealed class Villager : IDisposable
     // ------------------------------------------------------------------ movimento
 
     /// <param name="input">Direzione da tastiera nel mondo (XZ); lunghezza 0 = nessun input.</param>
-    /// <param name="slow">Shift premuto: passo lento.</param>
+    /// <param name="slow">Passo lento (Ctrl).</param>
     /// <param name="blocked">Ostacoli in più rispetto al mondo (l'auto parcheggiata).</param>
     /// <param name="face">Se dato, il personaggio guarda in questa direzione (yaw) qualunque sia il movimento: guida
     /// "da mini auto", dove le frecce laterali lo girano e quella indietro lo fa arretrare senza voltarsi.</param>
+    /// <param name="sprint">Corsa veloce (Shift, ✕ sul controller).</param>
     public void Update(float dt, Vector3 input, bool slow, WorldMap world, Particles fx, Func<Vector3, float, bool>? blocked = null,
-                       float? face = null)
+                       float? face = null, bool sprint = false)
     {
         _time += dt;
 
@@ -227,7 +229,7 @@ public sealed class Villager : IDisposable
 
         bool Free(Vector3 p) => world.IsWalkable(p, Radius) && !(blocked?.Invoke(p, Radius) ?? false);
 
-        float maxSpeed = slow ? SlowSpeed : RunSpeed;
+        float maxSpeed = slow ? SlowSpeed : sprint ? SprintSpeed : RunSpeed;
         bool moving = input.LengthSquared() > 0.01f;
 
         Vector3 dir = moving ? Vector3.Normalize(input) : Vector3.Zero;

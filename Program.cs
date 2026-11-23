@@ -11,12 +11,12 @@ public static class Program
     /// Argomenti opzionali (per test automatici):
     ///   --shot file.png@secondi   (ripetibile) salva uno screenshot e chiude dopo l'ultimo
     ///   --walk x,z[,finoA]        cammina in direzione mondo (x,z) fino al secondo indicato
-    ///   --slow                    passo lento (come tenere premuto Shift)
+    ///   --slow                    passo lento (come tenere premuto Ctrl)
     ///   --mute                    nessun suono
     ///   --handbrake da,a          tiene tirato il freno a mano tra i due istanti (secondi)
     ///   --start x,z               parte sulla strada più vicina al punto del mondo (test)
     ///   --char nome               personaggio di partenza (es. female-a, male-c; tasto C in gioco)
-    ///   --enter secondi           (ripetibile) preme Invio: scende o sale dall'auto
+    ///   --enter secondi           (ripetibile) preme E: scende o sale dall'auto
     ///   --time ore                ora di partenza (es. 12 = mezzogiorno; di serie si parte alle 8:00)
     ///   --lights                  fari accesi da subito (come premere F)
     ///   --zoom distanza           distanza della visuale lontana (8..32, come la rotella)
@@ -29,6 +29,7 @@ public static class Program
     ///   --salto secondi           (ripetibile) a piedi preme spazio: salto
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
     ///   --mouse pixel/s[,finoA]   muove il mouse in orizzontale (in auto sterza, a piedi gira la visuale); ripetibile, tratti in ordine
+    ///   --palo                    l'auto parte sulla strada a 10 unità dal palo abbattibile più vicino, puntata contro
     ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
     ///   --pilota secondi          fino a quell'istante lo sterzo tiene da solo l'auto in corsia (per provare le derapate)
     ///   --verifica-strade        genera tutti i pezzi con strade e segnala i punti dove la carreggiata manca, poi esce
@@ -126,6 +127,9 @@ public static class Program
                     break;
                 case "--banchina":
                     d.Platform = true;
+                    break;
+                case "--palo":
+                    d.AimPole = true;
                     break;
                 case "--pilota" when i + 1 < args.Length:
                     d.PilotUntil = float.Parse(args[++i], inv);

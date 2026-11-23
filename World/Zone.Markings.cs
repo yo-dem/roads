@@ -248,6 +248,7 @@ public sealed partial class Zone
         p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
         float yaw = MathF.Atan2(travel.X, travel.Y); // +Z locale del cartello = verso di marcia
         Matrix4x4 old = mb.Transform;
+        int start = mb.IndexCount;
         mb.Transform = Matrix4x4.CreateRotationY(yaw) * Matrix4x4.CreateTranslation(p) * old;
         mb.BeginObject();
         // Misure vere in scala con l'auto (larga ~1,3 unità ≈ 1,8 m): palo ~2,3 m, cartello ~60 cm
@@ -272,7 +273,7 @@ public sealed partial class Zone
         }
         mb.EndObject();
         mb.Transform = old;
-        AddCollider(p.X, p.Z, 0.06f);
+        AddPole(p, 0.06f, start, mb.IndexCount - start); // l'auto lo abbatte
         placed.Add((p.X, p.Z, 0.25f));
     }
 
@@ -309,8 +310,9 @@ public sealed partial class Zone
             if (!InZone(p, 0f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f) continue; // palo sottile: basta che stia nel pezzo
             if (Railway.Current.Distance(world.X, world.Y) < Railway.BallastHalf + 1.5f) continue;
             p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
+            int start = mb.IndexCount;
             StationSign(mb, p, st.AccessRoadDir);
-            AddCollider(p.X, p.Z, 0.06f);
+            AddPole(p, 0.06f, start, mb.IndexCount - start); // l'auto lo abbatte
             placed.Add((p.X, p.Z, 0.3f));
         }
     }
@@ -374,9 +376,10 @@ public sealed partial class Zone
                         if (!InZone(p, 0f) || HeightLocal(p.X, p.Z) < WaterY + 0.2f) continue;
                         p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
                         float yaw = MathF.Atan2(travel.X, travel.Y);
+                        int start = mb.IndexCount;
                         SignalPost(mb, p, yaw);
                         TrafficHeads.Add(new TrafficHead(p + Origin, yaw, n, TrafficLights.Group(n, e)));
-                        AddCollider(p.X, p.Z, 0.08f);
+                        AddPole(p, 0.08f, start, mb.IndexCount - start); // l'auto lo abbatte (e le luci si spengono)
                         placed.Add((p.X, p.Z, 0.3f));
                     }
                 }

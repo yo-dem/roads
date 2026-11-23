@@ -189,10 +189,20 @@ public sealed class WorldMap : IDisposable
         foreach (var zone in _zones.Values)
         {
             if (CellDistance(zone.X, zone.Z, center) > radius + 2f) continue;
-            float hit = zone.PushFrom(center, radius, ref velocity, mass, out var c);
+            float hit = zone.PushFrom(center, radius, ref velocity, mass, out var c, _broken);
             if (hit > worst) { worst = hit; contact = c; }
         }
         return worst;
+    }
+
+    private readonly List<(Vector3 At, Vector2 Dir, float Speed)> _broken = new();
+
+    /// <summary>I pali abbattuti dall'ultima chiamata (punto d'urto, velocità dell'auto): per le schegge.</summary>
+    public List<(Vector3 At, Vector2 Dir, float Speed)> TakeBroken()
+    {
+        var list = _broken.ToList();
+        _broken.Clear();
+        return list;
     }
 
     /// <summary>Il ponte più vicino entro <paramref name="range"/> (sul piano), se c'è.</summary>

@@ -6,14 +6,16 @@ namespace Roads;
 /// <summary>
 /// Controller (PS4 o qualunque gamepad riconosciuto), insieme a tastiera e mouse: i comandi si sommano.
 /// <code>
-///   levetta sinistra   sterzo (in auto) / cammina (a piedi, piano se poco inclinata)
+///   Comandi come in GTA 5:
+///   levetta sinistra   sterzo (in auto) / cammina (a piedi; appena inclinata va piano)
 ///   R2 / L2            gas / freno e retromarcia (dosabili)
-///   ✕                  freno a mano (con L2: inversione a U) / salto a piedi
-///   △                  scendi / sali in auto
-///   □                  clacson
-///   ○                  fari
-///   L1                 piano (come Shift)
-///   R1                 cambia personaggio
+///   R1                 freno a mano (con L2: inversione a U)
+///   △                  scendi / sali in auto (e sul treno)
+///   ✕                  a piedi: corri (tenuto premuto)
+///   □                  a piedi: salta
+///   L3                 clacson
+///   croce destra       fari
+///   croce sinistra     cambia personaggio
 ///   levetta destra     gira la visuale (a piedi, in treno, nella visuale lontana)
 ///   croce su / giù     visuale più vicina / più lontana
 ///   SHARE              visuale da dietro / lontana
@@ -32,7 +34,7 @@ public sealed partial class Game
     /// <summary>Quanto sono premuti i comandi del controller in questo istante.</summary>
     private readonly record struct PadInput(
         float SteerX, float MoveX, float MoveY, float Gas, float Brake, Vector2 Look,
-        bool Handbrake, bool Slow, bool Horn, bool ZoomIn, bool ZoomOut);
+        bool Handbrake, bool Slow, bool Sprint, bool Horn, bool ZoomIn, bool ZoomOut);
 
     private void SetupGamepads()
     {
@@ -55,11 +57,11 @@ public sealed partial class Game
         switch (b)
         {
             case ButtonName.Y: ToggleOnFoot(); break;                                   // △
-            case ButtonName.A when _onFoot: _jumpQueued = true; break;                  // ✕ a piedi: salto
-            case ButtonName.B when !_onFoot: _player.Headlights = !_player.Headlights; break; // ○
+            case ButtonName.X when _onFoot: _jumpQueued = true; break;                  // □ a piedi: salto
+            case ButtonName.DPadRight when !_onFoot: _player.Headlights = !_player.Headlights; break; // croce destra
             case ButtonName.Start: _bigMap = !_bigMap; break;                           // OPTIONS
             case ButtonName.Back: _farView = !_farView; break;                          // SHARE
-            case ButtonName.RightBumper:                                                // R1
+            case ButtonName.DPadLeft:                                                   // croce sinistra
                 _kid.CycleCharacter(1);
                 Console.WriteLine($"Personaggio: {_kid.Character}");
                 break;
@@ -93,13 +95,16 @@ public sealed partial class Game
         bool Held(ButtonName name) => g.Buttons.Any(b => b.Name == name && b.Pressed);
 
         Vector2 left = Stick(0), right = Stick(1);
-        float dpadX = (Held(ButtonName.DPadRight) ? 1f : 0f) - (Held(ButtonName.DPadLeft) ? 1f : 0f);
+        float tilt = left.Length();
         // In su la levetta dà Y negativa
         return new PadInput(
-            SteerX: Math.Clamp(left.X + dpadX, -1f, 1f),
+            SteerX: left.X,
             MoveX: left.X, MoveY: -left.Y,
             Gas: Trigger(1), Brake: Trigger(0), Look: right,
-            Handbrake: Held(ButtonName.A), Slow: Held(ButtonName.LeftBumper), Horn: Held(ButtonName.X),
+            Handbrake: Held(ButtonName.RightBumper),
+            Slow: tilt > 0f && tilt < 0.5f,              // levetta appena inclinata: a piedi si va piano
+            Sprint: Held(ButtonName.A),                  // ✕ tenuto: a piedi si corre
+            Horn: Held(ButtonName.LeftStick),            // L3
             ZoomIn: Held(ButtonName.DPadUp), ZoomOut: Held(ButtonName.DPadDown));
     }
 

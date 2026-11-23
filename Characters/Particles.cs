@@ -11,12 +11,13 @@ public sealed class Particles : IDisposable
     {
         public Vector3 Pos, Vel;
         public float Age, Life, Size, Spin;
-        public bool Ember, Cloud;
+        public bool Ember, Cloud, Shard;
+        public float Floor; // le schegge cadono fin qui e rimbalzano
     }
 
     private readonly List<P> _list = new();
     private readonly Random _rng = new();
-    private readonly Mesh _dust, _ember, _cloud;
+    private readonly Mesh _dust, _ember, _cloud, _shard;
 
     public Particles(GL gl)
     {
@@ -29,6 +30,34 @@ public sealed class Particles : IDisposable
         mb = new MeshBuilder();
         mb.AddBox(Vector3.Zero, Vector3.One, new Vector3(1f, 0.6f, 0.15f));
         _ember = mb.Build(gl);
+        mb = new MeshBuilder();
+        mb.AddBox(Vector3.Zero, new Vector3(1f, 0.6f, 1.4f), new Vector3(0.3f, 0.31f, 0.34f));
+        _shard = mb.Build(gl);
+    }
+
+    /// <summary>
+    /// Schegge di un palo abbattuto: pezzetti scuri che schizzano nella direzione dell'urto (<paramref name="dir"/>,
+    /// la velocità dell'auto), ricadono a terra rimbalzando, più un po' di polvere.
+    /// </summary>
+    public void Shards(Vector3 at, Vector2 dir, float speed)
+    {
+        Vector2 d = speed > 1e-3f ? dir / speed : Vector2.UnitX;
+        float floor = at.Y - 1.0f;
+        for (int i = 0; i < 14; i++)
+        {
+            float push = speed * R(0.35f, 0.9f);
+            _list.Add(new P
+            {
+                Pos = at + new Vector3(R(-0.15f, 0.15f), R(-0.8f, 0.9f), R(-0.15f, 0.15f)),
+                Vel = new Vector3(d.X * push + R(-1.6f, 1.6f), R(1.2f, 3.6f), d.Y * push + R(-1.6f, 1.6f)),
+                Life = R(0.9f, 1.6f),
+                Size = R(0.06f, 0.14f),
+                Spin = R(-9f, 9f),
+                Shard = true,
+                Floor = floor,
+            });
+        }
+        Dust(at with { Y = floor + 0.1f }, 5);
     }
 
     private float R(float a, float b) => a + _rng.NextSingle() * (b - a);
@@ -82,7 +111,17 @@ public sealed class Particles : IDisposable
             p.Age += dt;
             if (p.Age >= p.Life) { _list.RemoveAt(i); continue; }
             p.Pos += p.Vel * dt;
-            p.Vel *= MathF.Exp((p.Cloud ? -1.6f : -2.5f) * dt);
+            if (p.Shard)
+            {
+                p.Vel.Y -= 11f * dt; // le schegge cadono
+                if (p.Pos.Y < p.Floor)
+                {
+                    p.Pos.Y = p.Floor;
+                    p.Vel = new Vector3(p.Vel.X * 0.5f, MathF.Abs(p.Vel.Y) * 0.3f, p.Vel.Z * 0.5f);
+                    p.Spin *= 0.5f;
+                }
+            }
+            else p.Vel *= MathF.Exp((p.Cloud ? -1.6f : -2.5f) * dt);
             if (p.Ember) p.Pos.X += MathF.Sin(p.Age * 7f + p.Spin) * 0.3f * dt;
             _list[i] = p;
         }
@@ -93,12 +132,15 @@ public sealed class Particles : IDisposable
         foreach (var p in _list)
         {
             float t = p.Age / p.Life;
-            float s = p.Size * (p.Ember ? 1f - t
+            float s = p.Size * (p.Shard ? 1f - Roads.World.Noise.Smooth(0.7f, 1f, t)
+                : p.Ember ? 1f - t
                 : p.Cloud ? MathF.Sqrt(MathF.Min(1f, t * 4f)) * (1f - t * t) * (1f + t)  // si gonfia e poi svanisce
                 : MathF.Sin(MathF.PI * MathF.Min(1f, t * 1.3f + 0.15f)));
             if (s <= 0.001f) continue;
-            var m = Matrix4x4.CreateScale(s) * Matrix4x4.CreateRotationY(p.Age * p.Spin) * Matrix4x4.CreateTranslation(p.Pos);
-            items.Add(new DrawItem(p.Ember ? _ember : p.Cloud ? _cloud : _dust, m, p.Ember ? 1f : p.Cloud ? 0.15f : 0.3f, CastShadow: false));
+            var m = Matrix4x4.CreateScale(s) * Matrix4x4.CreateRotationY(p.Age * p.Spin)
+                    * (p.Shard ? Matrix4x4.CreateRotationX(p.Age * p.Spin * 0.7f) : Matrix4x4.Identity) * Matrix4x4.CreateTranslation(p.Pos);
+            items.Add(new DrawItem(p.Shard ? _shard : p.Ember ? _ember : p.Cloud ? _cloud : _dust, m,
+                                   p.Shard ? 0f : p.Ember ? 1f : p.Cloud ? 0.15f : 0.3f, CastShadow: false));
         }
     }
 
@@ -107,5 +149,6 @@ public sealed class Particles : IDisposable
         _dust.Dispose();
         _ember.Dispose();
         _cloud.Dispose();
+        _shard.Dispose();
     }
 }

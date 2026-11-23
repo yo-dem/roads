@@ -226,6 +226,7 @@ public sealed partial class Zone
             if (PathDistance(p.X, p.Z) < PathHalf + 0.2f) continue; // sulla carreggiata di un'altra via
             p.Y = HeightLocal(p.X, p.Z) + PathRaise + Terrain.WalkRaise;
 
+            int s0 = mb.IndexCount, g0 = glow.IndexCount;
             mb.AddPrism(p, 0.07f, 0.06f, 2.7f, 6, Pole);
             Vector3 arm = p + new Vector3(0, 2.62f, 0) - perp * 0.35f;
             mb.AddBox(arm, new Vector3(0.08f, 0.08f, 0.08f) + Abs(perp) * 0.62f, Pole);
@@ -233,7 +234,8 @@ public sealed partial class Zone
             mb.AddBox(head + new Vector3(0, 0.1f, 0), new Vector3(0.34f, 0.08f, 0.34f), Pole);
             glow.AddBox(head, new Vector3(0.24f, 0.12f, 0.24f), LitWindow);
             LampLights.Add(head + Origin);
-            AddCollider(p.X, p.Z, 0.12f);
+            // Palo abbattibile: l'auto lo butta giù (e la lampada si spegne)
+            AddPole(p, 0.12f, s0, mb.IndexCount - s0, g0, glow.IndexCount - g0, head + Origin);
             placed.Add((p.X, p.Z, 0.4f));
         }
     }

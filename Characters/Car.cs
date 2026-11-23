@@ -196,6 +196,15 @@ public sealed class Car : IDisposable
 
     // ------------------------------------------------------------------ modello
 
+    /// <summary>Mette l'auto, ferma, nel punto e nella direzione dati (test).</summary>
+    public void Place(Vector3 position, float yaw)
+    {
+        Position = position;
+        Yaw = _travelYaw = yaw;
+        _speed = 0f;
+        _knock = Vector3.Zero;
+    }
+
     public Car(GL gl, Vector3 position, float yaw)
     {
         Position = position;
@@ -374,6 +383,7 @@ public sealed class Car : IDisposable
             if (hit > hardest) { hardest = hit; where = contact; }
         }
         if (hardest > 0f && hardest > 1f) fx.Dust(where, hardest > 4f ? 4 : 2); // sbuffo di polvere nell'urto
+        foreach (var (at, hitVel, speed) in world.TakeBroken()) fx.Shards(at, hitVel, speed); // palo abbattuto: schegge
 
         // La velocità ceduta all'oggetto si perde: il passo si accorcia (mai all'indietro)
         Vector2 dir = new Vector2(step.X, step.Z) / len;

@@ -4,8 +4,8 @@ using Silk.NET.OpenGL;
 
 namespace Roads.World;
 
-/// <summary>Oggetti di scena che l'auto può spostare urtandoli.</summary>
-public enum Push { None, Rock, Bush }
+/// <summary>Oggetti di scena che l'auto può spostare urtandoli (i pali li abbatte).</summary>
+public enum Push { None, Rock, Bush, Pole }
 
 /// <summary>
 /// Oggetti spostabili: rocce e cespugli. Finché nessuno li tocca restano nella mesh unica della scenografia
@@ -28,6 +28,44 @@ public sealed partial class Zone
         public float CenterY;           // altezza del centro sopra l'appoggio (perno della rotazione)
         public Mesh? Mesh;
         public bool Detached;
+        // Pali (lampioni, cartelli, semafori): si abbattono e basta; la lampada accesa sta nella mesh luminosa
+        public int GlowStart, GlowCount;
+        public Vector3? Lamp;           // luce del lampione (coordinate del mondo), da spegnere
+        public bool Broken;
+    }
+
+    /// <summary>Un palo abbattuto che vola via ruotando e poi si sbriciola (sparisce).</summary>
+    private sealed class Flying
+    {
+        public required Mesh Mesh;
+        public Vector3 Pos, Vel, Axis;
+        public Quaternion Rotation = Quaternion.Identity;
+        public float Spin, Age, CenterY;
+    }
+
+    private readonly List<Flying> _flying = new();
+    private const float FlyTime = 1.3f; // poi del palo restano solo le schegge
+
+    /// <summary>Basi dei pali ancora in piedi (coordinate del mondo): per i test.</summary>
+    public IEnumerable<Vector3> PoleBases() =>
+        _movables.Where(m => m.Kind == Push.Pole && !m.Broken).Select(m => Origin + m.Anchor);
+
+    /// <summary>Sotto questa velocità d'urto (unità/s) il palo regge: l'auto si ferma contro.</summary>
+    private const float PoleBreakSpeed = 2f;
+
+    /// <summary>
+    /// Registra un palo abbattibile: base in <paramref name="anchor"/> (locale), triangoli della scenografia e della
+    /// mesh luminosa (lampada) che gli appartengono, ed eventuale luce del lampione da spegnere quando cade.
+    /// </summary>
+    private void AddPole(Vector3 anchor, float radius, int start, int count, int glowStart = 0, int glowCount = 0,
+                         Vector3? lamp = null)
+    {
+        _movables.Add(new Movable
+        {
+            Kind = Push.Pole, Anchor = anchor, Radius = radius, Mass = 1f,
+            IndexStart = start, IndexCount = count, GlowStart = glowStart, GlowCount = glowCount, Lamp = lamp,
+        });
+        Bucket(_movables.Count - 1, add: true);
     }
 
     private readonly List<Movable> _movables = new();
@@ -125,7 +163,8 @@ public sealed partial class Zone
     /// dall'ingombro. <paramref name="velocity"/> (XZ) viene ridotta di conseguenza. Restituisce il punto
     /// d'urto più violento e la sua velocità d'impatto (0 se nessun urto).
     /// </summary>
-    public float PushFrom(Vector3 center, float radius, ref Vector2 velocity, float mass, out Vector3 contact)
+    public float PushFrom(Vector3 center, float radius, ref Vector2 velocity, float mass, out Vector3 contact,
+                          List<(Vector3 At, Vector2 Dir, float Speed)>? broken = null)
     {
         contact = default;
         float worst = 0f;
@@ -141,6 +180,20 @@ public sealed partial class Zone
             // Direzione dell'urto: dal centro dell'auto a quello dell'oggetto (se coincidono, quella di marcia)
             Vector2 n = dist > 1e-4f ? d / dist
                       : velocity.LengthSquared() > 1e-6f ? Vector2.Normalize(velocity) : Vector2.UnitX;
+
+            if (m.Kind == Push.Pole)
+            {
+                float into = Vector2.Dot(velocity, n);
+                if (velocity.Length() >= PoleBreakSpeed && into > 0f)
+                {
+                    // Il palo cede: l'auto quasi non se ne accorge, il palo vola via in frantumi
+                    Break(i, velocity);
+                    broken?.Add((Origin + new Vector3(p.X, m.Anchor.Y + 1.0f, p.Y), velocity, velocity.Length()));
+                    velocity *= 0.97f;
+                }
+                else if (into > 0f) velocity -= n * into; // piano piano il palo regge: fa da muro
+                continue;
+            }
 
             // Urto: si scambiano quantità di moto lungo la normale (l'oggetto può già allontanarsi)
             float vn = Vector2.Dot(velocity - m.Velocity, n);
@@ -165,6 +218,7 @@ public sealed partial class Zone
     /// <summary>Gli oggetti in movimento scivolano (le rocce rotolano) finché l'attrito non li ferma.</summary>
     public void UpdateMovables(float dt)
     {
+        UpdateFlying(dt);
         if (_awake.Count == 0) return;
         foreach (int i in _awake.ToArray())
         {
@@ -193,27 +247,96 @@ public sealed partial class Zone
         }
     }
 
-    /// <summary>Stacca l'oggetto dalla mesh della scenografia per disegnarlo a parte (alla prima mossa).</summary>
-    private void Detach(int i)
+    /// <summary>
+    /// Abbatte il palo <paramref name="i"/>: sparisce dalla scenografia (e la sua lampada dalla mesh luminosa), non fa
+    /// più da ostacolo, si spengono la luce del lampione e le lenti del semaforo, e il palo vola via nella direzione
+    /// dell'urto ruotando. Non si ricorda: quando il pezzo viene rigenerato il palo è di nuovo al suo posto.
+    /// </summary>
+    private void Break(int i, Vector2 carVelocity)
     {
         var m = _movables[i];
-        if (m.Detached || _gl == null || _sceneryKeep == null) return;
+        if (m.Broken) return;
+        m.Broken = true;
+        Bucket(i, add: false);
+        if (m.Lamp is { } lamp) LampLights.Remove(lamp);
+        Vector3 baseWorld = Origin + m.Anchor;
+        TrafficHeads.RemoveAll(h => Vector3.DistanceSquared(h.World, baseWorld) < 0.01f);
+        if (m.GlowCount > 0) Glow?.ZeroIndices(m.GlowStart, m.GlowCount);
+        if (DetachedMesh(m, out var mesh, out float centerY))
+        {
+            Scenery.ZeroIndices(m.IndexStart, m.IndexCount);
+            float speed = carVelocity.Length();
+            Vector2 dir = speed > 1e-3f ? carVelocity / speed : Vector2.UnitX;
+            var rng = new Random(i * 7919 + (int)(speed * 100f));
+            Vector2 side = new Vector2(-dir.Y, dir.X) * (rng.NextSingle() - 0.5f) * 0.6f;
+            _flying.Add(new Flying
+            {
+                Mesh = mesh, CenterY = centerY,
+                Pos = Origin + m.Anchor,
+                Vel = new Vector3(dir.X + side.X, 0f, dir.Y + side.Y) * speed * 0.85f + new Vector3(0f, 2.2f + speed * 0.12f, 0f),
+                Axis = Vector3.Normalize(new Vector3(dir.Y, 0f, -dir.X)), // cade in avanti, nel verso dell'auto
+                Spin = -(3f + speed * 0.35f),
+            });
+        }
+    }
+
+    private void UpdateFlying(float dt)
+    {
+        for (int k = _flying.Count - 1; k >= 0; k--)
+        {
+            var f = _flying[k];
+            f.Age += dt;
+            if (f.Age >= FlyTime)
+            {
+                f.Mesh.Dispose();
+                _flying.RemoveAt(k);
+                continue;
+            }
+            f.Vel.Y -= 12f * dt;
+            f.Pos += f.Vel * dt;
+            float ground = HeightLocal(f.Pos.X - Origin.X, f.Pos.Z - Origin.Z) + PathRaise;
+            if (f.Pos.Y < ground)
+            {
+                // Tocca terra: rimbalza appena e striscia
+                f.Pos.Y = ground;
+                f.Vel = new Vector3(f.Vel.X * 0.55f, MathF.Abs(f.Vel.Y) * 0.25f, f.Vel.Z * 0.55f);
+                f.Spin *= 0.6f;
+            }
+            f.Rotation = Quaternion.Normalize(Quaternion.Concatenate(f.Rotation, Quaternion.CreateFromAxisAngle(f.Axis, f.Spin * dt)));
+        }
+    }
+
+    /// <summary>Copia i triangoli dell'oggetto in una mesh sua, con l'origine nel punto d'appoggio.</summary>
+    private bool DetachedMesh(Movable m, out Mesh mesh, out float centerY)
+    {
+        mesh = null!;
+        centerY = 0f;
+        if (_gl == null || _sceneryKeep == null || m.IndexCount <= 0) return false;
         const int F = Rendering.Mesh.FloatsPerVertex;
-        var src = _sceneryKeep.Vertices;
         var data = new float[m.IndexCount * F];
-        Array.Copy(src, m.IndexStart * F, data, 0, data.Length); // con gli spigoli calcolati, vertice k = indice k
+        Array.Copy(_sceneryKeep.Vertices, m.IndexStart * F, data, 0, data.Length); // con gli spigoli, vertice k = indice k
         float minY = float.MaxValue, maxY = float.MinValue;
         for (int v = 0; v < m.IndexCount; v++)
         {
             int o = v * F;
-            data[o] -= m.Anchor.X; data[o + 1] -= m.Anchor.Y; data[o + 2] -= m.Anchor.Z;   // posizione
+            data[o] -= m.Anchor.X; data[o + 1] -= m.Anchor.Y; data[o + 2] -= m.Anchor.Z;
             minY = MathF.Min(minY, data[o + 1]);
             maxY = MathF.Max(maxY, data[o + 1]);
         }
-        if (m.IndexCount > 0) m.CenterY = (minY + maxY) * 0.5f; // perno della rotazione: centro dell'oggetto
+        centerY = (minY + maxY) * 0.5f;
         var indices = new uint[m.IndexCount];
         for (int k = 0; k < indices.Length; k++) indices[k] = (uint)k;
-        m.Mesh = new Mesh(_gl, data, indices);
+        mesh = new Mesh(_gl, data, indices);
+        return true;
+    }
+
+    /// <summary>Stacca l'oggetto dalla mesh della scenografia per disegnarlo a parte (alla prima mossa).</summary>
+    private void Detach(int i)
+    {
+        var m = _movables[i];
+        if (m.Detached || !DetachedMesh(m, out var mesh, out float centerY)) return;
+        m.Mesh = mesh;
+        m.CenterY = centerY; // perno della rotazione: centro dell'oggetto
         Scenery.ZeroIndices(m.IndexStart, m.IndexCount);
         m.Detached = true;
         _detached.Add(i);
@@ -231,6 +354,15 @@ public sealed partial class Zone
             Matrix4x4 model = Matrix4x4.CreateTranslation(-pivot) * Matrix4x4.CreateFromQuaternion(m.Rotation)
                               * Matrix4x4.CreateTranslation(pivot) * Matrix4x4.CreateTranslation(Origin + new Vector3(p.X, y, p.Y));
             items.Add(new DrawItem(m.Mesh!, model, Area: area)); // rocce e cespugli non diventano trasparenti
+        }
+        // Pali abbattuti in volo: ruotano attorno al loro centro e verso la fine si rimpiccioliscono fino a sparire
+        foreach (var f in _flying)
+        {
+            float scale = 1f - Noise.Smooth(FlyTime * 0.55f, FlyTime, f.Age);
+            var pivot = new Vector3(0f, f.CenterY, 0f);
+            Matrix4x4 model = Matrix4x4.CreateTranslation(-pivot) * Matrix4x4.CreateScale(scale) * Matrix4x4.CreateFromQuaternion(f.Rotation)
+                              * Matrix4x4.CreateTranslation(pivot) * Matrix4x4.CreateTranslation(f.Pos);
+            items.Add(new DrawItem(f.Mesh, model));
         }
     }
 
@@ -259,5 +391,6 @@ public sealed partial class Zone
     private void DisposeMovables()
     {
         foreach (var m in _movables) m.Mesh?.Dispose();
+        foreach (var f in _flying) f.Mesh.Dispose();
     }
 }
