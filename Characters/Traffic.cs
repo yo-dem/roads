@@ -11,7 +11,8 @@ namespace Roads.Characters;
 /// andare (più spesso dritto, raramente in un vicolo cieco) e attraversa lo slargo su una curva morbida che unisce la
 /// corsia da cui arriva a quella in cui entra. Rallenta prima delle curve, tiene la distanza da chi ha davanti (altre
 /// auto, il giocatore, il personaggio a piedi, il treno e le sbarre del passaggio a livello) e, se l'auto del giocatore
-/// o il personaggio fermi le sbarrano la strada, li aggira passando nell'altra corsia quando è libera.
+/// o il personaggio fermi le sbarrano la strada, li aggira passando nell'altra corsia quando è libera. Ai semafori si
+/// ferma prima della linea d'arresto col rosso, e col giallo se fa in tempo a fermarsi senza inchiodare.
 /// Nascono fuori dalla vista (nella nebbia) e spariscono quando ci si allontana: attorno al giocatore ce n'è sempre
 /// più o meno lo stesso numero. Il moto è cinematico: nessuna fisica, la posizione segue la corsia.
 /// </summary>
@@ -158,6 +159,8 @@ public sealed class Traffic : IDisposable
         public float Shift, ShiftTarget, Blocked;
         public Vector2 BypassAt;
         public float Ghost; // per qualche istante ignora le altre auto (si sblocca da un ingorgo senza uscita)
+        // In coda per una buona ragione (rosso, treno, o dietro a chi lo è): chi le sta dietro aspetta e basta
+        public bool Queued, AtLight;
         // Posa
         public Vector2 Pos, Heading;
         public float Y, Yaw, Pitch, Spin, Steer, Brake;
@@ -174,9 +177,9 @@ public sealed class Traffic : IDisposable
     /// Fa nascere, guidare e sparire le auto. <paramref name="player"/> = auto del giocatore, <paramref name="walker"/>
     /// = il personaggio a piedi (null se è in auto o in treno), <paramref name="focus"/> = dove sta chi si comanda.
     /// </summary>
-    public void Update(float dt, WorldMap world, Car player, Vector3? walker, Vector3 focus)
+    public void Update(float dt, float clock, WorldMap world, Car player, Vector3? walker, Vector3 focus)
     {
-        _time += dt;
+        _time = clock; // lo stesso orologio dei semafori disegnati
         var center = new Vector2(focus.X, focus.Z);
 
         // Sparisce chi è troppo lontano o è finito fuori dal territorio caricato
@@ -398,6 +401,20 @@ public sealed class Traffic : IDisposable
             want = MathF.Min(want, MathF.Sqrt(v.TurnSpeed * v.TurnSpeed + 2f * Decel * MathF.Max(0f, v.Remaining - 0.5f)));
         if (!v.Turning && v.Next == null) want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, v.Remaining)));
 
+        // Semaforo all'incrocio in fondo al tratto: col rosso (o col giallo, se si fa in tempo) ci si ferma alla linea
+        v.AtLight = false;
+        if (!v.Turning && LightAhead(v) is { } light)
+        {
+            float stop = v.Remaining - StopLine(v) - (HullOffset + HullRadius);
+            bool halt = light == TrafficLights.Light.Red
+                        || (light == TrafficLights.Light.Yellow && v.Speed * v.Speed / (2f * Decel) <= stop + 0.5f);
+            if (halt && stop > -0.3f) // chi ha già superato la linea prosegue
+            {
+                want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, stop)));
+                v.AtLight = true;
+            }
+        }
+
         float look = Math.Clamp(2f + v.Speed * v.Speed / (2f * Decel) + v.Speed * 0.6f, 4f, 16f);
         float free = FreeDistance(v, look, v.ShiftTarget, out var hit, out bool train);
         want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, free - Margin)));
@@ -407,9 +424,13 @@ public sealed class Traffic : IDisposable
         // traffico (succede negli incroci) dopo un po' si passa attraverso
         bool stuck = free < 1.2f && want < 0.3f;
         v.Blocked = stuck ? v.Blocked + dt : 0f;
+        // In coda per un motivo valido: fermi al semaforo, davanti al treno, dietro a un'auto che è in coda anche lei
+        Vehicle? ahead = stuck && hit is { Car: true } hc ? _cars.Find(o => o.Id == hc.Owner) : null;
+        v.Queued = (v.AtLight && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false);
         if (stuck && hit is { } h && !train)
         {
-            if (h.Car && v.Blocked > 6f) v.Ghost = 2.5f;
+            // Solo un ingorgo vero (nessuno davanti sta aspettando il verde o il treno) si sblocca passando attraverso
+            if (h.Car && v.Blocked > 6f && !(ahead?.Queued ?? false)) v.Ghost = 2.5f;
             else if (!h.Car && !h.Moving && v.Blocked > 2f && v.ShiftTarget == 0f && CanBypass(v))
             {
                 v.ShiftTarget = -2f * v.Edge.LaneHalf;
@@ -435,6 +456,28 @@ public sealed class Traffic : IDisposable
 
         Advance(v, v.Speed * dt);
         Pose(v, world, dt);
+    }
+
+    private readonly Dictionary<RoadNode, bool> _hasLight = new();
+
+    /// <summary>La luce del semaforo che regola il tratto all'incrocio in fondo (null se lì non c'è semaforo).</summary>
+    private TrafficLights.Light? LightAhead(Vehicle v)
+    {
+        var node = v.Dir > 0 ? v.Edge.B : v.Edge.A;
+        if (!_hasLight.TryGetValue(node, out bool has)) _hasLight[node] = has = TrafficLights.Has(node);
+        if (!has || v.Remaining > 40f) return null;
+        return TrafficLights.State(node, TrafficLights.Group(node, v.Edge), _time);
+    }
+
+    /// <summary>
+    /// Distanza dalla fine della carreggiata a cui il muso si ferma: appena prima della linea d'arresto, che sta dopo le
+    /// strisce pedonali (vedi Zone.Markings: strisce da 0.35 a 1.75, linea da 2.1 a 2.4); sui tratti troppo corti per le
+    /// strisce, appena prima dell'incrocio.
+    /// </summary>
+    private static float StopLine(Vehicle v)
+    {
+        float z1 = (v.Dir > 0 ? v.Edge.B : v.Edge.A).TrimFor(v.Edge) + 0.35f + 1.4f;
+        return z1 + 1f > v.Edge.Length * 0.5f ? 0.2f : 2.5f;
     }
 
     /// <summary>Si può passare nella corsia a sinistra? Solo sulle strade a doppio senso e sui viali, lontano dagli incroci.</summary>
@@ -561,7 +604,11 @@ public sealed class Traffic : IDisposable
     {
         int stopped = _cars.Count(v => v.Speed < 0.1f), turning = _cars.Count(v => v.Turning);
         int bypass = _cars.Count(v => v.ShiftTarget != 0f), ghost = _cars.Count(v => v.Ghost > 0f);
-        return $"traffico: {_cars.Count} auto, {stopped} ferme, {turning} negli incroci, {bypass} aggirano, {ghost} sbloccate";
+        int light = _cars.Count(v => v.AtLight && v.Speed < 0.1f), queued = _cars.Count(v => v.Queued);
+        return $"traffico: {_cars.Count} auto, {stopped} ferme ({light} al rosso, {queued} in coda), {turning} negli incroci, "
+               + $"{bypass} aggirano, {ghost} sbloccate"
+               + (_cars.Find(v => v.Id == _followed) is { } f
+                   ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Queued ? ", in coda" : "")}" : "");
     }
 
     public void Dispose()

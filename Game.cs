@@ -403,7 +403,7 @@ public sealed partial class Game : IDisposable
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
         // Il traffico gira attorno a chi si comanda; il personaggio conta come ostacolo solo quando è a terra
-        _traffic?.Update(dt, _world, _player, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos);
+        _traffic?.Update(dt, _time, _world, _player, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos);
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
