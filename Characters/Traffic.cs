@@ -13,6 +13,9 @@ namespace Roads.Characters;
 /// auto, il giocatore, il personaggio a piedi, il treno e le sbarre del passaggio a livello) e, se l'auto del giocatore
 /// o il personaggio fermi le sbarrano la strada, li aggira passando nell'altra corsia quando è libera. Ai semafori si
 /// ferma prima della linea d'arresto col rosso, e col giallo se fa in tempo a fermarsi senza inchiodare.
+/// Precedenze (non ci sono cartelli: regole che si intuiscono guardando): chi è già nell'incrocio va lasciato uscire;
+/// senza semaforo ha la precedenza la strada più importante (statale, poi viale, poi via), tra pari chi viene da
+/// destra; chi arriva di fronte e gira a sinistra cede a chi va dritto o gira a destra (anche col verde).
 /// Nascono fuori dalla vista (nella nebbia) e spariscono quando ci si allontana: attorno al giocatore ce n'è sempre
 /// più o meno lo stesso numero. Il moto è cinematico: nessuna fisica, la posizione segue la corsia.
 /// </summary>
@@ -161,6 +164,11 @@ public sealed class Traffic : IDisposable
         public float Ghost; // per qualche istante ignora le altre auto (si sblocca da un ingorgo senza uscita)
         // In coda per una buona ragione (rosso, treno, o dietro a chi lo è): chi le sta dietro aspetta e basta
         public bool Queued, AtLight;
+        // Precedenze: l'incrocio della curva, che manovra è, se sta dando la precedenza e da quanto
+        public RoadNode? TurnNode;
+        public TurnKind Kind;
+        public bool Yield;
+        public float YieldTime;
         // Posa
         public Vector2 Pos, Heading;
         public float Y, Yaw, Pitch, Spin, Steer, Brake;
@@ -168,6 +176,9 @@ public sealed class Traffic : IDisposable
 
         public float Remaining => (EndS(Edge, Dir) - S) * Dir;
     }
+
+    /// <summary>Manovra all'incrocio, in ordine di precedenza tra chi arriva di fronte.</summary>
+    private enum TurnKind { Straight, Right, Left, UTurn }
 
     private readonly record struct Circle(Vector2 C, float R, int Owner, bool Car, bool Moving);
 
@@ -313,6 +324,7 @@ public sealed class Traffic : IDisposable
 
         v.Next = pick;
         v.Turn = null;
+        v.TurnNode = node;
         if (pick == null) return; // senso unico senza uscita: arrivata in fondo sparisce
         v.NextDir = pickDir;
         var lanes = pick.TravelLanes(pickDir);
@@ -331,6 +343,7 @@ public sealed class Traffic : IDisposable
         float reach = uTurn ? MathF.Max(1.8f, gap * 0.9f) : MathF.Max(0.6f, gap * 0.42f);
         v.Turn = new Curve(p0, arrive, p3, leaveDir, reach);
         float angle = MathF.Acos(Math.Clamp(Vector2.Dot(arrive, leaveDir), -1f, 1f));
+        v.Kind = uTurn ? TurnKind.UTurn : angle < 0.5f ? TurnKind.Straight : cross > 0f ? TurnKind.Right : TurnKind.Left;
         v.TurnSpeed = uTurn ? 2f : Noise.Lerp(MathF.Min(v.Cruise, Limit(pick)) * 0.9f, 3f, Noise.Smooth(0.25f, 1.5f, angle));
     }
 
@@ -415,6 +428,20 @@ public sealed class Traffic : IDisposable
             }
         }
 
+        // Precedenze: se qualcuno ha diritto di passare prima (o è già nell'incrocio sulla nostra traiettoria) ci si ferma
+        // alla linea; superata la linea si prosegue
+        v.Yield = false;
+        if (!v.Turning && v.Turn != null && v.Remaining < 16f && !v.AtLight)
+        {
+            float stop = v.Remaining - StopLine(v) - (HullOffset + HullRadius);
+            if (stop > -0.3f && MustYield(v))
+            {
+                want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, stop)));
+                v.Yield = true;
+            }
+        }
+        v.YieldTime = v.Yield && v.Speed < 0.3f ? v.YieldTime + dt : 0f;
+
         float look = Math.Clamp(2f + v.Speed * v.Speed / (2f * Decel) + v.Speed * 0.6f, 4f, 16f);
         float free = FreeDistance(v, look, v.ShiftTarget, out var hit, out bool train);
         want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, free - Margin)));
@@ -426,7 +453,7 @@ public sealed class Traffic : IDisposable
         v.Blocked = stuck ? v.Blocked + dt : 0f;
         // In coda per un motivo valido: fermi al semaforo, davanti al treno, dietro a un'auto che è in coda anche lei
         Vehicle? ahead = stuck && hit is { Car: true } hc ? _cars.Find(o => o.Id == hc.Owner) : null;
-        v.Queued = (v.AtLight && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false);
+        v.Queued = ((v.AtLight || v.Yield) && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false);
         if (stuck && hit is { } h && !train)
         {
             // Solo un ingorgo vero (nessuno davanti sta aspettando il verde o il treno) si sblocca passando attraverso
@@ -460,12 +487,17 @@ public sealed class Traffic : IDisposable
 
     private readonly Dictionary<RoadNode, bool> _hasLight = new();
 
+    private bool HasLight(RoadNode node)
+    {
+        if (!_hasLight.TryGetValue(node, out bool has)) _hasLight[node] = has = TrafficLights.Has(node);
+        return has;
+    }
+
     /// <summary>La luce del semaforo che regola il tratto all'incrocio in fondo (null se lì non c'è semaforo).</summary>
     private TrafficLights.Light? LightAhead(Vehicle v)
     {
         var node = v.Dir > 0 ? v.Edge.B : v.Edge.A;
-        if (!_hasLight.TryGetValue(node, out bool has)) _hasLight[node] = has = TrafficLights.Has(node);
-        if (!has || v.Remaining > 40f) return null;
+        if (!HasLight(node) || v.Remaining > 40f) return null;
         return TrafficLights.State(node, TrafficLights.Group(node, v.Edge), _time);
     }
 
@@ -478,6 +510,68 @@ public sealed class Traffic : IDisposable
     {
         float z1 = (v.Dir > 0 ? v.Edge.B : v.Edge.A).TrimFor(v.Edge) + 0.35f + 1.4f;
         return z1 + 1f > v.Edge.Length * 0.5f ? 0.2f : 2.5f;
+    }
+
+    /// <summary>Importanza della strada per le precedenze senza semaforo.</summary>
+    private static int Rank(RoadEdge e) => e.Kind == RoadKind.Main ? 3 : e.Layout == RoadLayout.Avenue ? 2 : 1;
+
+    /// <summary>
+    /// <paramref name="o"/> passa prima di <paramref name="v"/> all'incrocio <paramref name="node"/>? La regola è
+    /// antisimmetrica (tra due auto una sola ha la precedenza), così non si aspettano a vicenda.
+    /// </summary>
+    private bool HasPriority(Vehicle o, Vehicle v, RoadNode node)
+    {
+        bool light = HasLight(node);
+        if (!light)
+        {
+            int ro = Rank(o.Edge), rv = Rank(v.Edge);
+            if (ro != rv) return ro > rv;
+        }
+        // Da dove arrivano: la direzione del loro tratto uscendo dal nodo
+        Vector2 vf = v.Edge.LeaveDir(node), of = o.Edge.LeaveDir(node);
+        float c = -vf.X * of.Y + vf.Y * of.X; // > 0: o arriva dalla destra di v
+        if (light || MathF.Abs(c) < 0.35f)
+            return o.Kind != v.Kind ? o.Kind < v.Kind : o.Id < v.Id; // di fronte: chi gira a sinistra cede
+        return c > 0f;
+    }
+
+    /// <summary>Le due traiettorie nell'incrocio passano tanto vicine da urtarsi? (ognuna dal punto in cui è arrivata)</summary>
+    private static bool Conflicts(Curve a, float aFrom, Curve b, float bFrom)
+    {
+        const float step = 0.5f, near = 1.2f;
+        for (float da = aFrom; da <= a.Length + 0.01f; da += step)
+        {
+            Vector2 pa = a.At(da);
+            for (float db = bFrom; db <= b.Length + 0.01f; db += step)
+                if (Vector2.DistanceSquared(pa, b.At(db)) < near * near) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Deve fermarsi alla linea per dare la precedenza? Sì se un'auto già nell'incrocio, o una in arrivo che ha la
+    /// precedenza, ha una traiettoria che incrocia la nostra. Se tutti si aspettano a vicenda da un po' (ognuno ha
+    /// qualcuno alla sua destra), passa chi ha il numero più basso.
+    /// </summary>
+    private bool MustYield(Vehicle v)
+    {
+        var node = v.TurnNode!;
+        foreach (var o in _cars)
+        {
+            if (o == v || o.Turn == null || o.TurnNode != node) continue;
+            if (o.Turning)
+            {
+                if (Conflicts(v.Turn!, 0f, o.Turn, o.TurnD)) return true;
+                continue;
+            }
+            if (o.Edge == v.Edge && o.Dir == v.Dir) continue;      // stessa corsia d'arrivo: basta la distanza
+            if (o.AtLight || o.Remaining > 14f) continue;           // fermo al rosso o ancora lontano
+            if (o.Speed < 0.3f && o.Remaining > StopLine(o) + 3f) continue; // in coda dietro ad altri
+            if (!HasPriority(o, v, node)) continue;
+            if (o.Yield && o.YieldTime > 2.5f && v.YieldTime > 2.5f && v.Id < o.Id) continue; // stallo: si sblocca
+            if (Conflicts(v.Turn!, 0f, o.Turn, 0f)) return true;
+        }
+        return false;
     }
 
     /// <summary>Si può passare nella corsia a sinistra? Solo sulle strade a doppio senso e sui viali, lontano dagli incroci.</summary>
@@ -605,10 +699,12 @@ public sealed class Traffic : IDisposable
         int stopped = _cars.Count(v => v.Speed < 0.1f), turning = _cars.Count(v => v.Turning);
         int bypass = _cars.Count(v => v.ShiftTarget != 0f), ghost = _cars.Count(v => v.Ghost > 0f);
         int light = _cars.Count(v => v.AtLight && v.Speed < 0.1f), queued = _cars.Count(v => v.Queued);
-        return $"traffico: {_cars.Count} auto, {stopped} ferme ({light} al rosso, {queued} in coda), {turning} negli incroci, "
+        int yields = _cars.Count(v => v.Yield);
+        return $"traffico: {_cars.Count} auto, {stopped} ferme ({light} al rosso, {yields} danno precedenza, {queued} in coda), "
+               + $"{turning} negli incroci, "
                + $"{bypass} aggirano, {ghost} sbloccate"
                + (_cars.Find(v => v.Id == _followed) is { } f
-                   ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Queued ? ", in coda" : "")}" : "");
+                   ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Yield ? ", dà precedenza" : "")}{(f.Queued ? ", in coda" : "")}" : "");
     }
 
     public void Dispose()
