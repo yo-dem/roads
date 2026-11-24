@@ -60,12 +60,32 @@ public sealed class Shader : IDisposable
         _gl.UniformMatrix4(Location(name), 1, false, (float*)&m);
     }
 
+    /// <summary>mat3 da nove valori, colonna per colonna.</summary>
+    public void SetMatrix3(string name, ReadOnlySpan<float> m) => _gl.UniformMatrix3(Location(name), 1, false, m);
+
     public void SetVector2(string name, Vector2 v) => _gl.Uniform2(Location(name), v.X, v.Y);
     public void SetVector3(string name, Vector3 v) => _gl.Uniform3(Location(name), v.X, v.Y, v.Z);
     /// <summary>Array di vec3 (es. "uLampPos[0]"): <paramref name="xyz"/> contiene le terne una dopo l'altra.</summary>
     public void SetVector3Array(string name, ReadOnlySpan<float> xyz) => _gl.Uniform3(Location(name), (uint)(xyz.Length / 3), xyz);
-    public void SetFloat(string name, float v) => _gl.Uniform1(Location(name), v);
-    public void SetInt(string name, int v) => _gl.Uniform1(Location(name), v);
+    // Gli scalari si reimpostano solo se cambiano: tra un oggetto e l'altro quasi sempre sono uguali
+    private readonly Dictionary<int, float> _floats = new();
+    private readonly Dictionary<int, int> _ints = new();
+
+    public void SetFloat(string name, float v)
+    {
+        int loc = Location(name);
+        if (_floats.TryGetValue(loc, out float old) && old == v) return;
+        _floats[loc] = v;
+        _gl.Uniform1(loc, v);
+    }
+
+    public void SetInt(string name, int v)
+    {
+        int loc = Location(name);
+        if (_ints.TryGetValue(loc, out int old) && old == v) return;
+        _ints[loc] = v;
+        _gl.Uniform1(loc, v);
+    }
 
     public void Dispose() => _gl.DeleteProgram(_handle);
 }

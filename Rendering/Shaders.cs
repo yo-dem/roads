@@ -76,6 +76,12 @@ public static class Shaders
             vFade = objectFade();
             vLightPos = uLightSpace * w;
             gl_Position = uProj * uView * w;
+            // Tutto l'oggetto sbiadisce o no insieme (vFade è per oggetto): ciò che il fragment shader scarterebbe
+            // comunque si porta fuori dallo schermo già qui, e la scheda grafica non lo rasterizza nemmeno
+            // (pass opaco: gli oggetti che sbiadiscono; pass semitrasparente: tutti gli altri)
+            const float FadeOn = 0.004;
+            if ((uSeeThrough == 1 && vFade > FadeOn) || (uSeeThrough == 2 && vFade <= FadeOn))
+                gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         }
         """;
 
@@ -104,7 +110,7 @@ public static class Shaders
         in vec3 vNormal;
         flat in float vFade;
 
-        uniform sampler2D uShadowMap;
+        uniform sampler2DShadow uShadowMap;
         uniform int uSmooth;         // ombreggiatura morbida (normali interpolate) invece che a facce piatte
         uniform vec3 uLightDir;
         uniform vec3 uCameraPos;
@@ -141,14 +147,13 @@ public static class Shaders
             if (p.z > 1.0 || p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;
             float bias = max(0.002 * (1.0 - ndl), 0.0004);
             vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
-            float lit = 0.0;
-            for (int x = -1; x <= 1; x++)
-                for (int y = -1; y <= 1; y++)
-                {
-                    float d = texture(uShadowMap, p.xy + vec2(x, y) * texel).r;
-                    lit += (p.z - bias > d) ? 0.0 : 1.0;
-                }
-            return lit / 9.0;
+            // Quattro letture col confronto hardware (ognuna media 2x2 campioni): morbida come un 3x3, meno della metà del lavoro
+            float z = p.z - bias;
+            float lit = texture(uShadowMap, vec3(p.xy + vec2(-0.5, -0.5) * texel, z))
+                      + texture(uShadowMap, vec3(p.xy + vec2( 0.5, -0.5) * texel, z))
+                      + texture(uShadowMap, vec3(p.xy + vec2(-0.5,  0.5) * texel, z))
+                      + texture(uShadowMap, vec3(p.xy + vec2( 0.5,  0.5) * texel, z));
+            return lit * 0.25;
         }
 
         void main()
@@ -205,7 +210,9 @@ public static class Shaders
                 for (int i = 0; i < uLampCount; i++)
                 {
                     vec3 toFrag = vWorld - uLampPos[i];
-                    float dist = length(toFrag);
+                    float d2 = dot(toFrag, toFrag);
+                    if (d2 > 72.25) continue; // oltre 8.5 la pozza di luce non arriva
+                    float dist = sqrt(d2);
                     vec3 l = toFrag / max(dist, 1e-3);
                     float down = 0.35 + 0.65 * smoothstep(-0.2, 0.7, -l.y); // più luce verso il basso che di lato
                     float reach = 1.0 - smoothstep(1.5, 8.5, dist);
@@ -253,6 +260,15 @@ public static class Shaders
             FragColor = vec4(mix(col, skyColor(toFrag / d), fog), alpha * uAlpha);
         }
         """.Replace("//SKY", SkyGlsl);
+
+    /// <summary>
+    /// Lo stesso shader senza "discard", per tutto ciò che non sbiadisce mai (terreno, case, veicoli, personaggi): sulle
+    /// schede grafiche a tessere (Apple) un discard nel programma spegne la rimozione delle superfici nascoste, e si
+    /// calcolerebbero anche i pixel che poi finiscono coperti.
+    /// </summary>
+    public static readonly string LitFragmentSolid = LitFragment
+        .Replace("if (uSeeThrough == 1 && vFade > FadeOn) discard;", "")
+        .Replace("if (uSeeThrough == 2 && vFade <= FadeOn) discard;", "");
 
     /// <summary>Sfondo: triangolo a tutto schermo, il colore dipende dalla direzione del raggio.</summary>
     public const string SkyVertex = """

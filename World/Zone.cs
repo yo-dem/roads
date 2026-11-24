@@ -38,6 +38,8 @@ public sealed partial class Zone : IDisposable
     public Mesh Opaque { get; private set; } = null!;
     /// <summary>Alberi, rocce e oggetti di scena: separati dal terreno per renderli trasparenti quando coprono il giocatore.</summary>
     public Mesh Scenery { get; private set; } = null!;
+    /// <summary>Ingombri degli oggetti dello scenario (locali al pezzo): per sapere se qualcuno copre il giocatore.</summary>
+    public (float X, float Z, float R, float Y0, float Y1)[] SceneryObjects { get; private set; } = [];
     public Mesh? Water { get; private set; }
     /// <summary>Finestre accese e lampade dei lampioni: si illuminano di notte.</summary>
     public Mesh? Glow { get; private set; }
@@ -94,6 +96,7 @@ public sealed partial class Zone : IDisposable
         var gb = new MeshBuilder { ComputeEdges = true }; // spigoli: le finestre accese sfumano col loro edificio
         PlaceProps(pb, gb, rng, home);
         _sceneryData = pb.BuildData();
+        SceneryObjects = pb.Objects.ToArray();
         _glowData = gb.IsEmpty ? null : gb.BuildData();
 
         var wb = new MeshBuilder();

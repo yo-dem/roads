@@ -60,6 +60,12 @@ public sealed class MeshBuilder
         for (int k = 0; k < ObjectFloats; k++) _objects.Add(0f);
     }
 
+    /// <summary>
+    /// Gli ingombri degli oggetti chiusi con <see cref="EndObject()"/> (centro x/z, raggio col segno degli edifici, quota
+    /// minima e massima), come li vede lo shader: servono a sapere sul processore se qualcuno può sbiadire.
+    /// </summary>
+    public readonly List<(float X, float Z, float R, float Y0, float Y1)> Objects = new();
+
     /// <summary>Inizia un oggetto (albero, roccia...): la geometria aggiunta fino a <see cref="EndObject"/> ne fa parte.</summary>
     public void BeginObject() => _objectStart = (int)VertexCount;
 
@@ -103,6 +109,7 @@ public sealed class MeshBuilder
             }
         float cx = (min.X + max.X) * 0.5f, cz = (min.Z + max.Z) * 0.5f;
         float radius = MathF.Max(max.X - min.X, max.Z - min.Z) * 0.5f;
+        Objects.Add((cx, cz, building ? -radius : radius, min.Y, max.Y));
         for (int v = start; v < end; v++)
         {
             int o = v * ObjectFloats;

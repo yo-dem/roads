@@ -36,6 +36,8 @@ public sealed class DebugOptions
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
     public bool FollowTraffic;     // la camera segue un'auto del traffico (test)
+    public bool Profile;
+    public int? Msaa;              // campioni di antialiasing (di serie 4)           // misura i tempi di ogni fase del fotogramma
     public bool HitTest;           // l'auto parte puntata contro il passante più vicino (test)
     public bool StealTest;         // scende e ruba un'auto del traffico (test)
     public bool RamTraffic;        // l'auto parte di fianco a un'auto del traffico, puntata contro (test)
@@ -60,10 +62,20 @@ public sealed partial class Game : IDisposable
     private IInputContext _input = null!;
     private IKeyboard _keyboard = null!;
     private Shader _lit = null!, _depth = null!, _sky = null!;
+    private Shader _litFull = null!, _litSolid = null!; // con e senza discard (vedi Shaders.LitFragmentSolid); _lit è quello in uso
     private uint _skyVao;
     private Clouds _clouds = null!;
     private readonly List<DrawItem> _cloudItems = new();
     private ShadowMap _shadow = null!;
+    // Ombre in cache: la parte fissa (terreno, case, alberi) si ridisegna solo quando serve; a ogni fotogramma la si
+    // copia nella mappa usata dallo shader e ci si aggiungono le cose che si muovono
+    private ShadowMap _shadowStatic = null!;
+    private Vector3? _shadowCenter;
+    private Vector3 _shadowLight;
+    private Matrix4x4 _shadowSpace;
+    private (int, int) _shadowZones;
+    private int _shadowRedos; // per il profilo
+    private const float ShadowSlack = 4f; // di quanto la camera può spostarsi prima di ridisegnare la parte fissa
     private Mesh _flame = null!;
     private bool _rightHeld;
     private Vector2 _lastMouse;
@@ -178,12 +190,15 @@ public sealed partial class Game : IDisposable
         _gl.Enable(EnableCap.DepthTest);
         _gl.Enable(EnableCap.Multisample);
 
-        _lit = new Shader(_gl, Shaders.LitVertex, Shaders.LitFragment);
+        _litFull = new Shader(_gl, Shaders.LitVertex, Shaders.LitFragment);
+        _litSolid = new Shader(_gl, Shaders.LitVertex, Shaders.LitFragmentSolid);
+        _lit = _litFull;
         _depth = new Shader(_gl, Shaders.DepthVertex, Shaders.DepthFragment);
         _sky = new Shader(_gl, Shaders.SkyVertex, Shaders.SkyFragment);
         _skyVao = _gl.GenVertexArray();
         _clouds = new Clouds(_gl);
         _shadow = new ShadowMap(_gl, 2048);
+        _shadowStatic = new ShadowMap(_gl, 2048);
         _hud = new Hud(_gl);
         _flame = Props.BuildFlame(_gl);
         _day = new DayCycle(_debug.Hour ?? StartHour);
@@ -251,7 +266,7 @@ public sealed partial class Game : IDisposable
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
-        _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic };
+        _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic, TrackOverlap = _debug.Shots.Count > 0 };
         _peds = new Pedestrians(_gl);
         // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
         Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
@@ -283,8 +298,68 @@ public sealed partial class Game : IDisposable
     private Matrix4x4 Projection(float aspect) =>
         Matrix4x4.CreatePerspectiveFieldOfView(_fov, aspect, _onTrain ? 0.08f : 0.3f, 1200f);
 
+    // ------------------------------------------------------------------ profilo (--profilo)
+    private readonly System.Diagnostics.Stopwatch _prof = new();
+    private readonly Dictionary<string, double> _profMs = new();
+    private int _profFrames;
+    private double _profClock;
+    private readonly Dictionary<string, long> _profTris = new();
+    private readonly Dictionary<string, double> _frameMs = new(), _worstMs = new();
+    private double _worstTotal;
+    private long _allocAtReport;
+    private int _gc0, _gc1, _gc2;
+    private long _trisAtMark;
+    private void Mark(string phase)
+    {
+        if (!_debug.Profile) return;
+        _profMs[phase] = _profMs.GetValueOrDefault(phase) + _prof.Elapsed.TotalMilliseconds;
+        _frameMs[phase] = _frameMs.GetValueOrDefault(phase) + _prof.Elapsed.TotalMilliseconds;
+        _profTris[phase] = _profTris.GetValueOrDefault(phase) + (Mesh.Triangles - _trisAtMark);
+        _trisAtMark = Mesh.Triangles;
+        _prof.Restart();
+    }
+
+    private void ProfileReport(double deltaTime)
+    {
+        if (!_debug.Profile) return;
+        double total = _frameMs.Values.Sum();
+        if (total > _worstTotal)
+        {
+            _worstTotal = total;
+            _worstMs.Clear();
+            foreach (var kv in _frameMs) _worstMs[kv.Key] = kv.Value;
+        }
+        _frameMs.Clear();
+        _profFrames++;
+        _profClock += deltaTime;
+        if (_profClock < 3.0) return;
+        string parts = string.Join("  ", _profMs.Select(kv => $"{kv.Key} {kv.Value / _profFrames:F2}"));
+        Console.WriteLine($"Profilo: {_profFrames / _profClock:F0} FPS, ms per fotogramma: {parts}; oggetti {_opaque.Count}, "
+                          + $"ombre fisse ridisegnate {_shadowRedos} volte su {_profFrames}, "
+                          + $"{Mesh.Triangles / _profFrames / 1000} mila triangoli e {Mesh.DrawCalls / _profFrames} disegni per fotogramma");
+        Console.WriteLine("  triangoli (mila) per fase: " + string.Join("  ", _profTris.Where(kv => kv.Value > 0)
+                              .Select(kv => $"{kv.Key} {kv.Value / _profFrames / 1000}")));
+        _profTris.Clear();
+        Console.WriteLine($"  fotogramma peggiore {_worstTotal:F1} ms: " + string.Join("  ", _worstMs.Where(kv => kv.Value > 0.5)
+                              .Select(kv => $"{kv.Key} {kv.Value:F1}")));
+        _worstTotal = 0;
+        long alloc = GC.GetTotalAllocatedBytes();
+        Console.WriteLine($"  memoria allocata {(alloc - _allocAtReport) / _profClock / 1e6:F1} MB/s, raccolte gen0/1/2: "
+                          + $"{GC.CollectionCount(0) - _gc0}/{GC.CollectionCount(1) - _gc1}/{GC.CollectionCount(2) - _gc2}");
+        _allocAtReport = alloc;
+        (_gc0, _gc1, _gc2) = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
+        Mesh.Triangles = 0;
+        _trisAtMark = 0;
+        Mesh.DrawCalls = 0;
+        _shadowRedos = 0;
+        _profMs.Clear();
+        _profFrames = 0;
+        _profClock = 0;
+    }
+
     private void OnUpdate(double deltaTime)
     {
+        _prof.Restart();
         float dt = (float)Math.Min(deltaTime, 0.05);
         _time += dt;
 
@@ -478,6 +553,7 @@ public sealed partial class Game : IDisposable
             if (_onTrain) RideTrain(dt, moveX, moveY, sprint);
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
+        Mark("guida");
         // Il traffico gira attorno a chi si comanda; il personaggio conta come ostacolo solo quando è a terra
         // Le auto parcheggiate restano lì (spinte da un urto scivolano e si fermano)
         foreach (var car in _parked) car.Update(dt, Vector2.Zero, false, _world, _particles);
@@ -488,7 +564,9 @@ public sealed partial class Game : IDisposable
         _peds?.Update(dt, _world, _particles, ActivePos, BlockedByOwnCars, driver: _onFoot ? null : _player);
         _traffic?.Update(dt, _time, _world, _owned, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos,
                          _peds?.Positions);
+        Mark("traffico+passanti");
         Zone? spawned = _world.Update(dt, ActivePos);
+        Mark("territorio");
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
 
@@ -563,6 +641,47 @@ public sealed partial class Game : IDisposable
         }
     }
 
+    /// <summary>Gli uniform del fotogramma per lo shader in uso (<see cref="_lit"/>): camera, luci, cielo, lampioni.</summary>
+    private void SetupLit(Matrix4x4 proj, Matrix4x4 lightSpace, Vector3 lightDir)
+    {
+        _lit.Use();
+        _lit.SetFloat("uAlpha", 1f);
+        _lit.SetMatrix("uProj", proj);
+        _lit.SetMatrix("uView", _camera.View);
+        _lit.SetMatrix("uLightSpace", lightSpace);
+        _lit.SetVector3("uLightDir", lightDir);
+        _lit.SetVector3("uLightColor", _day.LightColor);
+        _lit.SetVector3("uAmbientLow", _day.AmbientLow);
+        _lit.SetVector3("uAmbientHigh", _day.AmbientHigh);
+        SetSkyColors(_lit);
+        _lit.SetInt("uHeadOn", _player.Headlights ? 1 : 0);
+        _lit.SetVector3("uHeadPos[0]", _player.HeadlightPos(-1f));
+        _lit.SetVector3("uHeadPos[1]", _player.HeadlightPos(1f));
+        _lit.SetVector3("uHeadDir[0]", _player.HeadlightDir(-1f));
+        _lit.SetVector3("uHeadDir[1]", _player.HeadlightDir(1f));
+        // Fari e bagliore degli stop: pieni di notte; di giorno il sole li copre (niente terreno bruciato sul bianco)
+        float darkness = 1f - _day.Daylight;
+        _lit.SetFloat("uHeadGlow", 0.2f + 0.8f * darkness * darkness);
+        _lit.SetVector3("uTailPos", _player.TailLightPos);
+        _lit.SetVector3("uTailDir", _player.TailLightDir);
+        _lit.SetFloat("uTailGlow", darkness * ((_player.Headlights ? 0.25f : 0f) + 0.9f * _player.BrakeLight));
+        SetLamps();
+        _lit.SetVector3("uCameraPos", _camera.Position);
+        _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
+        _lit.SetInt("uOnFoot", _onFoot ? 1 : 0);
+        _lit.SetInt("uCamInside", _cameraInside && !_onTrain ? 1 : 0);
+
+        _farFog = null;
+        SetFog(false);
+        _lit.SetFloat("uTime", _time);
+        _gl.ActiveTexture(TextureUnit.Texture0);
+        _gl.BindTexture(TextureTarget.Texture2D, _shadow.Texture);
+        _lit.SetInt("uShadowMap", 0);
+
+        _lit.SetInt("uWater", 0);
+        _lit.SetInt("uCloud", 0);
+    }
+
     private const int MaxLamps = 24; // come uLampPos nello shader
     private readonly float[] _lampXyz = new float[MaxLamps * 3];
     private readonly List<(float D, Vector3 P)> _lampNear = new();
@@ -584,20 +703,42 @@ public sealed partial class Game : IDisposable
                 }
             _lampNear.Sort((a, b) => a.D.CompareTo(b.D));
         }
-        int n = Math.Min(_lampNear.Count, MaxLamps);
-        for (int i = 0; i < n; i++)
+        _lampGlow = glow;
+        _lampArea = new Vector4(float.NaN);
+        LampsFor(default);
+        _lit.SetFloat("uLampGlow", glow);
+    }
+
+    private float _lampGlow;
+    private Vector4 _lampArea = new(float.NaN);
+
+    /// <summary>
+    /// Di notte ogni pezzo di territorio riceve solo i lampioni che possono illuminarlo (entro la portata della loro
+    /// pozza di luce): lo shader ne scorre pochi invece di tutti quelli vicini alla camera. Gli oggetti senza ingombro
+    /// (auto, personaggi) ricevono i più vicini alla camera.
+    /// </summary>
+    private void LampsFor(in DrawItem item)
+    {
+        if (_lampGlow <= 0.01f) return;
+        Vector4 area = item.HasArea ? item.Area : default;
+        if (area == _lampArea) return;
+        _lampArea = area;
+        int n = 0;
+        foreach (var (_, p) in _lampNear)
         {
-            _lampXyz[i * 3] = _lampNear[i].P.X;
-            _lampXyz[i * 3 + 1] = _lampNear[i].P.Y;
-            _lampXyz[i * 3 + 2] = _lampNear[i].P.Z;
+            if (item.HasArea && RectDistance(new Vector2(p.X, p.Z), area) > 8.6f) continue;
+            _lampXyz[n * 3] = p.X;
+            _lampXyz[n * 3 + 1] = p.Y;
+            _lampXyz[n * 3 + 2] = p.Z;
+            if (++n == MaxLamps) break;
         }
         _lit.SetInt("uLampCount", n);
         if (n > 0) _lit.SetVector3Array("uLampPos[0]", _lampXyz.AsSpan(0, n * 3));
-        _lit.SetFloat("uLampGlow", glow);
     }
 
     private void CollectScene(Matrix4x4 viewProj)
     {
+        _fading.Clear();
         _viewProj = viewProj;
         _opaque.Clear();
         _water.Clear();
@@ -612,8 +753,13 @@ public sealed partial class Game : IDisposable
             float lift = zone.YOffset;
             if (!InView(area) || !InFrustum(area, -5f + MathF.Min(lift, 0f), 8f + MathF.Max(lift, 0f))) continue;
             Matrix4x4 m = zone.Model;
-            _opaque.Add(new DrawItem(zone.Opaque, m, Area: area));
-            _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true, Area: area));
+            _opaque.Add(new DrawItem(zone.Opaque, m, Area: area, Static: true));
+            _opaque.Add(new DrawItem(zone.Scenery, m, SeeThrough: true, Area: area, Static: true));
+            if (NearSightLine(area) && AnyFading(zone))
+            {
+                _fading.Add(zone.Scenery);
+                if (zone.Glow != null) _fading.Add(zone.Glow);
+            }
             zone.CollectMovables(_opaque, area); // rocce e cespugli spostati, disegnati a parte
             if (zone.Water != null) _water.Add(new DrawItem(zone.Water, m, Area: area));
             if (zone.Glow != null)
@@ -656,6 +802,7 @@ public sealed partial class Game : IDisposable
 
     private unsafe void OnRender(double deltaTime)
     {
+        Mark("resto aggiornamento");
         _frames++;
         _frameTime += deltaTime;
         _worstFrame = Math.Max(_worstFrame, deltaTime);
@@ -664,26 +811,50 @@ public sealed partial class Game : IDisposable
         if (size.X == 0 || size.Y == 0) return;
 
         CollectScene(_camera.View * Projection((float)size.X / size.Y));
+        Mark("raccolta scena");
 
         // --- 1. Shadow map dal punto di vista del sole, centrata sulla camera ---
         // In vista di guida si vede lontano davanti: l'area delle ombre si sposta in avanti
         Vector3 center = _camera.Target + _camera.Forward * (12f * _camera.Chase);
         Vector3 lightDir = _day.LightDir;
-        Matrix4x4 lightView = Matrix4x4.CreateLookAt(center - lightDir * 50f, center, Vector3.UnitY);
-        Matrix4x4 lightSpace = lightView * Matrix4x4.CreateOrthographic(56f, 56f, 1f, 110f);
-
-        _shadow.Bind();
-        _gl.Clear(ClearBufferMask.DepthBufferBit);
+        // La parte fissa si ridisegna se la camera si è spostata oltre il margine, se il sole (o la luna) si è mosso o
+        // se il territorio caricato è cambiato; altrimenti si riusa
+        var zones = (_world.LoadedCount, _world.Count);
+        bool redo = _shadowCenter is not { } old || Vector3.Distance(old, center) > ShadowSlack
+                    || Vector3.Distance(_shadowLight, lightDir) > 0.004f || zones != _shadowZones;
         _gl.Enable(EnableCap.PolygonOffsetFill);
         _gl.PolygonOffset(1.5f, 3f);
         _depth.Use();
+        if (redo)
+        {
+            _shadowRedos++;
+            _shadowCenter = center;
+            _shadowLight = lightDir;
+            _shadowZones = zones;
+            Matrix4x4 view = Matrix4x4.CreateLookAt(center - lightDir * 50f, center, Vector3.UnitY);
+            // Un po' più grande del necessario: la camera può spostarsi di ShadowSlack senza uscire dal riquadro
+            _shadowSpace = view * Matrix4x4.CreateOrthographic(56f + 2f * ShadowSlack, 56f + 2f * ShadowSlack, 1f, 110f);
+            _shadowStatic.Bind();
+            _gl.Clear(ClearBufferMask.DepthBufferBit);
+            _depth.SetMatrix("uLightSpace", _shadowSpace);
+            var staticCenter = new Vector2(center.X, center.Z);
+            foreach (var item in _opaque)
+            {
+                if (!item.CastShadow || !item.Static) continue;
+                // Fuori dal riquadro della shadow map non serve disegnarlo nel pass delle ombre
+                if (item.HasArea && RectDistance(staticCenter, item.Area) > ShadowReach + ShadowSlack) continue;
+                _depth.SetMatrix("uModel", item.Model);
+                item.Mesh.Draw();
+            }
+        }
+        Matrix4x4 lightSpace = _shadowSpace;
+        _shadow.CopyFrom(_shadowStatic);
         _depth.SetMatrix("uLightSpace", lightSpace);
-        var shadowCenter = new Vector2(center.X, center.Z);
+        var shadowCenter = new Vector2(_shadowCenter!.Value.X, _shadowCenter.Value.Z);
         foreach (var item in _opaque)
         {
-            if (!item.CastShadow) continue;
-            // Fuori dal riquadro della shadow map non serve disegnarlo nel pass delle ombre
-            if (item.HasArea && RectDistance(shadowCenter, item.Area) > ShadowReach) continue;
+            if (!item.CastShadow || item.Static) continue;
+            if (item.HasArea && RectDistance(shadowCenter, item.Area) > ShadowReach + ShadowSlack) continue;
             _depth.SetMatrix("uModel", item.Model);
             item.Mesh.Draw();
         }
@@ -693,6 +864,8 @@ public sealed partial class Game : IDisposable
             item.Mesh.Draw();
         }
         _gl.Disable(EnableCap.PolygonOffsetFill);
+        Mark("ombre (cpu)");
+        if (_debug.Profile) { _gl.Finish(); Mark("ombre (gpu)"); }
 
         // --- 2. Scena principale ---
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
@@ -719,53 +892,36 @@ public sealed partial class Game : IDisposable
             _gl.Enable(EnableCap.DepthTest);
         }
 
-        _lit.Use();
-        _lit.SetFloat("uAlpha", 1f);
-        _lit.SetMatrix("uProj", proj);
-        _lit.SetMatrix("uView", _camera.View);
-        _lit.SetMatrix("uLightSpace", lightSpace);
-        _lit.SetVector3("uLightDir", lightDir);
-        _lit.SetVector3("uLightColor", _day.LightColor);
-        _lit.SetVector3("uAmbientLow", _day.AmbientLow);
-        _lit.SetVector3("uAmbientHigh", _day.AmbientHigh);
-        SetSkyColors(_lit);
-        _lit.SetInt("uHeadOn", _player.Headlights ? 1 : 0);
-        _lit.SetVector3("uHeadPos[0]", _player.HeadlightPos(-1f));
-        _lit.SetVector3("uHeadPos[1]", _player.HeadlightPos(1f));
-        _lit.SetVector3("uHeadDir[0]", _player.HeadlightDir(-1f));
-        _lit.SetVector3("uHeadDir[1]", _player.HeadlightDir(1f));
-        // Fari e bagliore degli stop: pieni di notte; di giorno il sole li copre (niente terreno bruciato sul bianco)
-        float darkness = 1f - _day.Daylight;
-        _lit.SetFloat("uHeadGlow", 0.2f + 0.8f * darkness * darkness);
-        _lit.SetVector3("uTailPos", _player.TailLightPos);
-        _lit.SetVector3("uTailDir", _player.TailLightDir);
-        _lit.SetFloat("uTailGlow", darkness * ((_player.Headlights ? 0.25f : 0f) + 0.9f * _player.BrakeLight));
-        SetLamps();
-        _lit.SetVector3("uCameraPos", _camera.Position);
-        _lit.SetVector3("uFocus", ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0));
-        _lit.SetInt("uOnFoot", _onFoot ? 1 : 0);
-        _lit.SetInt("uCamInside", _cameraInside && !_onTrain ? 1 : 0);
-
-        _farFog = null;
-        SetFog(false);
-        _lit.SetFloat("uTime", _time);
-        _gl.ActiveTexture(TextureUnit.Texture0);
-        _gl.BindTexture(TextureTarget.Texture2D, _shadow.Texture);
-        _lit.SetInt("uShadowMap", 0);
-
-        _lit.SetInt("uWater", 0);
-        _lit.SetInt("uCloud", 0);
-        foreach (var item in _opaque)
+        foreach (var shader in new[] { _litSolid, _litFull })
         {
-            _lit.SetMatrix("uModel", item.Model);
-            _lit.SetInt("uSeeThrough", item.SeeThrough ? 1 : 0);
-            _lit.SetInt("uSmooth", item.Smooth ? 1 : 0);
-            _lit.SetFloat("uEmissive", item.Emissive);
-            SetFog(item.Far);
-            item.Mesh.Draw();
+            _lit = shader;
+            SetupLit(proj, lightSpace, lightDir);
         }
+
+        // Prima tutto ciò che non sbiadisce mai, con lo shader senza discard; poi gli oggetti che possono sbiadire
+        foreach (bool seeThrough in new[] { false, true })
+        {
+            _lit = seeThrough ? _litFull : _litSolid;
+            _lit.Use();
+            _lampArea = new Vector4(float.NaN);
+            _farFog = null;
+            foreach (var item in _opaque)
+            {
+                if (item.SeeThrough != seeThrough) continue;
+                _lit.SetMatrix("uModel", item.Model);
+                _lit.SetInt("uSeeThrough", item.SeeThrough ? 1 : 0);
+                _lit.SetInt("uSmooth", item.Smooth ? 1 : 0);
+                _lit.SetFloat("uEmissive", item.Emissive);
+                SetFog(item.Far);
+                LampsFor(item);
+                item.Mesh.Draw();
+            }
+        }
+        LampsFor(default); // acqua, trasparenze e personaggio: i lampioni più vicini alla camera
         _lit.SetInt("uSmooth", 0);
         SetFog(false);
+        Mark("scena: opachi");
+        if (_debug.Profile) { _gl.Finish(); Mark("opachi (gpu)"); }
 
         _lit.SetInt("uSeeThrough", 0);
         _lit.SetInt("uCloud", 1);
@@ -777,9 +933,11 @@ public sealed partial class Game : IDisposable
         }
         _lit.SetInt("uCloud", 0);
 
+        Mark("scena: nuvole");
         // Impronte delle gomme: sopra il terreno, sotto acqua e trasparenze
         _skids.Draw(_camera.View, proj);
         _lit.Use();
+        Mark("scena: gomme");
 
         // --- 3. Acqua trasparente ---
         _gl.Enable(EnableCap.Blend);
@@ -793,6 +951,7 @@ public sealed partial class Game : IDisposable
             item.Mesh.Draw();
         }
         _lit.SetInt("uWater", 0);
+        Mark("scena: acqua");
 
         // --- 4. Alberi e rocce che coprono il giocatore: semitrasparenti, con i soli spigoli marcati ---
         // Prima solo la profondità (così di ogni oggetto resta la superficie più vicina, senza
@@ -807,6 +966,7 @@ public sealed partial class Game : IDisposable
         DrawSeeThrough();
         _gl.DepthFunc(DepthFunction.Less);
         _lit.SetInt("uSeeThrough", 0);
+        Mark("scena: trasparenti");
 
         // --- 5. Il personaggio trasparente: come sopra, prima la profondità e poi il colore della sola superficie davanti ---
         if (_ghost.Count > 0)
@@ -830,7 +990,11 @@ public sealed partial class Game : IDisposable
         SetFog(false);
 
         if (_mapReveal > 0f) DrawBigMap(size);
+        Mark("scena: personaggio e mappa");
         DrawCompass(size);
+        Mark("scena: minimappa");
+        if (_debug.Profile) { _gl.Finish(); Mark("attesa gpu"); }
+        ProfileReport(deltaTime);
         TakeScreenshotIfDue(size);
     }
 
@@ -928,6 +1092,39 @@ public sealed partial class Game : IDisposable
     /// Solo vicino al tratto camera → giocatore un albero può coprire l'auto: i due pass della trasparenza
     /// ridisegnano soltanto la vegetazione delle isole che toccano quella striscia.
     /// </summary>
+    // Lo scenario dei pezzi in cui qualche oggetto copre davvero il giocatore: solo questi passano dal disegno
+    // semitrasparente (due passate in più su tutta la loro vegetazione, che altrimenti si sprecherebbero)
+    private readonly HashSet<Mesh> _fading = new();
+
+    /// <summary>
+    /// Qualche oggetto dello scenario del pezzo sbiadisce in questo fotogramma? Stesso test dello shader (objectFade),
+    /// con gli stessi margini: se qui dice di no, lì nessun vertice avrebbe vFade > 0.
+    /// </summary>
+    private bool AnyFading(Zone zone)
+    {
+        Vector3 cam = _camera.Position, focus = ActivePos + new Vector3(0, _onFoot ? 0.35f : 0.45f, 0);
+        Vector2 a = new(cam.X, cam.Z), ab = new Vector2(focus.X, focus.Z) - a;
+        float abLen2 = MathF.Max(ab.LengthSquared(), 1e-4f), abLen = MathF.Sqrt(abLen2);
+        Vector3 o = zone.Origin;
+        foreach (var (x, z, rs, y0, y1) in zone.SceneryObjects)
+        {
+            var b = new Vector2(x + o.X, z + o.Z);
+            float r = MathF.Abs(rs), top = y1 - y0 + (y0 + o.Y + zone.YOffset);
+            float toCam = Vector2.Distance(b, a);
+            if (rs < 0f && _onFoot)
+            {
+                if (_cameraInside && !_onTrain && toCam < r * 1.5f) return true;
+                continue;
+            }
+            float tRaw = Vector2.Dot(b - a, ab) / abLen2, t = Math.Clamp(tRaw, 0f, 1f);
+            float dist = Vector2.Distance(a + ab * t, b);
+            float rayY = cam.Y + (focus.Y - cam.Y) * t;
+            if (dist < r + 1.4f && rayY < top + 0.8f && (tRaw - 1f) * abLen < 0.4f) return true;
+            if (toCam < r + 1.8f && cam.Y < top + 0.6f) return true;
+        }
+        return false;
+    }
+
     private bool NearSightLine(Vector4 area)
     {
         Vector3 cam = _camera.Position, focus = ActivePos;
@@ -1401,7 +1598,7 @@ public sealed partial class Game : IDisposable
     {
         foreach (var item in _opaque)
         {
-            if (!item.SeeThrough || (item.HasArea && !NearSightLine(item.Area))) continue;
+            if (!item.SeeThrough || (item.HasArea && !_fading.Contains(item.Mesh))) continue;
             _lit.SetMatrix("uModel", item.Model);
             _lit.SetFloat("uEmissive", item.Emissive);
             SetFog(item.Far);
@@ -1436,6 +1633,7 @@ public sealed partial class Game : IDisposable
     public void Dispose()
     {
         _engine?.Dispose();
+        _miniLayer?.Dispose();
         _hud?.Dispose();
         _world?.Dispose();
         _player?.Dispose();
@@ -1448,7 +1646,9 @@ public sealed partial class Game : IDisposable
         foreach (var m in _signalLit) m.Dispose();
         _flame?.Dispose();
         _shadow?.Dispose();
-        _lit?.Dispose();
+        _shadowStatic?.Dispose();
+        _litFull?.Dispose();
+        _litSolid?.Dispose();
         _depth?.Dispose();
         _sky?.Dispose();
         _clouds?.Dispose();

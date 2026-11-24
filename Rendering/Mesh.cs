@@ -49,8 +49,14 @@ public sealed class Mesh : IDisposable
         _gl.BindVertexArray(0);
     }
 
+    /// <summary>Triangoli disegnati dall'ultimo azzeramento (per il profilo).</summary>
+    public static long Triangles;
+    public static int DrawCalls;
+
     public unsafe void Draw()
     {
+        Triangles += _indexCount / 3;
+        DrawCalls++;
         _gl.BindVertexArray(_vao);
         _gl.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, (void*)0);
     }

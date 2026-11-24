@@ -85,6 +85,9 @@ public sealed class Traffic : IDisposable
 
     public int Count => _cars.Count;
 
+    /// <summary>Prove automatiche: misura <see cref="WorstOverlap"/> a ogni fotogramma (costa, nel gioco normale no).</summary>
+    public bool TrackOverlap { get; init; }
+
     /// <summary>Verifica: la sovrapposizione più profonda tra due veicoli vista finora.</summary>
     public float WorstOverlap { get; private set; }
 
@@ -283,8 +286,9 @@ public sealed class Traffic : IDisposable
 
         foreach (var v in _cars) Drive(v, dt, world);
         Separate();
-        // Verifica: la sovrapposizione più profonda tra veicoli da inizio partita (deve restare ~0)
-        foreach (var v in _cars)
+        // Verifica (solo nelle prove): la sovrapposizione più profonda tra veicoli da inizio partita (deve restare ~0)
+        if (TrackOverlap)
+            foreach (var v in _cars)
         {
             float d = DepthAgainst(BoxOf(v), v, null);
             if (d > WorstOverlap) WorstOverlap = d;

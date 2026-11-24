@@ -30,6 +30,8 @@ public static class Program
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
     ///   --mouse pixel/s[,finoA]   muove il mouse in orizzontale (in auto sterza, a piedi gira la visuale); ripetibile, tratti in ordine
     ///   --mouse-y pixel/s[,finoA] muove il mouse in verticale (a piedi: negativo = mouse in su, la camera scende e guarda in su)
+    ///   --msaa N                  campioni di antialiasing (di serie 4; 1 = spento)
+    ///   --profilo                 VSync spento e tempi medi di ogni fase del fotogramma in console, ogni 3 s
     ///   --investi                 l'auto parte puntata contro il passante più vicino (test)
     ///   --ruba                    scende, si mette accanto a un'auto del traffico ferma e la ruba con E (test)
     ///   --sperona                 l'auto parte di fianco all'auto del traffico più vicina, puntata contro (test degli urti)
@@ -42,14 +44,17 @@ public static class Program
     /// </summary>
     public static void Main(string[] args)
     {
+        // Durante il gioco il garbage collector evita le raccolte complete che fermano tutto (scatti mentre si genera
+        // il territorio nuovo): le fa in background
+        System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
         var debug = ParseArgs(args);
 
         var options = WindowOptions.Default with
         {
             Size = new Vector2D<int>(1280, 720),
             Title = "Roads",
-            VSync = true,
-            Samples = 4,
+            VSync = !debug.Profile, // col profilo si misura quanto si potrebbe andare veloci
+            Samples = debug.Msaa ?? 4,
             API = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(3, 3)),
         };
 
@@ -137,6 +142,12 @@ public static class Program
                     break;
                 case "--banchina":
                     d.Platform = true;
+                    break;
+                case "--msaa" when i + 1 < args.Length:
+                    d.Msaa = int.Parse(args[++i], inv);
+                    break;
+                case "--profilo":
+                    d.Profile = true;
                     break;
                 case "--investi":
                     d.HitTest = true;

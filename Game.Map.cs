@@ -71,7 +71,8 @@ public sealed partial class Game
         Vector2 ToMap(Vector3 world) => new(Vector3.Dot(world, right), -Vector3.Dot(world, forward));
 
         _hud.Disc(c, r, 40, SeaColor with { W = 0.85f });
-        DrawMiniIsland(c, r, k, ToMap);
+        _hud.Flush(framebuffer.X, framebuffer.Y); // il mare sotto, il territorio (in cache) sopra
+        DrawMiniIsland(c, r, k, framebuffer);
         _hud.Ring(c, r - 2f * k, r, 40, new Vector4(0.93f, 0.95f, 0.98f, 0.8f));
         // Tacche: lunghe sui punti cardinali, corte su quelli intermedi
         for (int i = 0; i < 8; i++)
@@ -132,49 +133,117 @@ public sealed partial class Game
     /// Il contenuto della minimappa, ritagliato nel cerchio: solo i pezzi di territorio già esplorati (come prima: la
     /// mappa si scopre girando). Stessi colori e stesse strade della mappa grande.
     /// </summary>
-    private void DrawMiniIsland(Vector2 c, float r, float k, Func<Vector3, Vector2> toMap)
+    // La geometria della minimappa (terreno, fiumi, strade, ferrovia) si costruisce una volta per una zona un po' più
+    // grande di quella mostrata e si ricostruisce solo spostandosi molto o scoprendo territorio nuovo: a ogni
+    // fotogramma la scheda grafica la ruota e la sposta, e il ritaglio nel cerchio lo fa lo shader.
+    private Roads.Rendering.HudLayer? _miniLayer;
+    private Vector2 _miniCenter;
+    private float _miniScale;
+    private int _miniExplored = -1;
+    private const float MiniRebuild = 50f; // unità percorse prima di ricostruire
+
+    private void DrawMiniIsland(Vector2 c, float r, float k, Vector2D<int> fb)
     {
         const float C = Terrain.ChunkSize;
         Vector3 me = ActivePos;
         var me2 = new Vector2(me.X, me.Z);
-        float scale = r / MiniRange, reach = MiniRange * 1.45f;
-        Vector2 ToScreen(Vector2 w) => c + toMap(new Vector3(w.X - me.X, 0f, w.Y - me.Z)) * scale;
+        float scale = r / MiniRange, reach = MiniRange * 1.45f + MiniRebuild;
         bool Seen(Vector2 w) => _world.IsExplored((int)MathF.Round(w.X / C), (int)MathF.Round(w.Y / C));
-        bool Near(Vector2 w) => Vector2.DistanceSquared(w, me2) < reach * reach;
 
-        var clip = new List<Vector2>(40);
-        for (int i = 0; i < 40; i++)
+        // Ricostruzione in background: intanto si continua a mostrare lo strato vecchio (la prima volta si aspetta)
+        if (_miniJob is { IsCompleted: true } job)
         {
-            float a = MathF.Tau * i / 40f;
-            clip.Add(c + new Vector2(MathF.Cos(a), MathF.Sin(a)) * (r - 1.5f * k));
+            var (geometry, center, builtScale, explored) = job.Result;
+            _miniJob = null;
+            _miniLayer?.Dispose();
+            _miniLayer = _hud.Capture(geometry);
+            (_miniCenter, _miniScale, _miniExplored) = (center, builtScale, explored);
         }
+        if (_miniJob == null && (_miniLayer == null || Vector2.Distance(me2, _miniCenter) > MiniRebuild
+                                 || _world.Count != _miniExplored || MathF.Abs(scale - _miniScale) > 1e-4f))
+        {
+            // Quello che serve al thread: le celle esplorate attorno (fotografate qui) e i dati fissi della mappa
+            LandTiles();
+            MapRoads();
+            var seen = new HashSet<(int, int)>();
+            int ci = (int)MathF.Round(me2.X / C), cj = (int)MathF.Round(me2.Y / C), span = (int)MathF.Ceiling(reach / C) + 1;
+            for (int i = ci - span; i <= ci + span; i++)
+                for (int j = cj - span; j <= cj + span; j++)
+                    if (_world.IsExplored(i, j)) seen.Add((i, j));
+            int explored = _world.Count;
+            Vector2 center = me2;
+            float kk = k;
+            _miniJob = Task.Run(() => (BuildMini(center, scale, reach, kk, seen), center, scale, explored));
+            if (_miniLayer == null) _miniJob.Wait();
+            if (_miniJob.IsCompleted)
+            {
+                var (geometry, c0, s0, e0) = _miniJob.Result;
+                _miniJob = null;
+                _miniLayer?.Dispose();
+                _miniLayer = _hud.Capture(geometry);
+                (_miniCenter, _miniScale, _miniExplored) = (c0, s0, e0);
+            }
+        }
+        if (_miniLayer == null) return;
 
-        // Terreno esplorato
-        foreach (var (a, b, color) in LandTiles())
+        // Dallo strato allo schermo: la direzione della camera in alto, centrato su dove si è ora
+        Vector3 right = _camera.Right, forward = _camera.Forward;
+        Vector2 Rot(Vector2 v) => new(v.X * right.X + v.Y * right.Z, -(v.X * forward.X + v.Y * forward.Z));
+        Vector2 shift = c + Rot((_miniCenter - me2) * scale);
+        var m = new Matrix3x2(right.X, -forward.X, right.Z, -forward.Z, shift.X, shift.Y);
+        var clip = new Vector3(c, r - 1.5f * k);
+        _hud.DrawLayer(_miniLayer, fb.X, fb.Y, m, clip);
+
+        // Cascine e punti di riferimento scoperti (pochi: si disegnano a ogni fotogramma, ritagliati nel cerchio)
+        Vector2 ToScreen(Vector2 w) => c + Rot((w - me2) * scale);
+        float near = MiniRange * 1.1f;
+        foreach (var f in RoadNetwork.Current.Farms)
+        {
+            if (Vector2.DistanceSquared(f.Yard, me2) > near * near || !Seen(f.Yard)) continue;
+            Vector2 sp = ToScreen(f.Yard);
+            _hud.Quad(sp + new Vector2(-3f, -3f) * k, sp + new Vector2(3f, -3f) * k, sp + new Vector2(3f, 3f) * k,
+                      sp + new Vector2(-3f, 3f) * k, new Vector4(0.70f, 0.22f, 0.16f, 1f));
+        }
+        foreach (var l in GameMap.Current.Landmarks)
+        {
+            if (Vector2.DistanceSquared(l.Pos, me2) > near * near || !Seen(l.Pos)) continue;
+            Vector2 sp = ToScreen(l.Pos);
+            _hud.Disc(sp, 6.5f * k, 14, Ink);
+            _hud.Disc(sp, 4.8f * k, 14, LandmarkColor(l.Kind));
+        }
+        _hud.Flush(fb.X, fb.Y, clip);
+    }
+
+    private Task<(Roads.Rendering.HudGeometry, Vector2, float, int)>? _miniJob;
+
+    /// <summary>
+    /// La geometria della minimappa attorno a <paramref name="center"/> (terreno, fiumi, strade, ferrovia), in pixel non
+    /// ruotati rispetto al centro. Gira su un thread a parte: usa solo dati fissi e le celle esplorate fotografate.
+    /// </summary>
+    private Roads.Rendering.HudGeometry BuildMini(Vector2 center, float scale, float reach, float k, HashSet<(int, int)> seen)
+    {
+        const float C = Terrain.ChunkSize;
+        var g = new Roads.Rendering.HudGeometry();
+        bool Seen(Vector2 w) => seen.Contains(((int)MathF.Round(w.X / C), (int)MathF.Round(w.Y / C)));
+        Vector2 ToLayer(Vector2 w) => (w - center) * scale;
+        bool Near(Vector2 w) => Vector2.DistanceSquared(w, center) < reach * reach;
+
+        foreach (var (a, b, color) in _landTiles!)
         {
             Vector2 mid = (a + b) * 0.5f;
             if (!Near(mid) || !Seen(mid)) continue;
-            var quad = new List<Vector2>
-            {
-                ToScreen(a - new Vector2(0.4f)), ToScreen(new Vector2(b.X + 0.4f, a.Y - 0.4f)),
-                ToScreen(b + new Vector2(0.4f)), ToScreen(new Vector2(a.X - 0.4f, b.Y + 0.4f)),
-            };
-            var poly = ClipPolygon(quad, clip);
-            for (int t = 1; t + 1 < poly.Count; t++) _hud.Triangle(poly[0], poly[t], poly[t + 1], color with { W = 0.95f });
+            Vector2 p = ToLayer(a - new Vector2(0.4f)), q = ToLayer(b + new Vector2(0.4f));
+            g.Quad(p, new Vector2(q.X, p.Y), q, new Vector2(p.X, q.Y), color with { W = 0.95f });
         }
-
-        // Fiumi
         var river = new Vector4(0.30f, 0.62f, 0.95f, 1f);
         foreach (int col in GameMap.Current.RiverColumns)
-            for (float z = MathF.Floor((me.Z - reach) / 8f) * 8f; z < me.Z + reach; z += 8f)
+            for (float z = MathF.Floor((center.Y - reach) / 8f) * 8f; z < center.Y + reach; z += 8f)
             {
                 Vector2 pa = new(Terrain.RiverX(col, z), z), pb = new(Terrain.RiverX(col, z + 8f), z + 8f);
                 if (!Near(pa) || !Seen(pa) || GameMap.Current.Sample(pa.X, pa.Y).Land < 0.55f) continue;
-                Segment(ToScreen(pa), ToScreen(pb), 2.4f * k, river, clip);
+                g.Line(ToLayer(pa), ToLayer(pb), 2.4f * k, river);
             }
-
-        // Strade
-        foreach (var (kind, layout, pts) in MapRoads())
+        foreach (var (kind, layout, pts) in _mapRoads!)
         {
             float width = layout switch
             {
@@ -191,29 +260,11 @@ public sealed partial class Game
             for (int i = 0; i + 1 < pts.Length; i++)
             {
                 if (!Near(pts[i]) || !(Seen(pts[i]) || Seen(pts[i + 1]))) continue;
-                Segment(ToScreen(pts[i]), ToScreen(pts[i + 1]), width, color, clip);
+                g.Line(ToLayer(pts[i]), ToLayer(pts[i + 1]), width, color);
             }
         }
-
-        DrawRailway(ToScreen, k, p => Near(p) && Seen(p) && Inside(ToScreen(p), clip, 5f * k), (a, b, w, col) => Segment(a, b, w, col, clip));
-
-        // Cascine e punti di riferimento scoperti
-        foreach (var f in RoadNetwork.Current.Farms)
-        {
-            if (!Near(f.Yard) || !Seen(f.Yard)) continue;
-            Vector2 s = ToScreen(f.Yard);
-            if (!Inside(s, clip, 4f * k)) continue;
-            _hud.Quad(s + new Vector2(-3f, -3f) * k, s + new Vector2(3f, -3f) * k, s + new Vector2(3f, 3f) * k,
-                      s + new Vector2(-3f, 3f) * k, new Vector4(0.70f, 0.22f, 0.16f, 1f));
-        }
-        foreach (var l in GameMap.Current.Landmarks)
-        {
-            if (!Seen(l.Pos)) continue;
-            Vector2 s = ToScreen(l.Pos);
-            if (!Inside(s, clip, 6f * k)) continue;
-            _hud.Disc(s, 6.5f * k, 14, Ink);
-            _hud.Disc(s, 4.8f * k, 14, LandmarkColor(l.Kind));
-        }
+        DrawRailway(ToLayer, k, p => Near(p) && Seen(p), (a, b, w, col) => g.Line(a, b, w, col));
+        return g;
     }
 
     // ------------------------------------------------------------------ mappa grande
