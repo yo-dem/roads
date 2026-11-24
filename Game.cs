@@ -36,6 +36,10 @@ public sealed class DebugOptions
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
     public bool FollowTraffic;     // la camera segue un'auto del traffico (test)
+    public bool HitTest;           // l'auto parte puntata contro il passante più vicino (test)
+    public bool StealTest;         // scende e ruba un'auto del traffico (test)
+    public bool RamTraffic;        // l'auto parte di fianco a un'auto del traffico, puntata contro (test)
+    public Roads.Characters.BodyStyle? BodyStyle; // il traffico ha solo questa carrozzeria (test)
     public bool AimPole;           // l'auto parte puntata contro il palo abbattibile più vicino (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
@@ -68,6 +72,13 @@ public sealed partial class Game : IDisposable
 
     private WorldMap _world = null!;
     private Car _player = null!;
+    // Le auto lasciate dal giocatore (la sua di partenza dopo averne rubata un'altra, e così via): restano dove sono,
+    // si possono urtare e riprendere con E. Le più lontane, oltre un certo numero, vengono rimosse.
+    private readonly List<Car> _parked = new();
+    private const int MaxParked = 5;
+    private const float StealSpeed = 2.5f; // si ruba solo un'auto che va piano (o è ferma)
+    private readonly List<Car> _owned = new();
+    private int _stealStep; // test del furto
     private Villager _kid = null!;   // il personaggino: scende e sale dall'auto con E
     private bool _onFoot;
 
@@ -78,6 +89,7 @@ public sealed partial class Game : IDisposable
     private Particles _particles = null!;
     private Trains? _trains;
     private Traffic? _traffic;   // le auto guidate dal gioco
+    private Pedestrians? _peds;  // i passanti nei centri abitati
     private Mesh[] _signalLit = [];   // lente accesa del semaforo: rossa, gialla, verde (vedi TrafficLights.Light)
     private SkidMarks _skids = null!;
     private EngineSound? _engine;
@@ -239,7 +251,8 @@ public sealed partial class Game : IDisposable
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
-        _traffic = new Traffic(_gl);
+        _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic };
+        _peds = new Pedestrians(_gl);
         // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
         Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
         _signalLit = new Mesh[3];
@@ -347,6 +360,68 @@ public sealed partial class Game : IDisposable
             }
         }
 
+        if (_debug.HitTest && _time > 0.4f && !_onFoot && _peds?.Nearest(_player.Position) is { } walker)
+        {
+            // Test: l'auto a 9 unità dal passante, sulla strada se possibile, puntata contro di lui
+            _debug.HitTest = false;
+            Vector3 origin = walker;
+            for (int i = 0; i < 16; i++)
+            {
+                float a = i * MathF.Tau / 16f;
+                Vector3 p = walker + new Vector3(MathF.Sin(a), 0f, MathF.Cos(a)) * 9f;
+                if (_world.IsRoad(p) && _world.IsWalkable(p, 0.7f)) { origin = p; break; }
+            }
+            _player.Place(origin with { Y = _world.GroundHeight(origin) }, MathF.Atan2(walker.X - origin.X, walker.Z - origin.Z));
+            Console.WriteLine($"Test: auto puntata contro un passante in {walker.X:F1}, {walker.Z:F1}");
+        }
+
+        if (_debug.StealTest && _traffic != null)
+        {
+            // Test del furto: l'auto del traffico più vicina si ferma, si scende, si va alla sua portiera e si preme E
+            if (_stealStep == 0 && _time > 0.4f && !_onFoot && _traffic.Followed(_player.Position) is not null)
+            {
+                _traffic.FreezeFollowed();
+                ToggleOnFoot();
+                _stealStep = 1;
+            }
+            else if (_stealStep == 1 && _time > 1.3f && _traffic.Followed(_player.Position) is { } target)
+            {
+                Vector3 left = new(MathF.Cos(target.Yaw), 0f, -MathF.Sin(target.Yaw));
+                foreach (float k in new[] { 1f, -1f })
+                {
+                    Vector3 spot = target.Pos + left * (1.25f * k);
+                    if (!_world.IsWalkable(spot, Villager.Radius)) continue;
+                    _kid.Position = spot with { Y = _world.GroundHeight(spot) };
+                    break;
+                }
+                _stealStep = 2;
+            }
+            else if (_stealStep == 2 && _time > 1.8f)
+            {
+                Console.WriteLine($"Test: furto {(_traffic.CanSteal(new Vector2(_kid.Position.X, _kid.Position.Z), StealSpeed) ? "possibile" : "NON possibile")}");
+                ToggleOnFoot();
+                _stealStep = 3;
+            }
+        }
+
+        if (_debug.RamTraffic && _time > 0.3f && !_onFoot && _traffic?.Followed(_player.Position) is { } victim)
+        {
+            // Test: l'auto a 7 unità di fianco a quella del traffico, puntata contro di lei (anticipandone la marcia)
+            _debug.RamTraffic = false;
+            _traffic.FreezeFollowed();
+            Vector3 side = new(MathF.Cos(victim.Yaw), 0f, -MathF.Sin(victim.Yaw));
+            Vector3 aim = victim.Pos + new Vector3(MathF.Sin(victim.Yaw), 0f, MathF.Cos(victim.Yaw)) * 3f;
+            // Di fianco, dal lato dove c'è strada libera; se non c'è, dietro (tamponamento)
+            Vector3 origin = victim.Pos - new Vector3(MathF.Sin(victim.Yaw), 0f, MathF.Cos(victim.Yaw)) * 8f;
+            foreach (float k in new[] { 1f, -1f })
+            {
+                Vector3 p = aim + side * (7f * k);
+                if (_world.IsRoad(p) && _world.IsWalkable(p, 0.6f)) { origin = p; break; }
+            }
+            _player.Place(origin with { Y = _world.GroundHeight(origin) }, MathF.Atan2(aim.X - origin.X, aim.Z - origin.Z));
+            Console.WriteLine($"Test: auto puntata contro un'auto del traffico in {victim.Pos.X:F1}, {victim.Pos.Z:F1}");
+        }
+
         if (_onFoot)
         {
             // L'auto resta parcheggiata a motore spento.
@@ -367,15 +442,16 @@ public sealed partial class Game : IDisposable
             if (!_onTrain && jumpPressed) _kid.Jump();
             _player.Handbrake = false;
             _player.Update(dt, Vector2.Zero, false, _world, _particles);
-            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, _player.Blocks, sprint: sprint && !slow);
+            if (!_onTrain) _kid.Update(dt, input, slow, _world, _particles, BlockedByOwnCars, sprint: sprint && !slow);
             if (_kid.Hidden && _boarding)
             {
                 // Il saltello sulla carrozza è finito: si è dentro, davanti alla porta, rivolti verso i sedili
                 _boarding = false;
                 _onTrain = true;
                 _seat = -1;
-                _cabin = new Vector2(0f, Trains.DoorZ - 0.4f);
+                _cabin = new Vector2(0f, Trains.DoorZ - 0.15f);
                 _cabinYaw = _cabinLook = MathF.PI;
+                _kid.SizeScale = Trains.InsideScale; // dentro si è più piccoli: la carrozza diventa grande
                 if (_trains != null) _trains.Inside = true;
                 Console.WriteLine("In treno");
             }
@@ -399,11 +475,19 @@ public sealed partial class Game : IDisposable
         if (_trains != null)
         {
             _trains.PushOut(ref _player.Position, 1.05f);
-            if (_onTrain) RideTrain(dt, moveX, moveY);
+            if (_onTrain) RideTrain(dt, moveX, moveY, sprint);
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
         // Il traffico gira attorno a chi si comanda; il personaggio conta come ostacolo solo quando è a terra
-        _traffic?.Update(dt, _time, _world, _player, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos);
+        // Le auto parcheggiate restano lì (spinte da un urto scivolano e si fermano)
+        foreach (var car in _parked) car.Update(dt, Vector2.Zero, false, _world, _particles);
+        _owned.Clear();
+        _owned.Add(_player);
+        _owned.AddRange(_parked);
+        // I passanti non attraversano le auto del giocatore; le auto del traffico si fermano per loro
+        _peds?.Update(dt, _world, _particles, ActivePos, BlockedByOwnCars, driver: _onFoot ? null : _player);
+        _traffic?.Update(dt, _time, _world, _owned, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos,
+                         _peds?.Positions);
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
@@ -558,11 +642,14 @@ public sealed partial class Game : IDisposable
         var camFlat = new Vector2(_camera.Position.X, _camera.Position.Z);
         _trains?.Collect(_opaque, night, p => Vector2.Distance(p, camFlat) < ViewRange + 12f);
         _traffic?.Collect(_opaque, night, p => Vector2.Distance(p, camFlat) < ViewRange + 4f);
+        _peds?.Collect(_opaque, p => Vector2.Distance(p, camFlat) < ViewRange);
 
         _cloudItems.Clear();
         _clouds.Collect(_cloudItems, _camera.Target, _time);
 
         _player.Collect(_opaque);
+        foreach (var car in _parked)
+            if (Vector2.Distance(new Vector2(car.Position.X, car.Position.Z), camFlat) < ViewRange + 4f) car.Collect(_opaque);
         _kid.Collect(_kidAlpha < 0.99f ? _ghost : _opaque);
         _particles.Collect(_opaque);
     }
@@ -897,8 +984,9 @@ public sealed partial class Game : IDisposable
             if (_seat >= 0)
             {
                 var s = Trains.Seats[_seat];
-                _cabin = new Vector2(0f, s.Z + 0.1f);
-                _cabinYaw = _cabinLook = 0f;
+                // Ci si alza nel corridoio accanto al posto, rivolti verso la marcia
+                _cabin = new Vector2(s.Side * 0.1f, s.Z);
+                _cabinYaw = _cabinLook = s.Facing > 0f ? 0f : MathF.PI;
                 _seat = -1;
                 return;
             }
@@ -909,9 +997,10 @@ public sealed partial class Game : IDisposable
                 _lookPan = _lookTilt = 0f;
                 return;
             }
-            if (_cabin.Y > Trains.DoorZ - 0.6f && _trains.AlightPoint(out var spot, out float yaw))
+            if (_cabin.Y > Trains.DoorZ - 0.35f && _trains.AlightPoint(out var spot, out float yaw))
             {
                 var m = _trains.RideMatrix;
+                _kid.SizeScale = 1f;
                 _kid.HopOut(Vector3.Transform(new Vector3(_cabin.X, Trains.Floor, _cabin.Y), m), spot, yaw);
                 _footYaw = yaw;
                 _onTrain = false;
@@ -920,16 +1009,40 @@ public sealed partial class Game : IDisposable
             return;
         }
 
-        // Si risale dalla portiera più vicina, se si è abbastanza vicini all'auto
+        // Si risale dalla portiera più vicina, se si è abbastanza vicini a una delle proprie auto (anche una lasciata
+        // parcheggiata: diventa quella che si guida)
         float best = float.MaxValue, bestSide = 1f;
-        foreach (float side in new[] { 1f, -1f })
+        Car? bestCar = null;
+        foreach (var car in _parked.Prepend(_player))
+            foreach (float side in new[] { 1f, -1f })
+            {
+                float d = Vector2.Distance(new(_kid.Position.X, _kid.Position.Z), new(car.DoorPoint(side).X, car.DoorPoint(side).Z));
+                if (d < best) { best = d; bestSide = side; bestCar = car; }
+            }
+        if (best < 1.3f && bestCar != null)
         {
-            float d = Vector2.Distance(new(_kid.Position.X, _kid.Position.Z), new(_player.DoorPoint(side).X, _player.DoorPoint(side).Z));
-            if (d < best) { best = d; bestSide = side; }
-        }
-        if (best < 1.3f)
-        {
+            if (bestCar != _player)
+            {
+                _parked.Remove(bestCar);
+                _parked.Add(_player);
+                _player = bestCar;
+            }
             _kid.HopIn(_player.SeatPoint(bestSide));
+            return;
+        }
+
+        // Un'auto del traffico vicina e lenta: si apre la portiera, chi guida viene buttato fuori e si sale al suo posto
+        if (_traffic?.Steal(new Vector2(_kid.Position.X, _kid.Position.Z), StealSpeed) is { } stolen)
+        {
+            var car = new Car(_gl, stolen.Pos, stolen.Yaw, stolen.Paint, stolen.Style) { EngineOn = false };
+            _parked.Add(_player);
+            _player.EngineOn = false;
+            _player.Headlights = false;
+            _player = car;
+            TrimParked();
+            _peds?.Eject(stolen.Seat, stolen.Door, stolen.Pos, ActivePos);
+            _kid.HopIn(car.SeatPoint(1f));
+            Console.WriteLine($"Auto rubata: {stolen.Style}");
             return;
         }
 
@@ -1147,19 +1260,19 @@ public sealed partial class Game : IDisposable
     private float _cabinYaw;         // direzione nella carrozza (0 = verso la marcia)
     private float _lookPan;          // seduti: quanto si gira lo sguardo dal finestrino (radianti)
 
-    /// <summary>Il posto accanto a cui si è (davanti al sedile, nel corridoio), -1 se nessuno.</summary>
+    /// <summary>
+    /// Il posto più vicino a dove si è e si guarda (nel corridoio accanto alla fila, entro un passo e mezzo), -1 se nessuno.
+    /// </summary>
     private int NearSeat()
     {
         int best = -1;
-        float bestD = 0.55f;
+        float bestD = 0.62f;
+        Vector2 aim = _cabin + new Vector2(MathF.Sin(_cabinYaw), MathF.Cos(_cabinYaw)) * 0.2f;
         for (int i = 0; i < Trains.Seats.Length; i++)
         {
             var s = Trains.Seats[i];
-            float dz = MathF.Abs(_cabin.Y - (s.Z + 0.1f));
-            // Lato: quello verso cui si guarda (o su cui si è spostati nel corridoio)
-            float lean = _cabin.X + MathF.Sin(_cabinYaw) * 0.3f;
-            if (MathF.Sign(lean) != MathF.Sign(s.Side) && MathF.Abs(lean) > 0.02f) continue;
-            if (dz < bestD) { bestD = dz; best = i; }
+            float d = Vector2.Distance(aim, new Vector2(s.X, s.Z));
+            if (d < bestD) { bestD = d; best = i; }
         }
         return best;
     }
@@ -1167,28 +1280,32 @@ public sealed partial class Game : IDisposable
     private float _cabinLook = MathF.PI; // a bordo, in piedi: dove si guarda nella carrozza (0 = verso la marcia)
     private float _lookTilt;             // seduti: sguardo più su o più giù
 
+    private const float TrainWalk = 0.7f, TrainRun = 1.25f; // passo e corsa del personaggio rimpicciolito
+
     /// <summary>
-    /// A bordo: in piedi si cammina nel corridoio con WASD rispetto a dove si guarda (il mouse gira lo sguardo) e la
-    /// camera segue da dietro, dentro la carrozza; seduti la visuale è dagli occhi verso il finestrino e il mouse gira
-    /// lo sguardo. Tutto in coordinate della carrozza, che poi si portano nel mondo: il treno si muove, noi con lui.
+    /// A bordo, rimpiccioliti: in piedi si cammina su tutto il pavimento libero con WASD rispetto a dove si guarda
+    /// (il mouse gira lo sguardo, Shift corre), scivolando lungo i mobili; la camera segue da dietro e resta dentro
+    /// la carrozza. Seduti la visuale è dagli occhi verso il finestrino e il mouse gira lo sguardo. Tutto in coordinate
+    /// della carrozza, che poi si portano nel mondo: il treno si muove, noi con lui.
     /// </summary>
-    private void RideTrain(float dt, float moveX, float moveY)
+    private void RideTrain(float dt, float moveX, float moveY, bool run)
     {
         if (_trains == null) return;
         var m = _trains.RideMatrix;
         Vector3 W(float x, float y, float z) => Vector3.Transform(new Vector3(x, y, z), m);
         float carYaw = MathF.Atan2(m.M31, m.M33); // direzione della marcia (asse +Z locale nel mondo)
+        const float k = Trains.InsideScale;
 
         if (_seat >= 0)
         {
             var s = Trains.Seats[_seat];
             // Occhi del personaggio seduto; lo sguardo parte dal finestrino e il mouse lo gira (avanti, indietro, su, giù)
-            Vector3 eye = W(s.X - s.Side * 0.12f, Trains.Floor + 0.95f, s.Z - 0.08f);
-            float a = _lookPan * s.Side;
-            Vector3 look = W(s.X + s.Side * MathF.Cos(a) * 3f, Trains.Floor + 0.95f + MathF.Tan(_lookTilt) * 3f,
+            float eyeY = Trains.Floor + 0.44f;
+            Vector3 eye = W(s.X - s.Side * 0.02f, eyeY, s.Z + s.Facing * 0.02f);
+            Vector3 look = W(s.X + s.Side * MathF.Cos(_lookPan) * 3f, eyeY + MathF.Tan(_lookTilt) * 3f,
                              s.Z + MathF.Sin(_lookPan) * s.Side * 3f);
             _kid.Hide();
-            _kid.Position = W(s.X, Trains.Floor + 0.3f, s.Z); // per mappe e caricamento del territorio
+            _kid.Position = W(s.X, Trains.Floor + 0.2f, s.Z); // per mappe e caricamento del territorio
             _kid.Yaw = carYaw;
             _camera.Fix(eye, look);
             return;
@@ -1199,22 +1316,31 @@ public sealed partial class Game : IDisposable
         var right2 = new Vector2(-look2.Y, look2.X);
         Vector2 move = look2 * moveY + right2 * moveX;
         float speed = 0f;
+        const float r = Villager.Radius * k;
         if (move.LengthSquared() > 0.01f)
         {
             move = Vector2.Normalize(move);
-            speed = 1.3f;
+            speed = run ? TrainRun : TrainWalk;
             _cabinYaw += Noise.WrapAngle(MathF.Atan2(move.X, move.Y) - _cabinYaw) * MathF.Min(1f, 14f * dt);
-            _cabin += move * speed * dt;
+            Vector2 step = move * speed * dt;
+            // Scivolando lungo i mobili: prima il passo intero, poi solo di lato o solo in lungo
+            if (Trains.FreeInside(_cabin + step, r)) _cabin += step;
+            else if (Trains.FreeInside(_cabin + new Vector2(step.X, 0f), r)) _cabin.X += step.X;
+            else if (Trains.FreeInside(_cabin + new Vector2(0f, step.Y), r)) _cabin.Y += step.Y;
+            else speed = 0f;
         }
-        _cabin.X = Math.Clamp(_cabin.X, -Trains.AisleHalf, Trains.AisleHalf);
-        _cabin.Y = Math.Clamp(_cabin.Y, -Trains.CabinEnd, Trains.CabinEnd);
-        _kid.Ride(dt, W(_cabin.X, Trains.Floor, _cabin.Y), carYaw + _cabinYaw, speed);
+        _kid.SizeScale = k;
+        _kid.Ride(dt, W(_cabin.X, Trains.Floor, _cabin.Y), carYaw + _cabinYaw, speed / k);
 
-        // Camera dentro la carrozza: dietro e sopra il personaggio rispetto allo sguardo, senza uscire dalle pareti
-        var back = _cabin - look2 * 1.5f;
-        back.X = Math.Clamp(back.X, -0.75f, 0.75f);
-        back.Y = Math.Clamp(back.Y, -Trains.CabinEnd - 0.3f, Trains.CabinEnd + 0.3f);
-        _camera.Fix(W(back.X, Trains.Floor + 1.35f, back.Y), W(_cabin.X + look2.X * 0.8f, Trains.Floor + 0.55f, _cabin.Y + look2.Y * 0.8f));
+        // Camera dietro e sopra il personaggio rispetto allo sguardo, sotto il soffitto e dentro le pareti; più vicina
+        // se dietro c'è una parete di fondo
+        float dist = 0.95f;
+        Vector2 back = _cabin - look2 * dist;
+        back.X = Math.Clamp(back.X, -Trains.WalkX + 0.02f, Trains.WalkX - 0.02f);
+        back.Y = Math.Clamp(back.Y, -Trains.CabinEnd, Trains.CabinEnd);
+        Vector3 eyeAt = W(back.X, Trains.Floor + 0.66f, back.Y);
+        Vector3 target = W(_cabin.X + look2.X * 0.45f, Trains.Floor + 0.26f, _cabin.Y + look2.Y * 0.45f);
+        _camera.Fix(eyeAt, target);
     }
 
     /// <summary>Nel titolo, in treno: cosa si può fare, dove si è fermi e quando si riparte.</summary>
@@ -1223,14 +1349,39 @@ public sealed partial class Game : IDisposable
         string where = _trains?.StoppedAt is { } st ? $"fermi a {st.Name} (si riparte tra {_trains.DepartsIn:F0} s)" : "in viaggio";
         string hint = _seat >= 0 ? "seduti: mouse per guardare, E per alzarsi"
             : NearSeat() >= 0 ? "E per sedersi"
-            : _cabin.Y > Trains.DoorZ - 0.6f && _trains?.StoppedAt != null ? "E per scendere"
-            : "WASD o frecce per camminare, mouse per guardare; i sedili ai lati, la porta in fondo verso la locomotiva";
+            : _cabin.Y > Trains.DoorZ - 0.35f && _trains?.StoppedAt != null ? "E per scendere"
+            : "WASD o frecce per camminare, Shift per correre, mouse per guardare; le porte nel vestibolo davanti";
         return $"  |  in treno, {where}  |  {hint}";
     }
 
     /// <summary>Nel titolo, a piedi accanto al treno fermo: si può salire.</summary>
-    private string BoardHint() =>
-        _trains != null && _trains.CanBoard(new Vector2(_kid.Position.X, _kid.Position.Z), out _) ? "  (E per salire sul treno)" : "";
+    private string BoardHint()
+    {
+        var at = new Vector2(_kid.Position.X, _kid.Position.Z);
+        if (_trains != null && _trains.CanBoard(at, out _)) return "  (E per salire sul treno)";
+        if (_traffic != null && _traffic.CanSteal(at, StealSpeed)) return "  (E per rubare l'auto)";
+        return "";
+    }
+
+    /// <summary>Un cerchio nel punto tocca una delle auto del giocatore (quella guidata o una parcheggiata)?</summary>
+    private bool BlockedByOwnCars(Vector3 p, float r)
+    {
+        if (_player.Blocks(p, r)) return true;
+        foreach (var car in _parked)
+            if (car.Blocks(p, r)) return true;
+        return false;
+    }
+
+    /// <summary>Troppe auto lasciate in giro: la più lontana viene rimossa (portata via dal carro attrezzi).</summary>
+    private void TrimParked()
+    {
+        while (_parked.Count > MaxParked)
+        {
+            var far = _parked.MaxBy(c => Vector3.DistanceSquared(c.Position, ActivePos))!;
+            _parked.Remove(far);
+            far.Dispose();
+        }
+    }
 
     private bool _onTrain;   // il personaggio viaggia in treno
     private bool _boarding;  // sta saltando sulla carrozza
@@ -1277,7 +1428,7 @@ public sealed partial class Game : IDisposable
 
         PngWriter.Save(_debug.Shots[_shotIndex].Path, w, h, flipped);
         Console.WriteLine($"Screenshot salvato: {_debug.Shots[_shotIndex].Path}  ({_window.Title})");
-        if (_traffic != null) Console.WriteLine("  " + _traffic.Status());
+        if (_traffic != null) Console.WriteLine("  " + _traffic.Status() + $"; passanti: {_peds?.Count ?? 0} ({_peds?.DownCount ?? 0} a terra)");
         _shotIndex++;
         if (_shotIndex >= _debug.Shots.Count) _window.Close();
     }
@@ -1288,10 +1439,12 @@ public sealed partial class Game : IDisposable
         _hud?.Dispose();
         _world?.Dispose();
         _player?.Dispose();
+        foreach (var car in _parked) car.Dispose();
         _kid?.Dispose();
         _particles?.Dispose();
         _trains?.Dispose();
         _traffic?.Dispose();
+        _peds?.Dispose();
         foreach (var m in _signalLit) m.Dispose();
         _flame?.Dispose();
         _shadow?.Dispose();

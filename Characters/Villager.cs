@@ -22,6 +22,13 @@ public sealed class Villager : IDisposable
 
     public Vector3 Position;
     public float Yaw;
+    /// <summary>Grandezza rispetto al normale (in treno si diventa più piccoli: vedi Trains.InsideScale).</summary>
+    public float SizeScale = 1f;
+    /// <summary>
+    /// Inclinazione attorno ai piedi (rad): 0 in piedi, -π/2 disteso sulla schiena, +π/2 a faccia in giù (un passante
+    /// investito che cade e si rialza).
+    /// </summary>
+    public float Tilt;
 
     /// <summary>Nascosto: è seduto in auto.</summary>
     public bool Hidden { get; private set; } = true;
@@ -134,6 +141,18 @@ public sealed class Villager : IDisposable
         Yaw = yaw;
         _velocity = Vector3.Zero;
         _groundY = to.Y;
+        _air = _vy = 0f;
+    }
+
+    /// <summary>Compare già a piedi nel punto dato, senza saltello (i passanti).</summary>
+    public void Appear(Vector3 pos, float yaw)
+    {
+        Hidden = false;
+        _hop = 1f;
+        Position = pos;
+        Yaw = yaw;
+        _velocity = Vector3.Zero;
+        _groundY = pos.Y;
         _air = _vy = 0f;
     }
 
@@ -300,7 +319,8 @@ public sealed class Villager : IDisposable
     public Vector3 Velocity => _velocity;
 
     private Matrix4x4 RootMatrix =>
-        Matrix4x4.CreateScale(HopScale * _scale) * Matrix4x4.CreateRotationY(Yaw) * Matrix4x4.CreateTranslation(Position);
+        Matrix4x4.CreateScale(HopScale * _scale * SizeScale) * Matrix4x4.CreateRotationX(Tilt) * Matrix4x4.CreateRotationY(Yaw)
+        * Matrix4x4.CreateTranslation(Position + new Vector3(0f, MathF.Abs(MathF.Sin(Tilt)) * 0.07f, 0f));
 
     public void Collect(List<DrawItem> items)
     {

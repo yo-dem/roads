@@ -204,13 +204,46 @@ public sealed class Car : IDisposable
         _knock = Vector3.Zero;
     }
 
-    public Car(GL gl, Vector3 position, float yaw)
+    /// <summary>Carrozzeria e colore (l'auto di partenza è l'utilitaria rossa; rubandone una si prende la sua).</summary>
+    public BodyStyle Style => _model.Style;
+    public Vector3 Paint { get; }
+    /// <summary>Mezza larghezza e mezza lunghezza dell'ingombro vero (ruote e paraurti compresi), per gli urti tra veicoli.</summary>
+    public float HalfWidth { get; }
+    public float HalfLength { get; }
+    /// <summary>Velocità massima della carrozzeria (il trattore è lento).</summary>
+    private readonly float _topSpeed = FastSpeed;
+
+    /// <summary>L'ingombro dell'auto come rettangolo orientato, nella posa data.</summary>
+    public VehicleBox BoxAt(Vector3 p, float yaw) =>
+        new(new Vector2(p.X, p.Z), new Vector2(MathF.Sin(yaw), MathF.Cos(yaw)), HalfWidth, HalfLength);
+    public VehicleBox Box => BoxAt(Position, Yaw);
+
+    /// <summary>Spinta ricevuta da un urto (velocità sul piano): si somma al rimbalzo e si smorza da sola.</summary>
+    public void Shove(Vector2 velocity)
+    {
+        _knock += new Vector3(velocity.X, 0f, velocity.Y);
+        if (_knock.Length() > BounceMax) _knock = Vector3.Normalize(_knock) * BounceMax;
+    }
+
+    /// <summary>Spostamento immediato (per uscire dall'ingombro di chi la urta), solo se lì c'è posto.</summary>
+    public bool Nudge(WorldMap world, Vector2 by)
+    {
+        var to = Position + new Vector3(by.X, 0f, by.Y);
+        if (!Fits(world, to, Yaw)) return false;
+        Position = to;
+        return true;
+    }
+
+    public Car(GL gl, Vector3 position, float yaw, Vector3? paint = null, BodyStyle style = BodyStyle.Hatch)
     {
         Position = position;
         Yaw = yaw;
         _travelYaw = yaw;
 
-        _model = new CarModel(gl, new Vector3(0.92f, 0.26f, 0.22f));
+        Paint = paint ?? new Vector3(0.92f, 0.26f, 0.22f);
+        _model = new CarModel(gl, Paint, style);
+        (HalfWidth, HalfLength) = VehicleBox.Size(style);
+        _topSpeed = style == BodyStyle.Tractor ? 4.5f : style == BodyStyle.Sport ? 16f : FastSpeed;
     }
 
     // ------------------------------------------------------------------ guida
@@ -309,6 +342,15 @@ public sealed class Car : IDisposable
             float hit = world.PushMovables(c, HullRadius, ref velocity, CarMass, out var contact);
             if (hit > hardest) { hardest = hit; where = contact; }
         }
+        // Gli altri veicoli (traffico e auto parcheggiate): si spostano o rimbalzano secondo la loro massa (un trattore
+        // quasi non si muove); l'urto si calcola tra i rettangoli veri delle carrozzerie
+        if (Traffic.Current is { } traffic)
+        {
+            float hit = traffic.PushBox(this, BoxAt(next, newYaw), ref velocity, CarMass, world, out var contact);
+            if (hit > hardest) { hardest = hit; where = contact; }
+            // Come contro un muro: per un attimo il gas non spinge, altrimenti annullerebbe subito il rimbalzo
+            if (hit > BounceMinImpact) _stun = MathF.Max(_stun, Math.Clamp(hit * 0.07f, 0.25f, 0.7f));
+        }
         if (hardest > 0f && hardest > 1f) fx.Dust(where, hardest > 4f ? 4 : 2); // sbuffo di polvere nell'urto
         foreach (var (at, hitVel, speed) in world.TakeBroken()) fx.Shards(at, hitVel, speed); // palo abbattuto: schegge
 
@@ -348,19 +390,16 @@ public sealed class Car : IDisposable
     /// <summary>Punto a terra fuori dalla portiera, dove scende il personaggio.</summary>
     public Vector3 DoorPoint(float side) => Position + Side * (side * 0.9f) + Forward * 0.05f;
 
-    /// <summary>Un cerchio di raggio <paramref name="r"/> nel punto tocca la carrozzeria?</summary>
-    public bool Blocks(Vector3 p, float r)
-    {
-        Vector3 f = Forward * HullOffset;
-        float rr = (HullRadius + r) * (HullRadius + r);
-        return Flat(p - (Position + f)).LengthSquared() < rr || Flat(p - (Position - f)).LengthSquared() < rr;
-    }
+    /// <summary>Un cerchio di raggio <paramref name="r"/> nel punto tocca la carrozzeria (il rettangolo vero)?</summary>
+    public bool Blocks(Vector3 p, float r) => Box.CircleDepth(new Vector2(p.X, p.Z), r, out _) > 0f;
 
     /// <summary>L'auto (due cerchi, muso e coda) sta tutta su terreno libero in questa posa?</summary>
-    private static bool Fits(WorldMap world, Vector3 p, float yaw)
+    private bool Fits(WorldMap world, Vector3 p, float yaw)
     {
         Vector3 f = Dir(yaw) * HullOffset;
         return world.IsWalkable(p + f, HullRadius) && world.IsWalkable(p - f, HullRadius)
+            // mai dentro un altro veicolo (rettangoli veri: i cerchi lascerebbero sporgere gli angoli)
+            && !(Traffic.Current?.Overlaps(BoxAt(p, yaw), this) ?? false)
             // sulle banchine delle stazioni si va solo a piedi
             && !Railway.Current.OnPlatform(new Vector2(p.X + f.X, p.Z + f.Z), HullRadius)
             && !Railway.Current.OnPlatform(new Vector2(p.X - f.X, p.Z - f.Z), HullRadius);
@@ -376,6 +415,8 @@ public sealed class Car : IDisposable
         if (!Fits(world, Position, Yaw))
         {
             if (!world.IsWalkable(Position + step, 0.3f)) return 0f;
+            // Dentro un altro veicolo ci si può solo allontanare, mai entrare di più
+            if (Traffic.Current is { } t && t.Depth(BoxAt(Position + step, newYaw), this) > t.Depth(Box, this) + 1e-4f) return 0f;
             Position += step;
             Yaw = newYaw;
             return step.Length();
@@ -401,7 +442,7 @@ public sealed class Car : IDisposable
     {
         _time += dt;
         _idleShake = Noise.Lerp(_idleShake, EngineOn ? 1f : 0f, Noise.Damp(6f, dt));
-        float maxSpeed = slow ? SlowSpeed : FastSpeed;
+        float maxSpeed = slow ? MathF.Min(SlowSpeed, _topSpeed) : _topSpeed;
 
         // --- Comandi: sterzo e gas. Niente aiuti: l'auto va dove la si guida.
         float wantSpeed = 0f;

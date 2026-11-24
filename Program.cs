@@ -30,6 +30,10 @@ public static class Program
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
     ///   --mouse pixel/s[,finoA]   muove il mouse in orizzontale (in auto sterza, a piedi gira la visuale); ripetibile, tratti in ordine
     ///   --mouse-y pixel/s[,finoA] muove il mouse in verticale (a piedi: negativo = mouse in su, la camera scende e guarda in su)
+    ///   --investi                 l'auto parte puntata contro il passante più vicino (test)
+    ///   --ruba                    scende, si mette accanto a un'auto del traffico ferma e la ruba con E (test)
+    ///   --sperona                 l'auto parte di fianco all'auto del traffico più vicina, puntata contro (test degli urti)
+    ///   --carrozzeria nome        il traffico ha solo questa carrozzeria: hatch, wagon, sport, tractor (test)
     ///   --segui-traffico          la camera segue l'auto del traffico più vicina alla partenza (test)
     ///   --palo                    l'auto parte sulla strada a 10 unità dal palo abbattibile più vicino, puntata contro
     ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
@@ -133,6 +137,18 @@ public static class Program
                     break;
                 case "--banchina":
                     d.Platform = true;
+                    break;
+                case "--investi":
+                    d.HitTest = true;
+                    break;
+                case "--ruba":
+                    d.StealTest = true;
+                    break;
+                case "--sperona":
+                    d.RamTraffic = true;
+                    break;
+                case "--carrozzeria" when i + 1 < args.Length:
+                    d.BodyStyle = Enum.Parse<Roads.Characters.BodyStyle>(args[++i], ignoreCase: true);
                     break;
                 case "--segui-traffico":
                     d.FollowTraffic = true;

@@ -17,7 +17,10 @@ namespace Roads.Characters;
 /// senza semaforo ha la precedenza la strada più importante (statale, poi viale, poi via), tra pari chi viene da
 /// destra; chi arriva di fronte e gira a sinistra cede a chi va dritto o gira a destra (anche col verde).
 /// Nascono fuori dalla vista (nella nebbia) e spariscono quando ci si allontana: attorno al giocatore ce n'è sempre
-/// più o meno lo stesso numero. Il moto è cinematico: nessuna fisica, la posizione segue la corsia.
+/// più o meno lo stesso numero. Il moto è cinematico (la posizione segue la corsia) finché l'auto del giocatore non ci
+/// sbatte contro: allora si scambiano quantità di moto secondo le masse (una sportiva vola via, un trattore quasi non si
+/// sposta), il veicolo colpito scivola e ruota, si ferma e poi rientra piano in corsia.
+/// Carrozzerie: utilitarie, station wagon, sportive; sulle statali di campagna anche trattori, lenti.
 /// </summary>
 public sealed class Traffic : IDisposable
 {
@@ -28,7 +31,8 @@ public sealed class Traffic : IDisposable
     private const float SpawnMin = 62f, SpawnMax = 108f, Despawn = 125f;
     private const float Scale = 1.1f;           // come l'auto del giocatore
     private const float WheelBase = 1.1f;
-    private const float HullOffset = 0.46f, HullRadius = 0.5f; // due cerchi, muso e coda (come Car)
+    private const float KnockFriction = 5f;     // unità/s²: rallentamento di un veicolo spinto via
+    private const float SpinFriction = 4f;      // rad/s²: rallentamento della rotazione dopo l'urto
     private const float Accel = 2.6f, Decel = 6f, HardDecel = 14f;
     private const float Margin = 0.35f;         // spazio lasciato davanti, oltre al contatto
 
@@ -44,7 +48,32 @@ public sealed class Traffic : IDisposable
         new(0.55f, 0.80f, 0.85f),  // azzurro
     ];
 
-    private readonly CarModel[] _models;
+    private static readonly Vector3[] TractorPaints =
+    [
+        new(0.25f, 0.55f, 0.22f),  // verde
+        new(0.78f, 0.16f, 0.12f),  // rosso
+        new(0.22f, 0.36f, 0.72f),  // blu
+        new(0.92f, 0.5f, 0.12f),   // arancio
+    ];
+
+    /// <summary>
+    /// Ingombro (due cerchi: distanza dal centro e raggio), massa, elasticità negli urti e quanto corre, per carrozzeria.
+    /// Il trattore pesa più di cinque volte un'auto e ha le gomme grandi: chi gli va addosso rimbalza indietro, lui si
+    /// sposta appena.
+    /// </summary>
+    private static (float HullOffset, float HullRadius, float Mass, float Bounce, float Pace) Spec(BodyStyle style) => style switch
+    {
+        BodyStyle.Wagon => (0.56f, 0.5f, 1.8f, 0.45f, 0.95f),
+        BodyStyle.Sport => (0.5f, 0.53f, 1.3f, 0.4f, 1.15f),
+        BodyStyle.Tractor => (0.32f, 0.66f, 8f, 0.8f, 0f),
+        _ => (0.46f, 0.5f, 1.5f, 0.45f, 1f),
+    };
+
+    private readonly Dictionary<BodyStyle, CarModel[]> _models = new();
+    private WorldMap? _world;
+    private readonly List<Car> _owned = new(); // le auto del giocatore: quella guidata e quelle lasciate parcheggiate
+    private Vector2 _focus;
+    private Vehicle? _skip; // escluso dagli ostacoli mentre si controlla dove può andare lui stesso
     private readonly List<Vehicle> _cars = new();
     private readonly Random _rng = new(1234);
     private readonly List<RoadEdge> _candidates = new();
@@ -56,9 +85,20 @@ public sealed class Traffic : IDisposable
 
     public int Count => _cars.Count;
 
+    /// <summary>Verifica: la sovrapposizione più profonda tra due veicoli vista finora.</summary>
+    public float WorstOverlap { get; private set; }
+
+    /// <summary>Test: se dato, nascono solo veicoli con questa carrozzeria.</summary>
+    public BodyStyle? OnlyStyle { get; init; }
+
+    /// <summary>Test: scrive in console ogni urto con l'auto del giocatore.</summary>
+    public bool LogHits { get; init; }
+
     public Traffic(GL gl)
     {
-        _models = Paints.Select((p, i) => new CarModel(gl, p, 11 + i)).ToArray();
+        foreach (var style in new[] { BodyStyle.Hatch, BodyStyle.Wagon, BodyStyle.Sport })
+            _models[style] = Paints.Select((p, i) => new CarModel(gl, p, style, 11 + i)).ToArray();
+        _models[BodyStyle.Tractor] = TractorPaints.Select((p, i) => new CarModel(gl, p, BodyStyle.Tractor, 31 + i)).ToArray();
         Current = this;
     }
 
@@ -145,6 +185,13 @@ public sealed class Traffic : IDisposable
     {
         public int Id;
         public CarModel Model = null!;
+        public float HullOffset, HullRadius, Mass, Bounce;
+        public float HalfW, HalfL; // il rettangolo vero (urti tra veicoli)
+        // Dopo un urto: velocità e rotazione ricevute, e quanto si è spostato dalla traiettoria (poi ci rientra)
+        public Vector2 Knock, Offset;
+        public float KnockSpin, YawOffset;
+        public bool Knocked => Knock.LengthSquared() > 0.09f || MathF.Abs(KnockSpin) > 0.2f;
+        public bool OffTrack => Offset.LengthSquared() > 0.0025f || MathF.Abs(YawOffset) > 0.03f;
         // Sul tratto: verso, corsia (scostamento verso la propria destra) e distanza da A
         public RoadEdge Edge = null!;
         public int Dir;
@@ -188,8 +235,14 @@ public sealed class Traffic : IDisposable
     /// Fa nascere, guidare e sparire le auto. <paramref name="player"/> = auto del giocatore, <paramref name="walker"/>
     /// = il personaggio a piedi (null se è in auto o in treno), <paramref name="focus"/> = dove sta chi si comanda.
     /// </summary>
-    public void Update(float dt, float clock, WorldMap world, Car player, Vector3? walker, Vector3 focus)
+    public void Update(float dt, float clock, WorldMap world, IReadOnlyList<Car> owned, Vector3? walker, Vector3 focus,
+                       IReadOnlyList<Vector3>? pedestrians = null)
     {
+        _world = world;
+        _owned.Clear();
+        _owned.AddRange(owned);
+        var player = owned[0];
+        _focus = new Vector2(focus.X, focus.Z);
         _time = clock; // lo stesso orologio dei semafori disegnati
         var center = new Vector2(focus.X, focus.Z);
 
@@ -214,16 +267,28 @@ public sealed class Traffic : IDisposable
         // Ostacoli di questo istante
         _obstacles.Clear();
         foreach (var v in _cars)
-            foreach (float k in new[] { 1f, -1f })
-                _obstacles.Add(new Circle(v.Pos + v.Heading * (HullOffset * k), HullRadius, v.Id, true, v.Speed > 0.3f));
-        Vector2 ph = new(player.Heading.X, player.Heading.Z);
-        Vector2 pp = new(player.Position.X, player.Position.Z);
-        bool playerMoving = player.Velocity.LengthSquared() > 0.3f * 0.3f;
-        foreach (float k in new[] { 1f, -1f })
-            _obstacles.Add(new Circle(pp + ph * (0.46f * k), 0.5f, -1, false, playerMoving));
+            foreach (float k in new[] { 1f, 0f, -1f })
+                _obstacles.Add(new Circle(v.Pos + v.Heading * ((v.HalfL - v.HalfW) * k), v.HalfW, v.Id, true, v.Speed > 0.3f));
+        foreach (var c in owned)
+        {
+            Vector2 ph = new(c.Heading.X, c.Heading.Z), pp = new(c.Position.X, c.Position.Z);
+            bool moving = c.Velocity.LengthSquared() > 0.3f * 0.3f;
+            // Tre cerchi lungo l'auto, larghi quanto lei (per la guida del traffico; gli urti veri usano i rettangoli)
+            foreach (float k in new[] { 1f, 0f, -1f })
+                _obstacles.Add(new Circle(pp + ph * ((c.HalfLength - c.HalfWidth) * k), c.HalfWidth, -1, false, moving));
+        }
         if (walker is { } w) _obstacles.Add(new Circle(new Vector2(w.X, w.Z), 0.35f, -2, false, false));
+        if (pedestrians != null)
+            foreach (var q in pedestrians) _obstacles.Add(new Circle(new Vector2(q.X, q.Z), 0.3f, -3, false, true));
 
         foreach (var v in _cars) Drive(v, dt, world);
+        Separate();
+        // Verifica: la sovrapposizione più profonda tra veicoli da inizio partita (deve restare ~0)
+        foreach (var v in _cars)
+        {
+            float d = DepthAgainst(BoxOf(v), v, null);
+            if (d > WorstOverlap) WorstOverlap = d;
+        }
     }
 
     private void RefreshCandidates(Vector2 center)
@@ -258,21 +323,32 @@ public sealed class Traffic : IDisposable
         float dist = Vector2.Distance(p, center);
         if (dist < minDistance || dist > SpawnMax) return;
         var p3 = new Vector3(p.X, 0f, p.Y);
-        if (world.ZoneAt(p3) == null || !world.IsWalkable(p3, HullRadius)) return; // anche: niente auto addosso a un'altra
+        if (world.ZoneAt(p3) == null || !world.IsWalkable(p3, 0.7f)) return; // anche: niente auto addosso a un'altra
         if (Vector2.Distance(p, new Vector2(player.Position.X, player.Position.Z)) < 6f) return;
         foreach (var o in _cars)
             if (Vector2.DistanceSquared(o.Pos, p) < 7f * 7f) return;
 
+        // Carrozzeria: in campagna, sulle statali, ogni tanto un trattore; altrimenti utilitarie, station wagon, sportive
+        float pick = _rng.NextSingle();
+        var style = e.Kind == RoadKind.Main && Terrain.Urban(p.X, p.Y) < 0.2f && pick < 0.35f ? BodyStyle.Tractor
+                  : pick < 0.5f ? BodyStyle.Hatch : pick < 0.8f ? BodyStyle.Wagon : BodyStyle.Sport;
+        if (OnlyStyle is { } only) style = only;
+        var models = _models[style];
+        var spec = Spec(style);
         var v = new Vehicle
         {
             Id = _nextId++,
-            Model = _models[_rng.Next(_models.Length)],
+            Model = models[_rng.Next(models.Length)],
+            HullOffset = spec.HullOffset, HullRadius = spec.HullRadius, Mass = spec.Mass, Bounce = spec.Bounce,
+            HalfW = VehicleBox.Size(style).W, HalfL = VehicleBox.Size(style).L,
             Edge = e, Dir = dir, Lane = lane, S = s,
         };
-        v.Cruise = Limit(e) * (0.85f + 0.25f * _rng.NextSingle());
+        v.Cruise = style == BodyStyle.Tractor ? 3.2f + 0.8f * _rng.NextSingle()
+                                              : Limit(e) * spec.Pace * (0.85f + 0.25f * _rng.NextSingle());
         v.Speed = v.Cruise * 0.8f;
         PlanNext(v);
         Pose(v, world, 0f);
+        if (DepthAgainst(BoxOf(v), v, null) > 0f) return; // mai addosso a un'auto parcheggiata
         _cars.Add(v);
     }
 
@@ -373,7 +449,7 @@ public sealed class Traffic : IDisposable
         hit = null;
         train = false;
         const float step = 0.5f;
-        float reach = look + HullOffset + 3f;
+        float reach = look + v.HullOffset + 3f;
         // Solo gli ostacoli abbastanza vicini da contare
         Span<int> near = stackalloc int[_obstacles.Count];
         int count = 0;
@@ -386,11 +462,11 @@ public sealed class Traffic : IDisposable
         var trains = Trains.Current;
         for (float d = 0f; d <= look; d += step)
         {
-            Vector2 front = PathPoint(v, d + HullOffset, shift); // dove sarà il cerchio del muso
+            Vector2 front = PathPoint(v, d + v.HalfL - v.HalfW, shift); // dove sarà il cerchio del muso
             for (int k = 0; k < count; k++)
             {
                 var o = _obstacles[near[k]];
-                float r = o.R + HullRadius + 0.15f;
+                float r = o.R + v.HalfW + 0.1f;
                 if (Vector2.DistanceSquared(front, o.C) < r * r)
                 {
                     // Un'auto che sta dietro di noi (ci tocca solo di lato o in coda) non ferma
@@ -399,7 +475,7 @@ public sealed class Traffic : IDisposable
                     return d;
                 }
             }
-            if (trains != null && d % 1f == 0f && trains.Blocks(front, HullRadius + 0.3f)) { train = true; return d; }
+            if (trains != null && d % 1f == 0f && trains.Blocks(front, v.HullRadius + 0.3f)) { train = true; return d; }
         }
         return look;
     }
@@ -409,7 +485,7 @@ public sealed class Traffic : IDisposable
         v.Ghost = MathF.Max(0f, v.Ghost - dt);
 
         // Velocità voluta: crociera, poi più piano verso la curva dell'incrocio, poi lo spazio libero davanti
-        float want = v.Turning ? v.TurnSpeed : MathF.Min(v.Cruise, Limit(v.Edge) * 1.1f);
+        float want = MathF.Min(v.Turning ? v.TurnSpeed : Limit(v.Edge) * 1.15f, v.Cruise);
         if (!v.Turning && v.Turn != null)
             want = MathF.Min(want, MathF.Sqrt(v.TurnSpeed * v.TurnSpeed + 2f * Decel * MathF.Max(0f, v.Remaining - 0.5f)));
         if (!v.Turning && v.Next == null) want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, v.Remaining)));
@@ -418,7 +494,7 @@ public sealed class Traffic : IDisposable
         v.AtLight = false;
         if (!v.Turning && LightAhead(v) is { } light)
         {
-            float stop = v.Remaining - StopLine(v) - (HullOffset + HullRadius);
+            float stop = v.Remaining - StopLine(v) - v.HalfL;
             bool halt = light == TrafficLights.Light.Red
                         || (light == TrafficLights.Light.Yellow && v.Speed * v.Speed / (2f * Decel) <= stop + 0.5f);
             if (halt && stop > -0.3f) // chi ha già superato la linea prosegue
@@ -433,7 +509,7 @@ public sealed class Traffic : IDisposable
         v.Yield = false;
         if (!v.Turning && v.Turn != null && v.Remaining < 16f && !v.AtLight)
         {
-            float stop = v.Remaining - StopLine(v) - (HullOffset + HullRadius);
+            float stop = v.Remaining - StopLine(v) - v.HalfL;
             if (stop > -0.3f && MustYield(v))
             {
                 want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, stop)));
@@ -457,7 +533,9 @@ public sealed class Traffic : IDisposable
         if (stuck && hit is { } h && !train)
         {
             // Solo un ingorgo vero (nessuno davanti sta aspettando il verde o il treno) si sblocca passando attraverso
-            if (h.Car && v.Blocked > 6f && !(ahead?.Queued ?? false)) v.Ghost = 2.5f;
+            // Ingorgo vero (nessuno davanti aspetta il verde o il treno): mai passare attraverso; lontano dagli occhi
+            // del giocatore, dopo un po', l'auto se ne va (sparisce nella nebbia e ne nasce un'altra)
+            if (h.Car && v.Blocked > 10f && !(ahead?.Queued ?? false) && Vector2.Distance(v.Pos, _focus) > 45f) v.Dead = true;
             else if (!h.Car && !h.Moving && v.Blocked > 2f && v.ShiftTarget == 0f && CanBypass(v))
             {
                 v.ShiftTarget = -2f * v.Edge.LaneHalf;
@@ -475,13 +553,25 @@ public sealed class Traffic : IDisposable
         }
         v.Shift = MoveTowards(v.Shift, v.ShiftTarget, (v.Speed * 0.45f + 0.15f) * dt);
 
-        float rate = want > v.Speed ? Accel : free < v.Speed * 0.6f ? HardDecel : Decel;
+        // Appena urtato si inchioda; poi si rientra in corsia piano
+        if (v.Knocked) want = 0f;
+        else if (v.OffTrack) want = MathF.Min(want, 1.2f);
+        Recover(v, dt);
+
+        float rate = want > v.Speed ? Accel : free < v.Speed * 0.6f || v.Knocked ? HardDecel : Decel;
         float before = v.Speed;
         v.Speed = MathF.Max(0f, MoveTowards(v.Speed, want, rate * dt));
         v.Want = want;
         v.Brake = (want < before - 0.2f && v.Speed > 0.2f) || v.Speed < 0.05f ? 1f : MathF.Max(0f, v.Brake - dt * 4f);
 
-        Advance(v, v.Speed * dt);
+        // Mai dentro un altro veicolo, nel giocatore o in un passante: se il passo ci entrerebbe, ci si ferma a contatto
+        float dist = v.Speed * dt;
+        if (StepBlocked(v, dist))
+        {
+            dist = 0f;
+            v.Speed = 0f;
+        }
+        Advance(v, dist);
         Pose(v, world, dt);
     }
 
@@ -608,6 +698,257 @@ public sealed class Traffic : IDisposable
         }
     }
 
+    /// <summary>
+    /// Dopo un urto: il veicolo scivola con la velocità ricevuta e ruota, l'attrito lo ferma (se va contro un muro si
+    /// ferma lì); poi l'autista lo riporta piano sulla sua traiettoria.
+    /// </summary>
+    private void Recover(Vehicle v, float dt)
+    {
+        // La parte dello spostamento lungo la marcia diventa strada fatta (o persa): chi è stato spinto avanti resta
+        // avanti, senza tornare indietro in retromarcia; resta da recuperare solo lo scostamento di lato
+        if (v.Offset != Vector2.Zero) AbsorbAlong(v);
+        if (v.Knock == Vector2.Zero && v.KnockSpin == 0f && !v.OffTrack) return;
+        float k = v.Knock.Length();
+        if (k > 0f)
+        {
+            Vector2 step = v.Knock * dt;
+            if (Free(v, v.Pos + step, v.Yaw)) v.Offset += step;
+            else v.Knock = Vector2.Zero;
+            v.Knock = k > KnockFriction * dt ? v.Knock * ((k - KnockFriction * dt) / k) : Vector2.Zero;
+        }
+        if (v.KnockSpin != 0f)
+        {
+            float turn = v.KnockSpin * dt;
+            if (Free(v, v.Pos, v.Yaw + turn)) v.YawOffset = Math.Clamp(v.YawOffset + turn, -MathF.PI, MathF.PI);
+            else v.KnockSpin = 0f;
+            v.KnockSpin = MoveTowards(v.KnockSpin, 0f, SpinFriction * dt);
+        }
+        if (!v.Knocked)
+        {
+            // Rientro: lo scostamento e la rotazione tornano a zero, se lì c'è posto
+            Vector2 back = v.Offset.LengthSquared() > 1e-8f
+                ? -Vector2.Normalize(v.Offset) * MathF.Min(v.Offset.Length(), 0.7f * dt) : Vector2.Zero;
+            float turnBack = MoveTowards(v.YawOffset, 0f, 0.6f * dt) - v.YawOffset;
+            if (Free(v, v.Pos + back, v.Yaw + turnBack))
+            {
+                v.Offset += back;
+                v.YawOffset += turnBack;
+            }
+        }
+    }
+
+    /// <summary>Sposta nella traiettoria (S sul tratto, o la distanza nella curva) la parte dello scostamento lungo la marcia.</summary>
+    private static void AbsorbAlong(Vehicle v)
+    {
+        if (v.Turning)
+        {
+            Vector2 t = v.Turn!.Tangent(v.TurnD);
+            float along = Vector2.Dot(v.Offset, t);
+            float to = Math.Clamp(v.TurnD + along, 0f, v.Turn.Length);
+            v.Offset -= t * (to - v.TurnD);
+            v.TurnD = to;
+        }
+        else
+        {
+            Vector2 t = v.Edge.Tangent(v.S) * v.Dir;
+            float along = Vector2.Dot(v.Offset, t);
+            float lo = MathF.Min(StartS(v.Edge, v.Dir), EndS(v.Edge, v.Dir)), hi = MathF.Max(StartS(v.Edge, v.Dir), EndS(v.Edge, v.Dir));
+            float to = Math.Clamp(v.S + v.Dir * along, lo, hi);
+            v.Offset -= t * ((to - v.S) * v.Dir);
+            v.S = to;
+        }
+    }
+
+    /// <summary>Il rettangolo del veicolo in una posa.</summary>
+    private static VehicleBox BoxOf(Vehicle v, Vector2 pos, float yaw) =>
+        new(pos, new Vector2(MathF.Sin(yaw), MathF.Cos(yaw)), v.HalfW, v.HalfL);
+
+    private static VehicleBox BoxOf(Vehicle v) => BoxOf(v, v.Pos, v.Yaw);
+
+    /// <summary>
+    /// Quanto il rettangolo entra negli altri veicoli (traffico e auto del giocatore), esclusi quelli indicati: la
+    /// sovrapposizione più profonda, 0 se non ne tocca nessuno.
+    /// </summary>
+    private float DepthAgainst(in VehicleBox box, Vehicle? skipV, Car? skipC)
+    {
+        float worst = 0f;
+        foreach (var o in _cars)
+            if (o != skipV && !o.Dead && VehicleBox.Overlap(box, BoxOf(o), out _, out float d)) worst = MathF.Max(worst, d);
+        foreach (var c in _owned)
+            if (c != skipC && VehicleBox.Overlap(box, c.Box, out _, out float d)) worst = MathF.Max(worst, d);
+        return worst;
+    }
+
+    /// <summary>Il rettangolo dato tocca un veicolo (escluso <paramref name="except"/>)? Per l'auto del giocatore.</summary>
+    public bool Overlaps(VehicleBox box, Car? except) => DepthAgainst(box, null, except) > 0.002f;
+
+    /// <summary>Quanto il rettangolo entra negli altri veicoli (per liberarsi senza entrarci di più).</summary>
+    public float Depth(VehicleBox box, Car? except) => DepthAgainst(box, null, except);
+
+    /// <summary>
+    /// Il veicolo ci sta in quel punto e con quella direzione? Terreno libero e nessun altro veicolo; se adesso è già
+    /// sovrapposto a qualcuno (dopo un urto) può muoversi solo allontanandosene.
+    /// </summary>
+    private bool Free(Vehicle v, Vector2 pos, float yaw)
+    {
+        if (_world == null) return true;
+        Vector2 f = new Vector2(MathF.Sin(yaw), MathF.Cos(yaw)) * v.HullOffset;
+        _skip = v;
+        bool ground = _world.IsWalkable(new Vector3(pos.X + f.X, 0f, pos.Y + f.Y), v.HullRadius * 0.9f)
+                      && _world.IsWalkable(new Vector3(pos.X - f.X, 0f, pos.Y - f.Y), v.HullRadius * 0.9f);
+        _skip = null;
+        if (!ground) return false;
+        float now = DepthAgainst(BoxOf(v), v, null), next = DepthAgainst(BoxOf(v, pos, yaw), v, null);
+        return next <= 0.002f || next < now - 1e-4f;
+    }
+
+    /// <summary>
+    /// Il passo che il veicolo sta per fare lungo la sua traiettoria lo farebbe entrare in un altro veicolo, nel
+    /// giocatore, in un passante? Allora non lo fa (si ferma a contatto, mai dentro).
+    /// </summary>
+    private bool StepBlocked(Vehicle v, float dist)
+    {
+        if (dist <= 0f) return false;
+        Vector2 a = PathPoint(v, dist - 0.3f, v.Shift), b = PathPoint(v, dist + 0.3f, v.Shift);
+        Vector2 heading = b - a;
+        heading = heading.LengthSquared() > 1e-6f ? Vector2.Normalize(heading) : v.Heading;
+        float yaw = Noise.WrapAngle(MathF.Atan2(heading.X, heading.Y) + v.YawOffset);
+        Vector2 pos = PathPoint(v, dist, v.Shift) + v.Offset;
+        var now = BoxOf(v);
+        var next = BoxOf(v, pos, yaw);
+        float before = DepthAgainst(now, v, null), after = DepthAgainst(next, v, null);
+        if (after > 0.002f && after >= before - 1e-4f) return true;
+        // Passanti e personaggio: cerchi
+        foreach (var o in _obstacles)
+        {
+            if (o.Owner >= -1) continue; // auto (traffico e giocatore) già contate sopra coi rettangoli
+            float d1 = next.CircleDepth(o.C, o.R, out _);
+            if (d1 > 0.002f && d1 >= now.CircleDepth(o.C, o.R, out _)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Separa i veicoli rimasti sovrapposti (non dovrebbe succedere, ma un urto contro un muro può incastrarli): ognuno
+    /// si sposta lungo la normale di quanto serve, se lì c'è posto.
+    /// </summary>
+    private void Separate()
+    {
+        foreach (var v in _cars)
+        {
+            var box = BoxOf(v);
+            foreach (var o in _cars)
+            {
+                if (o == v || o.Id < v.Id || !VehicleBox.Overlap(box, BoxOf(o), out var n, out float d)) continue;
+                Nudge(o, n * (d * 0.5f + 0.005f));
+                Nudge(v, -n * (d * 0.5f + 0.005f));
+                box = BoxOf(v);
+            }
+            foreach (var c in _owned)
+                if (VehicleBox.Overlap(c.Box, box, out var n, out float d)) Nudge(v, n * (d + 0.005f));
+        }
+    }
+
+    private void Nudge(Vehicle v, Vector2 by)
+    {
+        if (!Free(v, v.Pos + by, v.Yaw)) return;
+        v.Offset += by;
+        v.Pos += by;
+    }
+
+    /// <summary>
+    /// L'auto guidata dal giocatore (<paramref name="self"/>, nella posa <paramref name="box"/> in cui sta per andare,
+    /// con la sua velocità e massa) urta gli altri veicoli: traffico e auto parcheggiate. Si scambiano quantità di moto
+    /// lungo la normale d'urto tra i due rettangoli; il veicolo colpito riceve velocità e rotazione secondo la sua massa
+    /// e viene spinto fuori dall'ingombro; <paramref name="velocity"/> torna cambiata (anche all'indietro, contro un
+    /// trattore). Restituisce la velocità d'impatto più forte (0 se nessun urto).
+    /// </summary>
+    public float PushBox(Car self, VehicleBox box, ref Vector2 velocity, float mass, WorldMap world, out Vector3 contact)
+    {
+        contact = default;
+        float worst = 0f;
+        foreach (var v in _cars)
+        {
+            if (!VehicleBox.Overlap(box, BoxOf(v), out var n, out float depth)) continue;
+            Vector2 vel = v.Heading * v.Speed + v.Knock;
+            float vn = Vector2.Dot(velocity - vel, n);
+            Vector2 at = PointOn(BoxOf(v), -n);
+            if (vn > 0f)
+            {
+                float j = (1f + v.Bounce) * vn / (1f / mass + 1f / v.Mass);
+                Vector2 impulse = n * (j / v.Mass);
+                // La parte all'indietro rispetto alla marcia la frena; il resto la spinge via (di lato, o in avanti
+                // se tamponata)
+                float along = Vector2.Dot(impulse, v.Heading);
+                if (along < 0f)
+                {
+                    float slow = MathF.Min(-along, v.Speed);
+                    v.Speed -= slow;
+                    impulse += v.Heading * slow;
+                }
+                v.Knock += impulse;
+                // Colpita lontano dal centro ruota: momento dell'impulso sul momento d'inerzia
+                Vector2 arm = at - v.Pos;
+                float inertia = v.Mass * (v.HalfW * v.HalfW + v.HalfL * v.HalfL) / 3f;
+                float torque = arm.X * (n.Y * j) - arm.Y * (n.X * j);
+                v.KnockSpin = Math.Clamp(v.KnockSpin - torque / inertia, -6f, 6f);
+                velocity -= n * (j / mass);
+                if (LogHits && vn > 0.5f)
+                    Console.WriteLine($"Urto: {v.Model.Style} (massa {v.Mass:F1}) a {vn:F1} u/s: spinta {v.Knock.Length():F1} u/s, "
+                                      + $"rotazione {v.KnockSpin:F1} rad/s; auto del giocatore ora a {velocity.Length():F1} u/s"
+                                      + (Vector2.Dot(velocity, n) < 0f ? " (rimbalza indietro)" : ""));
+                if (vn > worst) { worst = vn; contact = new Vector3(at.X, v.Y + 0.3f, at.Y); }
+            }
+            // Fuori dall'ingombro dell'auto che arriva (se lì c'è posto; altrimenti l'auto non entra: vedi Car.Fits)
+            Vector2 push = n * (depth + 0.01f);
+            if (FreeExcept(v, v.Pos + push, v.Yaw, self))
+            {
+                v.Offset += push;
+                v.Pos += push;
+            }
+        }
+        // Le auto parcheggiate dal giocatore: stessa fisica, pesano come un'auto
+        foreach (var c in _owned)
+        {
+            if (c == self || !VehicleBox.Overlap(box, c.Box, out var n, out float depth)) continue;
+            Vector3 cv = c.Velocity;
+            float vn = Vector2.Dot(velocity - new Vector2(cv.X, cv.Z), n);
+            const float other = 1.5f, bounce = 0.45f;
+            if (vn > 0f)
+            {
+                float j = (1f + bounce) * vn / (1f / mass + 1f / other);
+                c.Shove(n * (j / other));
+                velocity -= n * (j / mass);
+                if (vn > worst)
+                {
+                    worst = vn;
+                    Vector2 at = PointOn(c.Box, -n);
+                    contact = new Vector3(at.X, c.Position.Y + 0.3f, at.Y);
+                }
+            }
+            c.Nudge(world, n * (depth + 0.01f));
+        }
+        return worst;
+    }
+
+    /// <summary>Il punto del rettangolo più in fuori nella direzione data (dove lo si tocca arrivando da lì).</summary>
+    private static Vector2 PointOn(in VehicleBox b, Vector2 dir) =>
+        b.C + b.R * (b.W * MathF.Sign(Vector2.Dot(b.R, dir))) * 0.6f + b.F * (b.L * MathF.Sign(Vector2.Dot(b.F, dir))) * 0.6f;
+
+    /// <summary>Come <see cref="Free"/>, senza contare l'auto <paramref name="ignore"/> (quella che la sta spingendo).</summary>
+    private bool FreeExcept(Vehicle v, Vector2 pos, float yaw, Car ignore)
+    {
+        if (_world == null) return true;
+        Vector2 f = new Vector2(MathF.Sin(yaw), MathF.Cos(yaw)) * v.HullOffset;
+        _skip = v;
+        bool ground = _world.IsWalkable(new Vector3(pos.X + f.X, 0f, pos.Y + f.Y), v.HullRadius * 0.9f)
+                      && _world.IsWalkable(new Vector3(pos.X - f.X, 0f, pos.Y - f.Y), v.HullRadius * 0.9f);
+        _skip = null;
+        if (!ground) return false;
+        float now = DepthAgainst(BoxOf(v), v, ignore), next = DepthAgainst(BoxOf(v, pos, yaw), v, ignore);
+        return next <= 0.002f || next < now - 1e-4f;
+    }
+
     private static void Pose(Vehicle v, WorldMap world, float dt)
     {
         Vector2 pos, heading;
@@ -625,7 +966,10 @@ public sealed class Traffic : IDisposable
             if (MathF.Abs(side) > 0.02f && v.Speed > 0.1f)
                 heading = Vector2.Normalize(heading + RightOf(heading) * MathF.Sign(side) * 0.35f);
         }
-        float yaw = MathF.Atan2(heading.X, heading.Y);
+        // Dopo un urto: spostato e ruotato rispetto alla traiettoria
+        pos += v.Offset;
+        float yaw = Noise.WrapAngle(MathF.Atan2(heading.X, heading.Y) + v.YawOffset);
+        heading = new Vector2(MathF.Sin(yaw), MathF.Cos(yaw));
         if (v.Placed && dt > 0f)
         {
             float yawRate = Noise.WrapAngle(yaw - v.Yaw) / dt;
@@ -651,15 +995,13 @@ public sealed class Traffic : IDisposable
 
     // ------------------------------------------------------------------ ostacolo per gli altri
 
-    /// <summary>Un cerchio nel punto tocca un'auto del traffico? (Per l'auto del giocatore e il personaggio a piedi.)</summary>
+    /// <summary>Un cerchio nel punto tocca un'auto del traffico? (Per il personaggio a piedi, i passanti, i cerchi delle auto.)</summary>
     public bool Blocks(Vector2 p, float r)
     {
         foreach (var v in _cars)
         {
-            if (Vector2.DistanceSquared(v.Pos, p) > (r + 2f) * (r + 2f)) continue;
-            float rr = (HullRadius + r) * (HullRadius + r);
-            Vector2 f = v.Heading * HullOffset;
-            if (Vector2.DistanceSquared(p, v.Pos + f) < rr || Vector2.DistanceSquared(p, v.Pos - f) < rr) return true;
+            if (v == _skip || Vector2.DistanceSquared(v.Pos, p) > (r + 2f) * (r + 2f)) continue;
+            if (BoxOf(v).CircleDepth(p, r, out _) > 0f) return true;
         }
         return false;
     }
@@ -681,6 +1023,46 @@ public sealed class Traffic : IDisposable
         }
     }
 
+    // ------------------------------------------------------------------ furto
+
+    /// <summary>Un veicolo rubato: dove sta, com'è fatto, e da dove salta giù chi lo guidava (il guidatore sta a sinistra).</summary>
+    public readonly record struct Stolen(Vector3 Pos, float Yaw, Vector3 Paint, BodyStyle Style, Vector3 Seat, Vector3 Door);
+
+    /// <summary>
+    /// Il veicolo che si può rubare stando a piedi in <paramref name="p"/>: abbastanza vicino (a meno di un passo dalla
+    /// carrozzeria) e non troppo veloce. Null se non ce n'è.
+    /// </summary>
+    private Vehicle? Stealable(Vector2 p, float maxSpeed)
+    {
+        Vehicle? best = null;
+        float bestD = float.MaxValue;
+        foreach (var v in _cars)
+        {
+            if (v.Speed > maxSpeed || Vector2.DistanceSquared(v.Pos, p) > 9f) continue;
+            float inside = BoxOf(v).CircleDepth(p, 1.0f, out _); // > 0: entro 1 dalla carrozzeria
+            if (inside <= 0f) continue;
+            float d = Vector2.Distance(v.Pos, p);
+            if (d < bestD) { bestD = d; best = v; }
+        }
+        return best;
+    }
+
+    public bool CanSteal(Vector2 p, float maxSpeed) => Stealable(p, maxSpeed) != null;
+
+    /// <summary>Toglie dal traffico il veicolo rubabile più vicino e dice com'era fatto (null se non ce n'è).</summary>
+    public Stolen? Steal(Vector2 p, float maxSpeed)
+    {
+        if (Stealable(p, maxSpeed) is not { } v) return null;
+        _cars.Remove(v);
+        var pos = new Vector3(v.Pos.X, v.Y, v.Pos.Y);
+        Vector3 left = new(MathF.Cos(v.Yaw), 0f, -MathF.Sin(v.Yaw)); // +X del modello: la sinistra del guidatore
+        Vector3 seat = pos + left * 0.22f + new Vector3(0f, 0.12f, 0f);
+        Vector3 door = pos + left * (v.HalfW + 0.35f);
+        if (_world != null && !_world.IsWalkable(door, 0.2f)) door = pos - left * (v.HalfW + 0.35f); // dall'altra parte
+        if (_world != null) door.Y = _world.GroundHeight(door);
+        return new Stolen(pos, v.Yaw, v.Model.Paint, v.Model.Style, seat, door);
+    }
+
     private int _followed = -1;
 
     /// <summary>Test: posizione e direzione dell'auto seguita dalla camera (la prima volta, la più vicina al punto).</summary>
@@ -693,6 +1075,12 @@ public sealed class Traffic : IDisposable
         return (new Vector3(v.Pos.X, v.Y, v.Pos.Y), v.Yaw);
     }
 
+    /// <summary>Test: l'auto seguita si ferma e resta ferma (bersaglio per le prove d'urto).</summary>
+    public void FreezeFollowed()
+    {
+        if (_cars.Find(c => c.Id == _followed) is { } v) v.Cruise = v.Speed = 0f;
+    }
+
     /// <summary>Riepilogo per i test: quante auto, quante ferme, quante in un incrocio.</summary>
     public string Status()
     {
@@ -702,14 +1090,15 @@ public sealed class Traffic : IDisposable
         int yields = _cars.Count(v => v.Yield);
         return $"traffico: {_cars.Count} auto, {stopped} ferme ({light} al rosso, {yields} danno precedenza, {queued} in coda), "
                + $"{turning} negli incroci, "
-               + $"{bypass} aggirano, {ghost} sbloccate"
+               + $"{bypass} aggirano, {ghost} sbloccate, sovrapposizione massima {WorstOverlap:F3}"
                + (_cars.Find(v => v.Id == _followed) is { } f
                    ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Yield ? ", dà precedenza" : "")}{(f.Queued ? ", in coda" : "")}" : "");
     }
 
     public void Dispose()
     {
-        foreach (var m in _models) m.Dispose();
+        foreach (var set in _models.Values)
+            foreach (var m in set) m.Dispose();
         if (Current == this) Current = null;
     }
 }

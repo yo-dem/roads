@@ -63,15 +63,72 @@ public sealed class Trains : IDisposable
 
     /// <summary>Quota del pavimento della carrozza (locale, sopra il ferro).</summary>
     public const float Floor = 0.62f;
-    /// <summary>Corridoio e capi della carrozza dove si cammina (locale: x di lato, z verso la marcia).</summary>
-    public const float AisleHalf = 0.32f;
-    public static float CabinEnd => CarLength * 0.5f - 0.45f;
-    /// <summary>Le porte stanno in fondo alla carrozza, verso la locomotiva (+Z).</summary>
-    public static float DoorZ => CarLength * 0.5f - 0.75f;
 
-    /// <summary>I posti a sedere (locale): centro del sedile e lato del finestrino (+1 destra, -1 sinistra).</summary>
-    public static readonly (float X, float Z, float Side)[] Seats =
-        new[] { -2.3f, -1.15f, 0f, 1.15f }.SelectMany(z => new[] { (0.58f, z, 1f), (-0.58f, z, -1f) }).ToArray();
+    // L'interno è costruito a misura di chi viaggia rimpicciolito (InsideScale): nella stessa carrozza stanno così
+    // posti a coppie coi tavolini, cappelliere, toilette, distributore, banco del caffè, posto bici, come in un treno vero.
+    // (Da dentro la cassa esterna non si vede: l'interno può avere le sue proporzioni.)
+
+    /// <summary>Quanto è grande il personaggio dentro la carrozza rispetto a fuori.</summary>
+    public const float InsideScale = 0.6f;
+    /// <summary>Altezza del soffitto sopra il pavimento (per il personaggio rimpicciolito: circa due volte lui).</summary>
+    public const float CeilingHeight = 0.95f;
+    public static float Top => Floor + CeilingHeight;
+    /// <summary>Fin dove si cammina: di lato (pareti) e in lungo (pareti di fondo).</summary>
+    public const float WalkX = 0.86f;
+    public static float CabinEnd => CarLength * 0.5f - 0.14f;
+    /// <summary>Le porte per scendere stanno nel vestibolo davanti, verso la locomotiva (+Z), sui due fianchi.</summary>
+    public static float DoorZ => CarLength * 0.5f - 0.42f;
+    /// <summary>Mezza larghezza del corridoio tra i posti.</summary>
+    public const float AisleHalf = 0.25f;
+
+    /// <summary>Le file di posti: ognuna è una coppia di sedili affacciati con il tavolino in mezzo, per lato.</summary>
+    private static readonly float[] Bays = [-1.9f, -0.95f, 0f, 0.95f];
+    private const float BayHalf = 0.47f;
+
+    /// <summary>Un posto: centro del sedile, lato del finestrino (+1 destra della marcia) e verso cui guarda (+1 la marcia).</summary>
+    public readonly record struct TrainSeat(float X, float Z, float Side, float Facing);
+
+    public static readonly TrainSeat[] Seats =
+        Bays.SelectMany(b => new[] { 1f, -1f }.SelectMany(side => new[] { 0.42f, 0.7f }.SelectMany(x => new[]
+        {
+            new TrainSeat(side * x, b - 0.3f, side, 1f),   // guarda avanti, schienale verso la coda
+            new TrainSeat(side * x, b + 0.3f, side, -1f),  // di fronte, guarda indietro
+        }))).ToArray();
+
+    /// <summary>Gli ingombri sul pavimento (locale: x0, z0, x1, z1) dove non si cammina: posti, mobili, bici, pali.</summary>
+    public static readonly (float X0, float Z0, float X1, float Z1)[] Furniture = BuildFurniture();
+
+    private static (float, float, float, float)[] BuildFurniture()
+    {
+        var list = new List<(float, float, float, float)>();
+        foreach (float b in Bays)
+        {
+            list.Add((AisleHalf, b - BayHalf, 0.93f, b + BayHalf));
+            list.Add((-0.93f, b - BayHalf, -AisleHalf, b + BayHalf));
+        }
+        float back = -CarLength * 0.5f;
+        list.Add((0.38f, back, 0.93f, back + 0.72f));          // toilette
+        list.Add((-0.93f, back, -0.5f, back + 0.5f));           // scaffale dei bagagli
+        list.Add((-0.36f, back, -0.2f, back + 0.16f));          // cestino
+        list.Add((-0.93f, 1.6f, -0.6f, 1.95f));                 // distributore
+        list.Add((-0.93f, 2.05f, -0.6f, 2.5f));                 // banco del caffè
+        list.Add((0.62f, 1.58f, 0.93f, 2.42f));                 // posto bici
+        foreach (float x in new[] { -0.3f, 0.3f })
+            list.Add((x - 0.035f, 2.6f - 0.035f, x + 0.035f, 2.6f + 0.035f)); // corrimano verticali
+        return list.ToArray();
+    }
+
+    /// <summary>Un cerchio di raggio <paramref name="r"/> (locale) sta sul pavimento libero della carrozza?</summary>
+    public static bool FreeInside(Vector2 p, float r)
+    {
+        if (MathF.Abs(p.X) > WalkX - r + 0.07f || MathF.Abs(p.Y) > CabinEnd - r + 0.1f) return false;
+        foreach (var (x0, z0, x1, z1) in Furniture)
+        {
+            float cx = Math.Clamp(p.X, x0, x1), cz = Math.Clamp(p.Y, z0, z1);
+            if ((p.X - cx) * (p.X - cx) + (p.Y - cz) * (p.Y - cz) < r * r) return false;
+        }
+        return true;
+    }
 
     /// <summary>Trasformazione della prima carrozza (locale → mondo): +Z verso la marcia, y = 0 sul ferro.</summary>
     public Matrix4x4 RideMatrix
@@ -469,64 +526,174 @@ public sealed class Trains : IDisposable
     }
 
     /// <summary>
-    /// L'interno della carrozza: pavimento, soffitto con la plafoniera, pareti di fondo (con la porta verso la
-    /// locomotiva), pareti laterali con quattro finestrini APERTI per lato (si vede fuori) e otto sedili rossi rivolti
-    /// verso la marcia. Sotto, carrello e telaio come fuori.
+    /// L'interno della carrozza, a misura del personaggio rimpicciolito: pavimento col tappeto nel corridoio, soffitto
+    /// con le plafoniere, pareti coi finestrini APERTI (si vede fuori) sopra le file di posti, cappelliere con le
+    /// valigie; in coda la toilette, lo scaffale dei bagagli e il cestino; davanti il distributore, il banco del caffè,
+    /// il posto bici, i corrimano, le porte sui fianchi e il tabellone. Sotto, carrello e telaio come fuori.
     /// </summary>
     private static (Mesh, Mesh) BuildInterior(GL gl)
     {
         var mb = new MeshBuilder();
         var glow = new MeshBuilder();
-        var wall = new Vector3(0.90f, 0.86f, 0.74f);
-        var floor = new Vector3(0.42f, 0.36f, 0.30f);
-        var seat = new Vector3(0.70f, 0.18f, 0.16f);
+        var rng = new Random(17);
+        var wall = new Vector3(0.90f, 0.87f, 0.78f);
+        var floor = new Vector3(0.40f, 0.38f, 0.36f);
+        var carpet = new Vector3(0.22f, 0.30f, 0.42f);
+        var seatC = new Vector3(0.20f, 0.36f, 0.62f);
+        var head = new Vector3(0.92f, 0.92f, 0.9f);
         var green = new Vector3(0.18f, 0.46f, 0.32f);
-        const float L = CarLength, X = 0.93f, T = 0.05f;            // pareti a ±X, spesse T
-        const float Low = 1.3f, High = 2.02f, Top = 2.38f;         // davanzale, architrave, soffitto
+        var metal = new Vector3(0.62f, 0.64f, 0.68f);
+        var wood = new Vector3(0.55f, 0.38f, 0.24f);
+        var yellow = new Vector3(0.95f, 0.78f, 0.15f);
+        const float L = CarLength, X = 0.93f, T = 0.04f;
+        float top = Top, back = -L * 0.5f, front = L * 0.5f;
+        const float Sill = 0.3f, Lintel = 0.72f; // finestrini, sopra il pavimento
         Bogies(mb, L);
+
+        // Pavimento, tappeto del corridoio, striscia gialla davanti alle porte
         mb.AddBox(new Vector3(0, Floor - 0.06f, 0), new Vector3(X * 2f, 0.12f, L - 0.1f), floor);
-        mb.AddBox(new Vector3(0, Top, 0), new Vector3(X * 2f + T, 0.08f, L), wall * 0.95f);
-        mb.AddBox(new Vector3(0, Top + 0.07f, 0), new Vector3(X * 2f + 0.1f, 0.06f, L + 0.05f), new Vector3(0.45f, 0.47f, 0.5f));
-        // Pareti di fondo: dietro piena, davanti con la porta verso la locomotiva
-        mb.AddBox(new Vector3(0, (Floor + Top) * 0.5f, -L * 0.5f + T), new Vector3(X * 2f, Top - Floor, T), wall);
-        foreach (float s in new[] { -1f, 1f })
-            mb.AddBox(new Vector3(s * (X + 0.32f) * 0.5f, (Floor + Top) * 0.5f, L * 0.5f - T), new Vector3(X - 0.32f, Top - Floor, T), wall);
-        mb.AddBox(new Vector3(0, (Floor + 1.95f) * 0.5f, L * 0.5f - T * 0.5f), new Vector3(0.64f, 1.95f - Floor, T * 0.6f), green);
-        // Pareti laterali: fascia sotto e sopra piene, in mezzo montanti tra i finestrini (aperti)
-        float[] windows = [-2.3f, -1.15f, 0f, 1.15f];
-        const float W = 0.8f;
-        foreach (float s in new[] { -1f, 1f })
+        mb.AddBox(new Vector3(0, Floor + 0.002f, -0.47f), new Vector3(AisleHalf * 2f, 0.004f, 3.9f), carpet);
+        mb.AddBox(new Vector3(0, Floor + 0.003f, DoorZ - 0.2f), new Vector3(X * 2f - 0.1f, 0.004f, 0.06f), yellow);
+        // Soffitto e tetto sopra (da fuori dei finestrini si vede il tetto, non il vuoto)
+        mb.AddBox(new Vector3(0, top + 0.02f, 0), new Vector3(X * 2f + T, 0.04f, L), wall * 0.96f);
+        mb.AddBox(new Vector3(0, top + 0.08f, 0), new Vector3(X * 2f + 0.1f, 0.06f, L + 0.05f), new Vector3(0.45f, 0.47f, 0.5f));
+        // Pareti di fondo: in coda la porta d'intercomunicazione (chiusa, con l'oblò), davanti il tabellone
+        foreach (float z in new[] { back + T * 0.5f, front - T * 0.5f })
         {
-            float x = s * X;
-            mb.AddBox(new Vector3(x, (Floor + Low) * 0.5f, 0), new Vector3(T, Low - Floor, L), wall);
-            mb.AddBox(new Vector3(x, (High + Top) * 0.5f, 0), new Vector3(T, Top - High, L), wall);
-            mb.AddBox(new Vector3(x, (Floor + 0.9f) * 0.5f, 0), new Vector3(T * 1.4f, 0.9f - Floor, L), green); // zoccolo
-            float z0 = -L * 0.5f;
-            foreach (float wz in windows.Append(L * 0.5f + W * 0.5f))
+            foreach (float sx in new[] { -1f, 1f })
+                mb.AddBox(new Vector3(sx * (X + 0.22f) * 0.5f, Floor + CeilingHeight * 0.5f, z), new Vector3(X - 0.22f, CeilingHeight, T), wall);
+            mb.AddBox(new Vector3(0, Floor + 0.82f, z), new Vector3(0.44f, 0.26f, T), wall);
+            float dz = z < 0f ? 0.012f : -0.012f;
+            mb.AddBox(new Vector3(0, Floor + 0.35f, z + dz), new Vector3(0.42f, 0.7f, T), green);
+            mb.AddBox(new Vector3(0, Floor + 0.5f, z + dz * 2f), new Vector3(0.16f, 0.16f, T * 0.5f), Glass());
+        }
+        // Tabellone sopra la porta davanti (si accende) e mappa della linea in coda
+        mb.AddBox(new Vector3(0, Floor + 0.82f, front - 0.06f), new Vector3(0.5f, 0.12f, 0.05f), Dark);
+        glow.AddBox(new Vector3(0, Floor + 0.82f, front - 0.09f), new Vector3(0.44f, 0.07f, 0.01f), new Vector3(1f, 0.55f, 0.1f));
+        mb.AddBox(new Vector3(-0.3f, Floor + 0.6f, back + 0.52f), new Vector3(0.36f, 0.22f, 0.01f), new Vector3(0.95f, 0.95f, 0.9f));
+        mb.AddBox(new Vector3(-0.3f, Floor + 0.6f, back + 0.525f), new Vector3(0.3f, 0.012f, 0.01f), Teal);
+
+        // Pareti laterali: zoccolo e fascia alta pieni; in mezzo i finestrini sopra ogni fila di posti, pieno altrove
+        foreach (float sd in new[] { -1f, 1f })
+        {
+            float x = sd * X;
+            mb.AddBox(new Vector3(x, Floor + Sill * 0.5f, 0), new Vector3(T, Sill, L), wall);
+            mb.AddBox(new Vector3(x - sd * 0.01f, Floor + 0.1f, 0), new Vector3(T, 0.2f, L), green);
+            mb.AddBox(new Vector3(x, (Floor + Lintel + top) * 0.5f, 0), new Vector3(T, top - Floor - Lintel, L), wall);
+            float z0 = back;
+            foreach (float b in Bays.Append(front + 0.3f))
             {
-                float a = z0, b = wz - W * 0.5f;
-                if (b > a + 0.01f) mb.AddBox(new Vector3(x, (Low + High) * 0.5f, (a + b) * 0.5f), new Vector3(T, High - Low, b - a), wall);
-                // Cornice del finestrino
-                if (wz < L * 0.5f)
+                float a = z0, e = b - 0.3f;
+                // Le porte del vestibolo (verso cui si scende) al posto del muro, davanti
+                if (e > a + 0.01f)
+                    mb.AddBox(new Vector3(x, Floor + (Sill + Lintel) * 0.5f, (a + e) * 0.5f), new Vector3(T, Lintel - Sill, e - a), wall);
+                if (b < front)
                 {
-                    mb.AddBox(new Vector3(x, Low, wz), new Vector3(T * 3f, 0.05f, W), Dark);
-                    mb.AddBox(new Vector3(x, High, wz), new Vector3(T * 3f, 0.05f, W), Dark);
+                    mb.AddBox(new Vector3(x, Floor + Sill, b), new Vector3(T * 3f, 0.025f, 0.6f), Dark);
+                    mb.AddBox(new Vector3(x, Floor + Lintel, b), new Vector3(T * 3f, 0.025f, 0.6f), Dark);
                 }
-                z0 = wz + W * 0.5f;
+                z0 = b + 0.3f;
+            }
+            // Porta scorrevole del vestibolo, con la sua finestrella e il pulsante
+            mb.AddBox(new Vector3(x - sd * 0.015f, Floor + 0.4f, DoorZ), new Vector3(T, 0.8f, 0.42f), Teal);
+            mb.AddBox(new Vector3(x - sd * 0.03f, Floor + 0.55f, DoorZ), new Vector3(T * 0.5f, 0.24f, 0.26f), Glass());
+            glow.AddBox(new Vector3(x - sd * 0.035f, Floor + 0.36f, DoorZ + 0.26f), new Vector3(0.01f, 0.04f, 0.04f), new Vector3(0.3f, 1f, 0.4f));
+            // Cappelliera lungo i finestrini, con le valigie sopra
+            mb.AddBox(new Vector3(sd * 0.82f, Floor + 0.8f, -0.47f), new Vector3(0.22f, 0.02f, 3.8f), metal);
+            for (float z = -2.25f; z < 1.3f; z += 0.32f + rng.NextSingle() * 0.25f)
+            {
+                var bag = new Vector3(0.2f + rng.NextSingle() * 0.6f, 0.2f + rng.NextSingle() * 0.4f, 0.25f + rng.NextSingle() * 0.4f);
+                float w = 0.1f + rng.NextSingle() * 0.08f, h = 0.05f + rng.NextSingle() * 0.05f;
+                mb.AddBox(new Vector3(sd * 0.83f, Floor + 0.81f + h * 0.5f, z), new Vector3(0.14f, h, w), bag);
             }
         }
-        // Sedili: cuscino, schienale (dietro, verso -Z) e braccioli
-        foreach (var (sx, sz, side) in Seats)
+
+        // Posti: cuscino, base, schienale con il poggiatesta bianco, bracciolo sul corridoio; tavolino in mezzo alla coppia
+        foreach (var st in Seats)
         {
-            mb.AddBox(new Vector3(sx, Floor + 0.32f, sz), new Vector3(0.6f, 0.12f, 0.5f), seat);
-            mb.AddBox(new Vector3(sx, Floor + 0.62f, sz - 0.27f), new Vector3(0.6f, 0.6f, 0.08f), seat * 0.9f);
-            mb.AddBox(new Vector3(sx, Floor + 0.13f, sz), new Vector3(0.5f, 0.26f, 0.4f), Dark);
-            mb.AddBox(new Vector3(sx - side * 0.31f, Floor + 0.45f, sz), new Vector3(0.04f, 0.14f, 0.45f), Dark);
+            float sx = st.X, sz = st.Z, f = st.Facing;
+            mb.AddBox(new Vector3(sx, Floor + 0.17f, sz), new Vector3(0.26f, 0.06f, 0.22f), seatC);
+            mb.AddBox(new Vector3(sx, Floor + 0.07f, sz), new Vector3(0.2f, 0.14f, 0.16f), Dark);
+            mb.AddBox(new Vector3(sx, Floor + 0.36f, sz - f * 0.13f), new Vector3(0.26f, 0.36f, 0.05f), seatC * 0.9f);
+            mb.AddBox(new Vector3(sx, Floor + 0.5f, sz - f * 0.105f), new Vector3(0.2f, 0.07f, 0.012f), head);
+            if (MathF.Abs(sx) < 0.5f)
+                mb.AddBox(new Vector3(sx - st.Side * 0.14f, Floor + 0.25f, sz), new Vector3(0.025f, 0.05f, 0.2f), Dark);
         }
-        // Plafoniera lungo il soffitto
-        glow.AddBox(new Vector3(0, Top - 0.06f, 0), new Vector3(0.18f, 0.04f, L - 0.8f), Lit);
+        foreach (float b in Bays)
+            foreach (float sd in new[] { -1f, 1f })
+            {
+                mb.AddBox(new Vector3(sd * 0.6f, Floor + 0.29f, b), new Vector3(0.56f, 0.025f, 0.16f), wood);
+                mb.AddBox(new Vector3(sd * 0.86f, Floor + 0.14f, b), new Vector3(0.04f, 0.28f, 0.04f), Dark);
+                // Qualcosa sui tavolini: una tazza, un libro
+                if (rng.NextSingle() < 0.6f)
+                    mb.AddPrism(new Vector3(sd * (0.45f + rng.NextSingle() * 0.3f), Floor + 0.303f, b + 0.03f), 0.018f, 0.016f, 0.04f, 6, head);
+                if (rng.NextSingle() < 0.5f)
+                    mb.AddBox(new Vector3(sd * (0.5f + rng.NextSingle() * 0.3f), Floor + 0.31f, b - 0.03f), new Vector3(0.08f, 0.015f, 0.06f),
+                              new Vector3(0.6f + rng.NextSingle() * 0.4f, 0.3f, 0.2f + rng.NextSingle() * 0.5f));
+            }
+
+        // Plafoniere: una per fila e due nei vestiboli
+        foreach (float z in Bays.Append(back + 0.45f).Append(2.1f))
+            glow.AddBox(new Vector3(0, top - 0.005f, z), new Vector3(0.3f, 0.01f, 0.4f), Lit);
+
+        // --- In coda: toilette (cabina con la porta sul corridoio e l'insegna), scaffale dei bagagli, cestino
+        mb.AddBox(new Vector3(0.655f, Floor + CeilingHeight * 0.5f, back + 0.36f), new Vector3(0.55f, CeilingHeight, 0.72f), wall * 0.92f);
+        mb.AddBox(new Vector3(0.375f, Floor + 0.38f, back + 0.36f), new Vector3(0.012f, 0.74f, 0.36f), new Vector3(0.75f, 0.72f, 0.68f));
+        mb.AddBox(new Vector3(0.37f, Floor + 0.38f, back + 0.5f), new Vector3(0.012f, 0.03f, 0.03f), Dark); // maniglia
+        glow.AddBox(new Vector3(0.368f, Floor + 0.8f, back + 0.36f), new Vector3(0.005f, 0.07f, 0.12f), new Vector3(0.25f, 0.55f, 1f)); // WC
+        for (int level = 0; level < 3; level++)
+        {
+            float y = Floor + 0.02f + level * 0.28f;
+            mb.AddBox(new Vector3(-0.715f, y, back + 0.25f), new Vector3(0.43f, 0.02f, 0.48f), metal);
+            for (int k = 0; k < 2; k++)
+            {
+                var bag = new Vector3(0.2f + rng.NextSingle() * 0.7f, 0.15f + rng.NextSingle() * 0.4f, 0.2f + rng.NextSingle() * 0.5f);
+                float hgt = 0.12f + rng.NextSingle() * 0.1f;
+                mb.AddBox(new Vector3(-0.82f + k * 0.2f, y + 0.01f + hgt * 0.5f, back + 0.25f), new Vector3(0.17f, hgt, 0.3f), bag);
+            }
+        }
+        foreach (float sx in new[] { -0.93f, -0.5f })
+            mb.AddBox(new Vector3(sx, Floor + 0.42f, back + 0.25f), new Vector3(0.025f, 0.84f, 0.48f), metal);
+        mb.AddPrism(new Vector3(-0.28f, Floor, back + 0.08f), 0.07f, 0.075f, 0.24f, 8, metal * 0.8f);
+
+        // --- Davanti: distributore (vetrina accesa con le file di prodotti), banco del caffè, posto bici, corrimano
+        mb.AddBox(new Vector3(-0.765f, Floor + 0.33f, 1.775f), new Vector3(0.33f, 0.66f, 0.35f), new Vector3(0.7f, 0.12f, 0.12f));
+        glow.AddBox(new Vector3(-0.596f, Floor + 0.42f, 1.775f), new Vector3(0.008f, 0.36f, 0.26f), new Vector3(0.75f, 0.85f, 0.95f));
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 3; c++)
+                mb.AddBox(new Vector3(-0.59f, Floor + 0.28f + r * 0.085f, 1.69f + c * 0.085f), new Vector3(0.01f, 0.05f, 0.05f),
+                          new Vector3(0.3f + rng.NextSingle() * 0.7f, 0.3f + rng.NextSingle() * 0.6f, 0.2f + rng.NextSingle() * 0.6f));
+        mb.AddBox(new Vector3(-0.765f, Floor + 0.15f, 2.275f), new Vector3(0.33f, 0.3f, 0.45f), wood);
+        mb.AddBox(new Vector3(-0.765f, Floor + 0.31f, 2.275f), new Vector3(0.36f, 0.02f, 0.48f), metal);
+        mb.AddBox(new Vector3(-0.82f, Floor + 0.4f, 2.2f), new Vector3(0.12f, 0.16f, 0.12f), Dark); // macchina del caffè
+        glow.AddBox(new Vector3(-0.755f, Floor + 0.45f, 2.2f), new Vector3(0.004f, 0.02f, 0.02f), new Vector3(1f, 0.2f, 0.1f));
+        foreach (float cz in new[] { 2.38f, 2.44f })
+            mb.AddPrism(new Vector3(-0.68f, Floor + 0.32f, cz), 0.018f, 0.016f, 0.035f, 6, head);
+        // Bici appoggiata alla parete, lungo la carrozza
+        var bike = new Vector3(0.85f, 0.2f, 0.18f);
+        foreach (float wz in new[] { 1.75f, 2.25f })
+        {
+            mb.Transform = Matrix4x4.CreateRotationZ(MathF.PI / 2f) * Matrix4x4.CreateTranslation(0.8f, Floor + 0.14f, wz);
+            mb.AddPrism(new Vector3(0, -0.012f, 0), 0.14f, 0.14f, 0.024f, 12, Dark);
+            mb.AddPrism(new Vector3(0, -0.014f, 0), 0.04f, 0.04f, 0.028f, 6, metal);
+            mb.Transform = Matrix4x4.Identity;
+        }
+        mb.AddBox(new Vector3(0.8f, Floor + 0.22f, 2.0f), new Vector3(0.02f, 0.02f, 0.4f), bike);
+        mb.Transform = Matrix4x4.CreateRotationX(0.6f) * Matrix4x4.CreateTranslation(0.8f, Floor + 0.22f, 1.88f);
+        mb.AddBox(Vector3.Zero, new Vector3(0.02f, 0.22f, 0.02f), bike);
+        mb.Transform = Matrix4x4.CreateRotationX(-0.5f) * Matrix4x4.CreateTranslation(0.8f, Floor + 0.26f, 2.14f);
+        mb.AddBox(Vector3.Zero, new Vector3(0.02f, 0.2f, 0.02f), bike);
+        mb.Transform = Matrix4x4.Identity;
+        mb.AddBox(new Vector3(0.8f, Floor + 0.36f, 2.2f), new Vector3(0.12f, 0.015f, 0.015f), Dark);  // manubrio
+        mb.AddBox(new Vector3(0.8f, Floor + 0.33f, 1.86f), new Vector3(0.05f, 0.015f, 0.08f), Dark);  // sella
+        mb.AddBox(new Vector3(0.9f, Floor + 0.4f, 2.0f), new Vector3(0.01f, 0.2f, 0.2f), new Vector3(0.25f, 0.45f, 0.85f)); // cartello bici
+        foreach (float x in new[] { -0.3f, 0.3f })
+            mb.AddPrism(new Vector3(x, Floor, 2.6f), 0.022f, 0.022f, CeilingHeight, 8, yellow);
+
         return (mb.Build(gl), glow.Build(gl));
     }
+
+    private static Vector3 Glass() => GlassC;
 
     /// <summary>Palo del passaggio a livello: croce di Sant'Andrea, due luci, base della sbarra. Guarda verso -Z.</summary>
     private static Mesh BuildPost(GL gl)
