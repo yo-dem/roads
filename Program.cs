@@ -30,6 +30,7 @@ public static class Program
     ///   --wasd x,y[,finoA]        a piedi tiene premuti WASD (x: D=+1 A=-1, y: W=+1 S=-1); ripetibile, tratti in ordine
     ///   --mouse pixel/s[,finoA]   muove il mouse in orizzontale (in auto sterza, a piedi gira la visuale); ripetibile, tratti in ordine
     ///   --mouse-y pixel/s[,finoA] muove il mouse in verticale (a piedi: negativo = mouse in su, la camera scende e guarda in su)
+    ///   --segui-traffico          la camera segue l'auto del traffico più vicina alla partenza (test)
     ///   --palo                    l'auto parte sulla strada a 10 unità dal palo abbattibile più vicino, puntata contro
     ///   --banchina              appena sceso dall'auto, il personaggio è sulla banchina dove è fermo il treno
     ///   --pilota secondi          fino a quell'istante lo sterzo tiene da solo l'auto in corsia (per provare le derapate)
@@ -132,6 +133,9 @@ public static class Program
                     break;
                 case "--banchina":
                     d.Platform = true;
+                    break;
+                case "--segui-traffico":
+                    d.FollowTraffic = true;
                     break;
                 case "--palo":
                     d.AimPole = true;

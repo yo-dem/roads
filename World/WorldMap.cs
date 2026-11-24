@@ -145,6 +145,7 @@ public sealed class WorldMap : IDisposable
         if (zone == null || !zone.IsGround(p)) return false;
         if (zone.HitsObstacle(p, radius)) return false;
         if (Trains.Current?.Blocks(new Vector2(p.X, p.Z), radius) == true) return false; // treno, sbarre abbassate
+        if (Characters.Traffic.Current?.Blocks(new Vector2(p.X, p.Z), radius) == true) return false; // auto del traffico
         foreach (var l in GameMap.Current.Landmarks)
             if (l.Hits(new Vector2(p.X, p.Z), radius)) return false;
 

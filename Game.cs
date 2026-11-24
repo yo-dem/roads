@@ -35,6 +35,7 @@ public sealed class DebugOptions
     public Vector2? Waypoint;      // punto da raggiungere già scelto (test)
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
+    public bool FollowTraffic;     // la camera segue un'auto del traffico (test)
     public bool AimPole;           // l'auto parte puntata contro il palo abbattibile più vicino (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
     public List<float> Jumps { get; } = new();                    // istanti in cui premere spazio a piedi (test)
@@ -76,6 +77,7 @@ public sealed partial class Game : IDisposable
     private Vector3 ActiveVelocity => _onFoot ? _kid.Velocity : _player.Velocity;
     private Particles _particles = null!;
     private Trains? _trains;
+    private Traffic? _traffic;   // le auto guidate dal gioco
     private Mesh[] _signalLit = [];   // lente accesa del semaforo: rossa, gialla, verde (vedi TrafficLights.Light)
     private SkidMarks _skids = null!;
     private EngineSound? _engine;
@@ -237,6 +239,7 @@ public sealed partial class Game : IDisposable
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
+        _traffic = new Traffic(_gl);
         // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
         Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
         _signalLit = new Mesh[3];
@@ -399,6 +402,8 @@ public sealed partial class Game : IDisposable
             if (_onTrain) RideTrain(dt, moveX, moveY);
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
+        // Il traffico gira attorno a chi si comanda; il personaggio conta come ostacolo solo quando è a terra
+        _traffic?.Update(dt, _world, _player, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos);
         Zone? spawned = _world.Update(dt, ActivePos);
         if (spawned != null)
             Console.WriteLine($"Nuovo territorio ({spawned.X},{spawned.Z}): {spawned.Name}");
@@ -430,7 +435,9 @@ public sealed partial class Game : IDisposable
             float follow = 0f, heading = _onFoot ? _kid.Yaw : _player.TravelYaw;
             if (_onFoot && _mouseLookIdle > 0.6f && kv.LengthSquared() > 0.5f)
                 follow = Noise.Smooth(-0.2f, 0.5f, Vector3.Dot(Vector3.Normalize(kv), _camera.Forward));
-            _camera.Update(dt, ActivePos + ActiveVelocity * 0.3f, chase: !_farView, heading,
+            Vector3 camAt = ActivePos + ActiveVelocity * 0.3f;
+            if (_debug.FollowTraffic && _traffic?.Followed(ActivePos) is { } car) (camAt, heading) = car;
+            _camera.Update(dt, camAt, chase: !_farView, heading,
                            walk: _onFoot, follow: follow);
             AvoidWalls(dt);
             // A piedi la camera può scendere quasi a terra (guardando in su): mai sotto il terreno, e la visuale passa
@@ -550,6 +557,7 @@ public sealed partial class Game : IDisposable
         // Treno e passaggi a livello (solo quelli entro la vista)
         var camFlat = new Vector2(_camera.Position.X, _camera.Position.Z);
         _trains?.Collect(_opaque, night, p => Vector2.Distance(p, camFlat) < ViewRange + 12f);
+        _traffic?.Collect(_opaque, night, p => Vector2.Distance(p, camFlat) < ViewRange + 4f);
 
         _cloudItems.Clear();
         _clouds.Collect(_cloudItems, _camera.Target, _time);
@@ -1269,6 +1277,7 @@ public sealed partial class Game : IDisposable
 
         PngWriter.Save(_debug.Shots[_shotIndex].Path, w, h, flipped);
         Console.WriteLine($"Screenshot salvato: {_debug.Shots[_shotIndex].Path}  ({_window.Title})");
+        if (_traffic != null) Console.WriteLine("  " + _traffic.Status());
         _shotIndex++;
         if (_shotIndex >= _debug.Shots.Count) _window.Close();
     }
@@ -1282,6 +1291,7 @@ public sealed partial class Game : IDisposable
         _kid?.Dispose();
         _particles?.Dispose();
         _trains?.Dispose();
+        _traffic?.Dispose();
         foreach (var m in _signalLit) m.Dispose();
         _flame?.Dispose();
         _shadow?.Dispose();
