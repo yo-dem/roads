@@ -42,6 +42,7 @@ public sealed class Traffic : IDisposable
     private const float JamWait = 1.2f, BackSpeed = 1.4f, BackTime = 2.2f, HoldTime = 3.5f, GhostAfter = 9f;
     // Strada sbarrata dal giocatore: dopo RetreatAfter s si torna indietro e si cambia strada
     private const float RetreatAfter = 4f;
+    private const float FollowGap = 2.5f;  // tornando indietro in fila: spazio tra un paraurti e l'altro
     // Cambio di corsia e sorpasso: il muso gira al massimo di LaneMaxYaw rispetto alla corsia, e solo avanzando (al
     // massimo LaneCurv radianti per unità di strada): ci si sposta di lato solo così, mai da fermi
     private const float LaneMaxYaw = 0.4f, LaneCurv = 0.5f;
@@ -108,6 +109,13 @@ public sealed class Traffic : IDisposable
     public float WorstSlide { get; private set; }
     public float WorstSpin { get; private set; }
     private int Backs, Ghosts, Retreats;
+    private float _elapsed;       // secondi da inizio partita
+    // Strade (tratto e verso) sbarrate dal giocatore: quando lo si è visto l'ultima volta. Chi deve ancora scegliere
+    // dove girare le evita, per BarredFor secondi dall'ultima volta che qualcuno ci è rimasto bloccato
+    private readonly Dictionary<(RoadEdge, int), float> _barred = new();
+    private const float BarredFor = 30f;
+    private bool Barred(RoadEdge e, int dir) => _barred.TryGetValue((e, dir), out float t) && _elapsed - t < BarredFor;
+    public float MinFollowGap { get; private set; } = float.MaxValue; // prove: la distanza più corta tenuta in fila tornando indietro
 
     /// <summary>Test: se dato, nascono solo veicoli con questa carrozzeria.</summary>
     public BodyStyle? OnlyStyle { get; init; }
@@ -243,11 +251,14 @@ public sealed class Traffic : IDisposable
         public float Backing, Hold;    // retromarcia in corso; poi attesa che l'altra passi
         public float BackFail;         // ha appena ceduto (o non può arretrare): al prossimo incastro tocca a un'altra
         public bool Reversing;
+        public bool Replan;            // arretra fuori dalla svolta verso una strada sbarrata, poi sceglie un'altra uscita
+        public RoadEdge? Avoided;      // la scelta già rifatta per evitare una strada sbarrata (non la si rifà di continuo)
         public float LaneYaw;          // cambiando corsia: quanto il muso è girato rispetto alla corsia (+ a destra)
         // Strada sbarrata: si torna indietro fino all'incrocio, si esce in retro girando e si prende un'altra strada
         public bool DeadEnd, Retreat;
         public Curve? BackCurve;
         public float BackD, RetreatFail, RetreatTime;
+        public bool RetreatMoved; // prove: ha già cominciato ad arretrare (da lì in poi la distanza in fila conta)
         public string Why = ""; // prove: cosa la ferma
         public bool Touching;          // un passo avanti la farebbe entrare in un altro veicolo (TouchId)
         public int TouchId = NoHit;
@@ -286,6 +297,7 @@ public sealed class Traffic : IDisposable
         var player = owned[0];
         _focus = new Vector2(focus.X, focus.Z);
         _time = clock; // lo stesso orologio dei semafori disegnati
+        _elapsed += dt;
         var center = new Vector2(focus.X, focus.Z);
 
         // Sparisce chi è troppo lontano o è finito fuori dal territorio caricato
@@ -443,6 +455,7 @@ public sealed class Traffic : IDisposable
             if (!Allows(o, od)) continue;
             Vector2 leave = o.LeaveDir(node);
             float w = 1f + 1.5f * MathF.Max(0f, Vector2.Dot(arrive, leave));
+            if (Barred(o, od)) w *= 0.001f; // strada sbarrata dal giocatore (c'è già una coda che torna indietro): la si evita
             if (o.Other(node).Degree == 1) w *= 0.15f;
             if (Vector2.Dot(arrive, leave) < -0.8f) w *= 0.2f; // quasi un'inversione
             options.Add((o, od, w));
@@ -623,8 +636,24 @@ public sealed class Traffic : IDisposable
         // Strada sbarrata: fermi davanti all'auto del giocatore (o a lui) senza poterla aggirare, o in coda dietro a chi lo
         // è. Dopo un po' si torna indietro fino all'incrocio e si prende un'altra strada.
         bool barred = stuck && !train && (hit is { Car: false, Owner: -1 or -2, Moving: false } || (v.Touching && v.TouchId == NoHit && hit == null));
+        if (barred && !v.Turning) _barred[(v.Edge, v.Dir)] = _elapsed; // chi arriva dopo sceglie un'altra strada
         v.DeadEnd = barred || (ahead != null && (ahead.DeadEnd || ahead.Retreat));
-        if (v.DeadEnd && v.Blocked > RetreatAfter && v.RetreatFail <= 0f && !v.Turning) StartRetreat(v);
+        // In coda si comincia dall'ultima: si parte solo se dietro non c'è nessuno in coda che possa arretrare prima
+        if (v.DeadEnd && v.Blocked > RetreatAfter && v.RetreatFail <= 0f && !v.Turning && !QueuedBehind(v)) StartRetreat(v);
+        // Diretta verso una strada sbarrata: chi deve ancora svoltare cambia uscita; chi è già nella svolta e si è
+        // fermato arretra fuori dalla curva e poi ne sceglie un'altra (così la coda non si allunga)
+        if (v.Next != null && Barred(v.Next, v.NextDir))
+        {
+            if (!v.Turning && v.Next != v.Avoided) { PlanNext(v); v.Avoided = v.Next; }
+            else if (v.Turning && v.TurnFromEdge && v.Blocked > 1.5f && v.Backing <= 0f && !v.Retreat)
+            {
+                v.Backing = 2f * BackTime;
+                v.Replan = true;
+                v.GiveWayTo = NoHit;
+                v.Blocked = 0f;
+                Backs++;
+            }
+        }
         // Incastrate a vicenda: una arretra e lascia passare (tocca a lei se è la scelta del giro)
         if (ahead != null && !v.Queued && v.Blocked > JamWait && v.Hold <= 0f && Jam(v) is { } turn)
         {
@@ -898,7 +927,18 @@ public sealed class Traffic : IDisposable
         v.Queued = v.Yield = v.AtLight = false;
         var other = Find(v.GiveWayTo);
         float d = BackSpeed * dt;
-        bool moved = v.Backing > 0f && other != null && TryRetreat(v, d);
+        bool moved = v.Backing > 0f && (other != null || v.Replan) && TryRetreat(v, d);
+        if (v.Replan && (!v.Turning || !moved))
+        {
+            // Uscita all'indietro dalla svolta verso la strada sbarrata: di nuovo in fondo al proprio tratto, si sceglie
+            // un'altra uscita (o, se non ci si è riusciti, si riprova tra poco)
+            v.Replan = false;
+            v.Backing = 0f;
+            v.Reversing = false;
+            if (!v.Turning) { PlanNext(v); v.Avoided = v.Next; }
+            Pose(v, world, dt);
+            return;
+        }
         // L'altra è ripartita: basta così (ma almeno un attimo di retro, per lasciarle spazio vero)
         bool freed = other != null && other.Blocked <= 0f && other.Speed > 0.3f && v.Backing < BackTime - 0.6f;
         if (!moved || freed)
@@ -917,11 +957,17 @@ public sealed class Traffic : IDisposable
     {
         v.Retreat = true;
         v.RetreatTime = 0f;
+        v.RetreatMoved = false;
         v.BackCurve = null;
         v.Backing = v.Hold = 0f;
         v.ShiftTarget = 0f;
         v.Blocked = 0f;
         Retreats++;
+        if (TrackOverlap)
+        {
+            float gap = GapBehind(v, out var b);
+            Console.WriteLine($"  {_elapsed:F1} s: auto {v.Id} comincia a tornare indietro (dietro: {(b == null ? "nessuno" : $"auto {b.Id} a {gap:F1}")})");
+        }
     }
 
     /// <summary>
@@ -945,10 +991,25 @@ public sealed class Traffic : IDisposable
         float d = BackSpeed * dt;
         bool moved = false;
 
+        bool waiting = false; // ferma per scelta: distanza da chi arretra dietro, o il turno all'incrocio
         if (v.BackCurve == null)
         {
             float fromStart = (v.S - StartS(v.Edge, v.Dir)) * v.Dir;
-            if (fromStart > 0.6f) moved = TryRetreat(v, MathF.Min(d, fromStart - 0.55f));
+            if (fromStart > 0.6f)
+            {
+                // In fila: si arretra solo lasciando FollowGap a chi arretra dietro. Se chi sta dietro è fermo per altro,
+                // ci si avvicina fino a mezzo metro e poi è un blocco vero (conta come bloccata: vedi sotto)
+                float gap = GapBehind(v, out var behind);
+                if ((behind?.Retreat ?? false) && v.RetreatMoved) MinFollowGap = MathF.Min(MinFollowGap, gap);
+                if (gap < FollowGap && (behind?.Retreat ?? false)) waiting = true;
+                else
+                {
+                    float room = gap < FollowGap ? gap - 0.5f : float.MaxValue;
+                    if (room > 0.02f) moved = TryRetreat(v, MathF.Min(MathF.Min(d, room), fromStart - 0.55f));
+                    if (moved) v.RetreatMoved = true;
+                }
+            }
+            else if (BackOutBusy(v)) waiting = true; // all'incrocio una alla volta
             else if (!PlanBackOut(v)) GiveUpRetreat(v); // all'incrocio non c'è dove andare: si aspetta e basta
         }
         else
@@ -979,17 +1040,66 @@ public sealed class Traffic : IDisposable
                 v.TurnD = 0f;
             }
         }
-        // Bloccata a lungo dietro (altre auto che non si spostano): si rinuncia e si aspetta davanti
-        if (v.Retreat && v.BackCurve == null && v.RetreatTime > 20f) GiveUpRetreat(v);
-        // Ferma in retro: conta come bloccata da chi ha dietro, così un incastro con lei si scioglie (arretra l'altra)
-        if (moved || !v.Retreat) { v.Blocked = 0f; v.HitId = NoHit; }
+        // Ferma in retro (non per scelta: per qualcosa dietro): conta come bloccata da lei, così un incastro si scioglie
+        // (arretra l'altra); bloccata così troppo a lungo, rinuncia e aspetta davanti
+        if (moved || waiting || !v.Retreat) { v.Blocked = 0f; v.HitId = NoHit; }
         else
         {
             v.Blocked += dt;
-            v.HitId = BlockerOf(BoxOf(v, v.Pos - v.Heading * 0.35f, v.Yaw), v);
+            v.HitId = BlockerOf(BoxOf(v, v.Pos - v.Heading * 0.6f, v.Yaw), v);
+            if (v.BackCurve == null && v.Blocked > 20f) GiveUpRetreat(v);
         }
         Pose(v, world, dt);
         if (moved) v.Spin -= d / (CarModel.WheelRadius * Scale);
+    }
+
+    /// <summary>
+    /// Dietro <paramref name="v"/> c'è un'auto in coda per colpa sua (ferma contro di lei) che può tornare indietro
+    /// prima di lei? Allora <paramref name="v"/> aspetta: in coda si comincia dall'ultima.
+    /// </summary>
+    private bool QueuedBehind(Vehicle v)
+    {
+        foreach (var o in _cars)
+            if (o != v && !o.Dead && !o.Retreat && o.HitId == v.Id && o.DeadEnd && !o.Turning && o.RetreatFail <= 0f)
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Spazio libero dietro <paramref name="v"/> (dal suo paraurti posteriore a quello dell'auto del traffico più vicina
+    /// dietro di lei, nella sua fila), e chi è.
+    /// </summary>
+    private float GapBehind(Vehicle v, out Vehicle? who)
+    {
+        who = null;
+        float best = float.MaxValue;
+        Vector2 back = -v.Heading, side = RightOf(v.Heading);
+        foreach (var o in _cars)
+        {
+            if (o == v || o.Dead) continue;
+            Vector2 rel = o.Pos - v.Pos;
+            float along = Vector2.Dot(rel, back);
+            if (along <= 0f) continue;
+            if (MathF.Abs(Vector2.Dot(rel, side)) > v.HalfW + o.HalfW + 0.3f) continue; // in un'altra corsia
+            // Quanto sporge l'altra verso di noi, com'è girata
+            float reach = MathF.Abs(Vector2.Dot(o.Heading, back)) * o.HalfL + MathF.Abs(Vector2.Dot(RightOf(o.Heading), back)) * o.HalfW;
+            float gap = along - v.HalfL - reach;
+            if (gap < best) { best = gap; who = o; }
+        }
+        return best;
+    }
+
+    /// <summary>All'incrocio da cui si esce in retro c'è già un'altra auto che sta uscendo (o ripartendo)? Una alla volta.</summary>
+    private bool BackOutBusy(Vehicle v)
+    {
+        var node = v.Dir > 0 ? v.Edge.A : v.Edge.B;
+        foreach (var o in _cars)
+        {
+            if (o == v || o.Dead || o.TurnNode != node) continue;
+            if (o.Retreat && o.BackCurve != null) return true;
+            if (o.Turning && !o.TurnFromEdge) return true;
+        }
+        return false;
     }
 
     private void GiveUpRetreat(Vehicle v)
@@ -1058,6 +1168,7 @@ public sealed class Traffic : IDisposable
                 var forward = new Curve(q, l, p3, leave, MathF.Max(0.6f, gap * 0.42f));
                 if (!OnRoad(v, back, true) || !OnRoad(v, forward, false)) continue;
                 v.BackCurve = back;
+                if (TrackOverlap) Console.WriteLine($"  {_elapsed:F1} s: auto {v.Id} esce in retro all'incrocio verso {o.Kind}");
                 // La curva parte dalla posa vera: scostamenti e cambi di corsia sono ora parte di lei
                 v.Offset = Vector2.Zero;
                 v.YawOffset = v.LaneYaw = 0f;
@@ -1681,6 +1792,7 @@ public sealed class Traffic : IDisposable
                + $"{turning} negli incroci, "
                + $"{bypass} aggirano, {_cars.Count(v => v.Backing > 0f)} in retro per sbloccarsi, {ghost} passano attraverso, "
                + $"{Backs} retro, {Retreats} cambi di strada e {Ghosts} attraversamenti finora, ferma da più tempo {Worst()}, record {LongestBlock:F1} s, "
+               + $"distanza minima in fila {(MinFollowGap < 1e9f ? MinFollowGap.ToString("F1") : "-")}, "
                + $"scivolata di lato massima {WorstSlide:F2}/s [{SlideWho}], rotazione da ferma {WorstSpin:F2} rad/s [{SpinWho}], "
                + $"sovrapposizione massima {WorstOverlap:F3}"
                + (_cars.Find(v => v.Id == _followed) is { } f
