@@ -181,7 +181,7 @@ public sealed class Villager : IDisposable
     public void Jump()
     {
         if (Hidden || Busy || Airborne) return;
-        _vy = JumpSpeed;
+        _vy = JumpSpeed * SizeScale; // rimpiccioliti si salta in proporzione (stessa durata, quota più bassa)
         _airTime = 0f;
     }
 
@@ -280,22 +280,81 @@ public sealed class Villager : IDisposable
         }
         // Terreno sotto i piedi (morbido), più il salto: su con JumpSpeed, giù con la gravità, polvere all'atterraggio
         _groundY = Noise.Lerp(_groundY == 0f ? Position.Y : _groundY, world.GroundHeight(Position), Noise.Damp(25f, dt));
-        if (Airborne)
-        {
-            _airTime += dt;
-            _vy -= Gravity * dt;
-            _air += _vy * dt;
-            if (_air <= 0f)
-            {
-                _air = 0f;
-                _vy = 0f;
-                fx.Dust(Position with { Y = _groundY }, 3);
-            }
-        }
+        if (StepAir(dt)) fx.Dust(Position with { Y = _groundY }, 3);
         Position.Y = _groundY + _air;
 
-        // Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità
-        float speed = new Vector2(_velocity.X, _velocity.Z).Length();
+        Animate(dt, new Vector2(_velocity.X, _velocity.Z).Length(), turnRate, fx, _groundY);
+    }
+
+    private Vector2 _insideVelocity;
+
+    /// <summary>
+    /// A bordo del treno, in piedi: si cammina esattamente come in strada (stessa andatura, corsa con Shift, passo lento
+    /// con Ctrl, accelerazione, salto e animazioni), tutto in proporzione a <see cref="SizeScale"/>, ma nelle coordinate
+    /// della carrozza: <paramref name="pos"/> e <paramref name="yaw"/> sono locali, <paramref name="free"/> dice dove si
+    /// può stare. Chi porta il treno mette poi il personaggio nel mondo (con <see cref="Air"/> sopra il pavimento).
+    /// </summary>
+    public void WalkInside(float dt, Vector2 input, bool slow, bool sprint, Func<Vector2, bool> free, ref Vector2 pos, ref float yaw)
+    {
+        Hidden = false;
+        _hop = 1f;
+        _time += dt;
+        _velocity = Vector3.Zero;
+        _backward = false;
+        float maxSpeed = (slow ? SlowSpeed : sprint ? SprintSpeed : RunSpeed) * SizeScale;
+        bool moving = input.LengthSquared() > 0.01f;
+        Vector2 dir = moving ? Vector2.Normalize(input) : Vector2.Zero;
+        float amount = MathF.Min(1f, input.Length());
+        _insideVelocity = Vector2.Lerp(_insideVelocity, dir * (moving ? maxSpeed * amount : 0f), Noise.Damp(14f, dt));
+        float yawBefore = yaw;
+        if (moving) yaw += Noise.WrapAngle(MathF.Atan2(dir.X, dir.Y) - yaw) * MathF.Min(1f, 16f * dt);
+        float turnRate = dt > 0f ? MathF.Abs(Noise.WrapAngle(yaw - yawBefore)) / dt : 0f;
+
+        // Scivolando lungo i mobili, come lungo i muri in strada
+        Vector2 step = _insideVelocity * dt;
+        if (step.LengthSquared() > 0f)
+        {
+            if (free(pos + step)) pos += step;
+            else
+            {
+                if (free(pos + new Vector2(step.X, 0f))) pos.X += step.X; else _insideVelocity.X = 0f;
+                if (free(pos + new Vector2(0f, step.Y))) pos.Y += step.Y; else _insideVelocity.Y = 0f;
+            }
+        }
+        StepAir(dt);
+        Animate(dt, _insideVelocity.Length(), turnRate, null, 0f);
+    }
+
+    /// <summary>Fermo, coi piedi a terra (ci si siede in treno).</summary>
+    public void StandStill()
+    {
+        _insideVelocity = Vector2.Zero;
+        _air = _vy = 0f;
+    }
+
+    /// <summary>Quota del salto sopra il pavimento (0 coi piedi a terra).</summary>
+    public float Air => _air;
+
+    /// <summary>Salto: su con la spinta iniziale, giù con la gravità (in proporzione alla grandezza). True all'atterraggio.</summary>
+    private bool StepAir(float dt)
+    {
+        if (!Airborne) return false;
+        _airTime += dt;
+        _vy -= Gravity * SizeScale * dt;
+        _air += _vy * dt;
+        if (_air > 0f) return false;
+        _air = 0f;
+        _vy = 0f;
+        return true;
+    }
+
+    /// <summary>
+    /// Animazione: si passa con dolcezza da fermo a camminata a corsa, al ritmo della velocità (riportata alla grandezza
+    /// normale); con <paramref name="fx"/> sbuffi di polvere a ogni passo di corsa, al livello <paramref name="groundY"/>.
+    /// </summary>
+    private void Animate(float dt, float speed, float turnRate, Particles? fx, float groundY)
+    {
+        speed /= SizeScale;
         // Girandosi sul posto i piedi fanno dei passetti: la rotazione conta come una camminata (mai una corsa)
         float stepping = MathF.Max(speed, MathF.Min(turnRate * TurnStep, 1.3f));
         _move = Noise.Lerp(_move, stepping, Noise.Damp(10f, dt));
@@ -310,8 +369,8 @@ public sealed class Villager : IDisposable
 
         // Sbuffi di polvere a ogni passo quando corre
         // (solo coi piedi a terra: in aria, durante un salto, non si solleva polvere; e sempre al livello del suolo)
-        if (!Airborne && _sprintWeight > 0.5f && (now01 < before01 || (before01 < 0.5f && now01 >= 0.5f)))
-            fx.Dust(Vector3.Transform(new Vector3(now01 < 0.5f ? -0.05f : 0.05f, 0, 0), RootMatrix) with { Y = _groundY }, 1);
+        if (fx != null && !Airborne && _sprintWeight > 0.5f && (now01 < before01 || (before01 < 0.5f && now01 >= 0.5f)))
+            fx.Dust(Vector3.Transform(new Vector3(now01 < 0.5f ? -0.05f : 0.05f, 0, 0), RootMatrix) with { Y = groundY }, 1);
     }
 
     private static Vector3 Flat(Vector3 v) => new(v.X, 0, v.Z);

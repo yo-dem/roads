@@ -27,7 +27,8 @@ public sealed class Traffic : IDisposable
     /// <summary>Il traffico in gioco (per gli ostacoli di <see cref="WorldMap.IsWalkable"/>).</summary>
     public static Traffic? Current { get; private set; }
 
-    private const int Target = 18;              // auto attorno al giocatore
+    // Auto attorno al giocatore: tante nel centro città, poche in periferia e in campagna (vedi Wanted e Crowd)
+    private const int TargetCity = 14, TargetCountry = 4;
     private const float SpawnMin = 62f, SpawnMax = 108f, Despawn = 125f;
     private const float Scale = 1.1f;           // come l'auto del giocatore
     private const float WheelBase = 1.1f;
@@ -258,10 +259,11 @@ public sealed class Traffic : IDisposable
         {
             // Alla partenza le strade sono già animate: auto anche vicine, prima che si veda qualunque cosa
             _warm = true;
-            for (int k = 0; k < Target * 6 && _cars.Count < Target; k++) TrySpawn(world, center, player, 14f);
+            int want = Wanted(center);
+            for (int k = 0; k < want * 10 && _cars.Count < want; k++) TrySpawn(world, center, player, 14f);
         }
         _spawnTimer -= dt;
-        if (_spawnTimer <= 0f && _cars.Count < Target)
+        if (_spawnTimer <= 0f && _cars.Count < Wanted(center))
         {
             _spawnTimer = 0.3f;
             TrySpawn(world, center, player, SpawnMin);
@@ -295,6 +297,20 @@ public sealed class Traffic : IDisposable
         }
     }
 
+    /// <summary>Quante auto girano attorno al punto: dipende da quanto è centrale (cuore della città = il massimo).</summary>
+    private static int Wanted(Vector2 at)
+    {
+        // Media tra il punto e quattro punti attorno, a metà dell'anello in cui nascono le auto
+        float u = Terrain.Urban(at.X, at.Y);
+        const float ring = (SpawnMin + SpawnMax) * 0.25f;
+        u += Terrain.Urban(at.X + ring, at.Y) + Terrain.Urban(at.X - ring, at.Y)
+           + Terrain.Urban(at.X, at.Y + ring) + Terrain.Urban(at.X, at.Y - ring);
+        return (int)MathF.Round(Noise.Lerp(TargetCountry, TargetCity, Noise.Smooth(0.3f, 0.85f, u / 5f)));
+    }
+
+    /// <summary>Probabilità che nasca un'auto in questo punto: piena nel centro città, bassa in periferia e fuori.</summary>
+    private static float Crowd(Vector2 p) => 0.15f + 0.85f * Noise.Smooth(0.45f, 0.9f, Terrain.Urban(p.X, p.Y));
+
     private void RefreshCandidates(Vector2 center)
     {
         _candidatesAround = center;
@@ -326,6 +342,7 @@ public sealed class Traffic : IDisposable
         Vector2 p = LanePoint(e, dir, lane, s);
         float dist = Vector2.Distance(p, center);
         if (dist < minDistance || dist > SpawnMax) return;
+        if (_rng.NextSingle() > Crowd(p)) return; // le auto si addensano verso il centro
         var p3 = new Vector3(p.X, 0f, p.Y);
         if (world.ZoneAt(p3) == null || !world.IsWalkable(p3, 0.7f)) return; // anche: niente auto addosso a un'altra
         if (Vector2.Distance(p, new Vector2(player.Position.X, player.Position.Z)) < 6f) return;

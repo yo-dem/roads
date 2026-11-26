@@ -359,7 +359,7 @@ public sealed class RoadBuilder
         PruneDeadEnds();
         if (_net.Nodes.Where(nd => _compOf[nd] == CityComp && nd.Degree > 0).MinBy(nd => Vector2.Distance(nd.Pos, city.Pos)) is { } center)
             center.Piazza = true;
-        Console.WriteLine($"Città {city.Name}: {_net.Nodes.Count(nd => _compOf[nd] == CityComp && nd.Degree > 0)} incroci");
+        Console.WriteLine($"Città {city.Name} ({city.Pos.X:F0}, {city.Pos.Y:F0}): {_net.Nodes.Count(nd => _compOf[nd] == CityComp && nd.Degree > 0)} incroci");
     }
 
     // ------------------------------------------------------------------ paesi

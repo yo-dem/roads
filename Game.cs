@@ -550,7 +550,7 @@ public sealed partial class Game : IDisposable
         if (_trains != null)
         {
             _trains.PushOut(ref _player.Position, 1.05f);
-            if (_onTrain) RideTrain(dt, moveX, moveY, sprint);
+            if (_onTrain) RideTrain(dt, moveX, moveY, sprint, slow, jumpPressed);
             else if (_onFoot && !_boarding) _trains.PushOut(ref _kid.Position, Villager.Radius);
         }
         Mark("guida");
@@ -1191,6 +1191,7 @@ public sealed partial class Game : IDisposable
             if (near >= 0)
             {
                 _seat = near;
+                _kid.StandStill();
                 _lookPan = _lookTilt = 0f;
                 return;
             }
@@ -1477,7 +1478,6 @@ public sealed partial class Game : IDisposable
     private float _cabinLook = MathF.PI; // a bordo, in piedi: dove si guarda nella carrozza (0 = verso la marcia)
     private float _lookTilt;             // seduti: sguardo più su o più giù
 
-    private const float TrainWalk = 0.7f, TrainRun = 1.25f; // passo e corsa del personaggio rimpicciolito
 
     /// <summary>
     /// A bordo, rimpiccioliti: in piedi si cammina su tutto il pavimento libero con WASD rispetto a dove si guarda
@@ -1485,7 +1485,7 @@ public sealed partial class Game : IDisposable
     /// la carrozza. Seduti la visuale è dagli occhi verso il finestrino e il mouse gira lo sguardo. Tutto in coordinate
     /// della carrozza, che poi si portano nel mondo: il treno si muove, noi con lui.
     /// </summary>
-    private void RideTrain(float dt, float moveX, float moveY, bool run)
+    private void RideTrain(float dt, float moveX, float moveY, bool run, bool slow, bool jump)
     {
         if (_trains == null) return;
         var m = _trains.RideMatrix;
@@ -1508,26 +1508,17 @@ public sealed partial class Game : IDisposable
             return;
         }
 
-        // In piedi: WASD rispetto allo sguardo; il personaggio si volta da solo dove cammina
+        // In piedi: come in strada (WASD rispetto allo sguardo, Shift corre, Ctrl piano, spazio salta), in proporzione
+        // alla grandezza; il personaggio si volta da solo dove cammina
         var look2 = new Vector2(MathF.Sin(_cabinLook), MathF.Cos(_cabinLook));
         var right2 = new Vector2(-look2.Y, look2.X);
         Vector2 move = look2 * moveY + right2 * moveX;
-        float speed = 0f;
         const float r = Villager.Radius * k;
-        if (move.LengthSquared() > 0.01f)
-        {
-            move = Vector2.Normalize(move);
-            speed = run ? TrainRun : TrainWalk;
-            _cabinYaw += Noise.WrapAngle(MathF.Atan2(move.X, move.Y) - _cabinYaw) * MathF.Min(1f, 14f * dt);
-            Vector2 step = move * speed * dt;
-            // Scivolando lungo i mobili: prima il passo intero, poi solo di lato o solo in lungo
-            if (Trains.FreeInside(_cabin + step, r)) _cabin += step;
-            else if (Trains.FreeInside(_cabin + new Vector2(step.X, 0f), r)) _cabin.X += step.X;
-            else if (Trains.FreeInside(_cabin + new Vector2(0f, step.Y), r)) _cabin.Y += step.Y;
-            else speed = 0f;
-        }
         _kid.SizeScale = k;
-        _kid.Ride(dt, W(_cabin.X, Trains.Floor, _cabin.Y), carYaw + _cabinYaw, speed / k);
+        if (jump) _kid.Jump();
+        _kid.WalkInside(dt, move, slow, run && !slow, p => Trains.FreeInside(p, r), ref _cabin, ref _cabinYaw);
+        _kid.Position = W(_cabin.X, Trains.Floor + _kid.Air, _cabin.Y);
+        _kid.Yaw = carYaw + _cabinYaw;
 
         // Camera dietro e sopra il personaggio rispetto allo sguardo, sotto il soffitto e dentro le pareti; più vicina
         // se dietro c'è una parete di fondo

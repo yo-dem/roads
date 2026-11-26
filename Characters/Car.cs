@@ -19,7 +19,7 @@ public sealed class Car : IDisposable
     private const float FastSpeed = 14f;
     private const float ReverseSpeed = 2.4f;
     private const float Accel = 5f;           // unità/s² (retromarcia)
-    private const float Brake = 11f;
+    private const float Brake = 16f;
     private const float Coast = 3f;            // rallentamento senza gas
     private const float Scale = 1.1f;
     private const float WheelBase = 1.0f * Scale; // distanza tra gli assi (ruote a z = ±0.5)
@@ -62,9 +62,10 @@ public sealed class Car : IDisposable
     private const float UTurnSlideMax = 8f;
     private const float UTurnExitSpeed = 2.5f;       // a fine giro riparte già con questa velocità nel nuovo senso
 
-    // Bloccaggio delle ruote: insistendo sul freno in corsa le ruote si bloccano e l'auto striscia dritta
+    // Bloccaggio delle ruote: insistendo sul freno in corsa tutte e quattro le ruote si bloccano e l'auto striscia
+    // dritta inchiodando. Fermata col freno ancora premuto resta ferma: per la retro si lascia e si ripreme.
     private const float BrakeLockTime = 0.3f;        // s di freno tenuto premuto prima del bloccaggio
-    private const float BrakeLocked = 8.5f;          // unità/s²: a ruote bloccate si frena un po' meno (si striscia)
+    private const float BrakeLocked = 19f;           // unità/s²: inchiodata, ancora più decisa della frenata
     private const float LockedSteer = 0.12f;         // quota di sterzo che resta a ruote bloccate
 
     public Vector3 Position;
@@ -133,6 +134,7 @@ public sealed class Car : IDisposable
     private DriftLine? _line;
     private Vector3 _lineOffset;
     private float _brakeHold, _steerLatch;
+    private bool _brakeToStop; // il freno premuto ora ha fermato l'auto: niente retro finché non lo si lascia
 
     /// <summary>Ruote bloccate per la frenata insistita: l'auto striscia dritta e quasi non sterza.</summary>
     public bool WheelsLocked { get; private set; }
@@ -465,8 +467,14 @@ public sealed class Car : IDisposable
             wantSpeed = maxSpeed * Math.Clamp((_gasIn - 0.1f) / 0.8f, 0f, 1f);
             if (_speed > wantSpeed) coasting = true;
         }
-        else if (_gasIn < -0.1f) wantSpeed = _speed > 0.3f ? 0f : -ReverseSpeed; // prima frena, poi retro
+        else if (_gasIn < -0.1f)
+        {
+            // Prima frena; la retro solo con una nuova pressione da fermi (tenendo premuto dopo la frenata si resta fermi)
+            if (_speed > 0.3f) _brakeToStop = true;
+            wantSpeed = _speed > 0.3f || _brakeToStop ? 0f : -ReverseSpeed;
+        }
         else coasting = true; // senza gas l'auto rallenta da sola, senza accendere gli stop
+        if (_gasIn >= -0.1f) _brakeToStop = false;
         if (handbrake) { wantSpeed = 0f; coasting = true; }
         if (_stun > 0f) { _stun -= dt; wantSpeed = 0f; coasting = true; } // appena rimbalzati: il motore non spinge
 
