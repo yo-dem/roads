@@ -36,6 +36,7 @@ public sealed class DebugOptions
     public bool VerifyRoads;       // controlla tutte le strade e esce (test)
     public float PilotUntil;       // fino a questo istante lo sterzo tiene l'auto in corsia (test)
     public bool FollowTraffic;     // la camera segue un'auto del traffico (test)
+    public bool Reckless;          // il traffico ignora semafori e precedenze: incastri negli incroci (test)
     public bool Profile;
     public int? Msaa;              // campioni di antialiasing (di serie 4)           // misura i tempi di ogni fase del fotogramma
     public bool HitTest;           // l'auto parte puntata contro il passante più vicino (test)
@@ -266,7 +267,8 @@ public sealed partial class Game : IDisposable
         if (_debug.PreSpawn > 0) _world.PreSpawn(_debug.PreSpawn);
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
-        _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic, TrackOverlap = _debug.Shots.Count > 0 };
+        _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic, TrackOverlap = _debug.Shots.Count > 0,
+                                     Reckless = _debug.Reckless };
         _peds = new Pedestrians(_gl);
         // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
         Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
@@ -561,7 +563,7 @@ public sealed partial class Game : IDisposable
         _owned.Add(_player);
         _owned.AddRange(_parked);
         // I passanti non attraversano le auto del giocatore; le auto del traffico si fermano per loro
-        _peds?.Update(dt, _world, _particles, ActivePos, BlockedByOwnCars, driver: _onFoot ? null : _player);
+        _peds?.Update(dt, _world, _particles, ActivePos, BlockedByOwnCars, driver: _onFoot ? null : _player, makeWay: _traffic?.MakeWay);
         _traffic?.Update(dt, _time, _world, _owned, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos,
                          _peds?.Positions);
         Mark("traffico+passanti");

@@ -48,6 +48,9 @@ public sealed class Pedestrians : IDisposable
         public float DownTime, LieFor;
         public int DownPhase;
         public int Wanders;
+        // Si scansa: un'auto del traffico l'aspetta da un po' (per quanto ancora e da che parte)
+        public float Dodge;
+        public Vector2 DodgeDir;
     }
 
     private readonly List<Walker> _walkers = new();
@@ -116,7 +119,9 @@ public sealed class Pedestrians : IDisposable
 
     // ------------------------------------------------------------------ aggiornamento
 
-    public void Update(float dt, WorldMap world, Particles fx, Vector3 focus, Func<Vector3, float, bool> blocked, Car? driver = null)
+    /// <param name="makeWay">Dove un'auto del traffico aspetta da un po' un passante e verso dove va: lui si scansa.</param>
+    public void Update(float dt, WorldMap world, Particles fx, Vector3 focus, Func<Vector3, float, bool> blocked, Car? driver = null,
+                       IReadOnlyList<(Vector2 At, Vector2 CarPos, Vector2 Heading)>? makeWay = null)
     {
         var center = new Vector2(focus.X, focus.Z);
         if (Vector2.Distance(center, _around) > 15f) Refresh(center);
@@ -144,6 +149,8 @@ public sealed class Pedestrians : IDisposable
         }
 
         if (driver != null) HitBy(driver, world, fx);
+        if (makeWay != null)
+            foreach (var m in makeWay) MakeWay(m.At, m.CarPos, m.Heading);
 
         _positions.Clear();
         foreach (var w in _walkers)
@@ -156,7 +163,8 @@ public sealed class Pedestrians : IDisposable
         {
             if (!w.Active) continue;
             if (w.Mode == Mode.Down) { Fall(w, dt, world, fx); continue; }
-            Vector3 input = w.Pause > 0f ? Vector3.Zero : Steer(w);
+            w.Dodge = MathF.Max(0f, w.Dodge - dt);
+            Vector3 input = w.Dodge > 0f ? new Vector3(w.DodgeDir.X, 0f, w.DodgeDir.Y) : w.Pause > 0f ? Vector3.Zero : Steer(w);
             Vector3 before = w.Body.Position;
             w.Body.Update(dt, input, slow: w.Mode != Mode.Flee, world, fx, blocked); // chi scappa corre
             Progress(w, before, input, dt);
@@ -319,6 +327,31 @@ public sealed class Pedestrians : IDisposable
     }
 
     /// <summary>Direzione in cui camminare (lunghezza = andatura: sotto 1 è il passo lento del personaggio).</summary>
+    /// <summary>
+    /// Un'auto del traffico aspetta da un po' il passante in <paramref name="at"/>: lui si scansa di lato, dalla parte
+    /// in cui è già rispetto alla traiettoria dell'auto, e poi riprende la sua strada (in piazza ne sceglie un'altra).
+    /// </summary>
+    private void MakeWay(Vector2 at, Vector2 carPos, Vector2 heading)
+    {
+        Walker? best = null;
+        float bestD = 0.6f * 0.6f;
+        foreach (var w in _walkers)
+        {
+            if (!w.Active || w.Mode == Mode.Down || w.Dodge > 0f) continue;
+            float d = Vector2.DistanceSquared(new Vector2(w.Body.Position.X, w.Body.Position.Z), at);
+            if (d < bestD) { bestD = d; best = w; }
+        }
+        if (best == null) return;
+        Vector2 right = new(heading.Y, -heading.X);
+        Vector2 p = new(best.Body.Position.X, best.Body.Position.Z);
+        float side = Vector2.Dot(p - carPos, right);
+        best.DodgeDir = right * (side >= 0f ? 1f : -1f);
+        best.Dodge = 1.4f; // al passo svelto: abbastanza per uscire dall'ingombro dell'auto
+        best.Pause = 0f;
+        best.Stuck = 0f;
+        if (best.Mode == Mode.Piazza) best.Target = p + best.DodgeDir * 1.5f;
+    }
+
     private static Vector3 Steer(Walker w)
     {
         var p = new Vector2(w.Body.Position.X, w.Body.Position.Z);
