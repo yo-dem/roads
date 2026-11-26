@@ -390,7 +390,11 @@ public sealed class Pedestrians : IDisposable
         switch (w.Mode)
         {
             case Mode.Sidewalk: w.Dir = -w.Dir; break;              // c'è qualcosa in mezzo: si torna indietro
-            case Mode.Cross: w.Mode = Mode.Sidewalk; w.Dir = -w.Dir; break;
+            case Mode.Cross:
+                // Torna sul marciapiede da cui veniva; chi non ne aveva uno (era in piazza, o scappava) va al più vicino
+                if (w.Edge != null) { w.Mode = Mode.Sidewalk; w.Dir = -w.Dir; }
+                else BackToSidewalk(w, new Vector2(w.Body.Position.X, w.Body.Position.Z));
+                break;
             case Mode.Piazza: w.Target = new Vector2(w.Body.Position.X, w.Body.Position.Z); break;
             case Mode.Flee: w.FleeDir = new Vector2(-w.FleeDir.Y, w.FleeDir.X); break; // di là non si passa: di lato
         }

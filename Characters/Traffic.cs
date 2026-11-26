@@ -36,6 +36,8 @@ public sealed class Traffic : IDisposable
     private const float SpinFriction = 4f;      // rad/s²: rallentamento della rotazione dopo l'urto
     private const float Accel = 2.6f, Decel = 6f, HardDecel = 14f;
     private const float Margin = 0.35f;         // spazio lasciato davanti, oltre al contatto
+    private const float SteerMax = 0.6f;        // angolo massimo delle ruote: raggio di sterzata ~1.6
+    private const float ReverseSpeed = 1.2f;    // manovrando in retro
     private const float QueueGap = 1.7f;        // dietro un veicolo fermo: spazio lasciato (come in una coda vera)
     // Incastri: dopo JamWait s ferme a vicenda una arretra (al massimo BackTime s a BackSpeed), poi aspetta fino a
     // HoldTime s che l'altra passi; se nessuna può arretrare, dopo GhostAfter s una passa attraverso
@@ -123,6 +125,8 @@ public sealed class Traffic : IDisposable
     public BodyStyle? OnlyStyle { get; init; }
     /// <summary>Prove: si ignorano semafori e precedenze (per provocare incastri negli incroci).</summary>
     public bool Reckless { get; init; }
+    /// <summary>Prove: chi è fermo davanti all'auto del giocatore scende a spostarla senza prima provare a tornare indietro.</summary>
+    public bool Impatient { get; init; }
 
     /// <summary>Passanti che un'auto aspetta da un po' (dove sono, dove è l'auto, verso dove va): si scansano.</summary>
     public IReadOnlyList<(Vector2 At, Vector2 CarPos, Vector2 Heading)> MakeWay => _makeWay;
@@ -136,6 +140,9 @@ public sealed class Traffic : IDisposable
         foreach (var style in new[] { BodyStyle.Hatch, BodyStyle.Wagon, BodyStyle.Sport })
             _models[style] = Paints.Select((p, i) => new CarModel(gl, p, style, 11 + i)).ToArray();
         _models[BodyStyle.Tractor] = TractorPaints.Select((p, i) => new CarModel(gl, p, BodyStyle.Tractor, 31 + i)).ToArray();
+        // Gli autisti che scendono (come i passanti: stesso genere del personaggio del giocatore)
+        var cast = Pedestrians.Cast();
+        for (int i = 0; i < 2; i++) _drivers.Add(new Villager(gl, Vector3.Zero, 0f, cast[(i * 5 + 3) % cast.Count]));
         Current = this;
     }
 
@@ -285,12 +292,26 @@ public sealed class Traffic : IDisposable
         public Vector2 Pos, Heading;
         public float Y, Yaw, Pitch, Spin, Steer, Brake;
         public bool Placed, Dead;
+        // L'autista è sceso a spostare un'auto lasciata in mezzo alla strada
+        public Errand? Errand;
+        public float Patience;
 
         public float Remaining => (EndS(Edge, Dir) - S) * Dir;
     }
 
     /// <summary>Manovra all'incrocio, in ordine di precedenza tra chi arriva di fronte.</summary>
     private enum TurnKind { Straight, Right, Left, UTurn }
+
+    /// <summary>
+    /// Stato di chi manovra come un'auto vera: marcia (avanti o retro), velocità, sterzo (le ruote girano con calma, e
+    /// l'auto ruota solo muovendosi), da quanto e per quanto si sta andando in quella marcia.
+    /// </summary>
+    private struct Steering
+    {
+        public int Gear;
+        public float Speed, Steer, GearTime, GearDist, BackFor;
+        public Steering() { Gear = 1; }
+    }
 
     private readonly record struct Circle(Vector2 C, float R, int Owner, bool Car, bool Moving);
 
@@ -300,10 +321,11 @@ public sealed class Traffic : IDisposable
     /// Fa nascere, guidare e sparire le auto. <paramref name="player"/> = auto del giocatore, <paramref name="walker"/>
     /// = il personaggio a piedi (null se è in auto o in treno), <paramref name="focus"/> = dove sta chi si comanda.
     /// </summary>
-    public void Update(float dt, float clock, WorldMap world, IReadOnlyList<Car> owned, Vector3? walker, Vector3 focus,
-                       IReadOnlyList<Vector3>? pedestrians = null)
+    public void Update(float dt, float clock, WorldMap world, Particles fx, IReadOnlyList<Car> owned, Car? driven,
+                       Vector3? walker, Vector3 focus, IReadOnlyList<Vector3>? pedestrians = null)
     {
         _world = world;
+        _driven = driven;
         _owned.Clear();
         _owned.AddRange(owned);
         var player = owned[0];
@@ -313,8 +335,14 @@ public sealed class Traffic : IDisposable
         var center = new Vector2(focus.X, focus.Z);
 
         // Sparisce chi è troppo lontano o è finito fuori dal territorio caricato
-        _cars.RemoveAll(v => v.Dead || Vector2.Distance(v.Pos, center) > Despawn
-                             || world.ZoneAt(new Vector3(v.Pos.X, 0f, v.Pos.Y)) == null);
+        // (chi aspetta il suo autista sceso a spostare un'auto resta, a meno di andare davvero lontano)
+        _cars.RemoveAll(v =>
+        {
+            bool gone = v.Dead || Vector2.Distance(v.Pos, center) > (v.Errand != null ? Despawn + 40f : Despawn)
+                        || world.ZoneAt(new Vector3(v.Pos.X, 0f, v.Pos.Y)) == null;
+            if (gone && v.Errand != null) EndErrand(v.Errand);
+            return gone;
+        });
 
         if (Vector2.Distance(center, _candidatesAround) > 20f) RefreshCandidates(center);
         if (!_warm)
@@ -348,6 +376,8 @@ public sealed class Traffic : IDisposable
         if (walker is { } w) _obstacles.Add(new Circle(new Vector2(w.X, w.Z), 0.35f, -2, false, false));
         if (pedestrians != null)
             foreach (var q in pedestrians) _obstacles.Add(new Circle(new Vector2(q.X, q.Z), 0.3f, -3, false, true));
+        foreach (var e in _errands)
+            if (!e.Body.Hidden) _obstacles.Add(new Circle(new Vector2(e.Body.Position.X, e.Body.Position.Z), 0.3f, -3, false, true));
 
         foreach (var v in _cars)
         {
@@ -364,6 +394,7 @@ public sealed class Traffic : IDisposable
                     MinStopGap = MathF.Min(MinStopGap, Vector2.Dot(rel, v.Heading) - v.HalfL - c.HalfLength);
             }
         }
+        for (int i = _errands.Count - 1; i >= 0; i--) RunErrand(_errands[i], dt, world, fx);
         // (niente più "separazione" delle auto sovrapposte: le spingeva di lato. Non si sovrappongono: ogni passo che
         // entrerebbe in un altro veicolo non si fa)
         // Verifica (solo nelle prove): la sovrapposizione più profonda tra veicoli da inizio partita (deve restare ~0)
@@ -445,6 +476,7 @@ public sealed class Traffic : IDisposable
         v.Cruise = style == BodyStyle.Tractor ? 3.2f + 0.8f * _rng.NextSingle()
                                               : Limit(e) * spec.Pace * (0.85f + 0.25f * _rng.NextSingle());
         v.Speed = v.Cruise * 0.8f;
+        v.Patience = 3f + 4f * _rng.NextSingle();
         PlanNext(v);
         Pose(v, world, 0f);
         if (DepthAgainst(BoxOf(v), v, null) > 0f) return; // mai addosso a un'auto parcheggiata
@@ -629,6 +661,7 @@ public sealed class Traffic : IDisposable
         float margin = hit is { } hv && !hv.Moving && hv.Owner >= -1 ? QueueGap : Margin;
         want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, free - margin)));
         if (v.Shift != v.ShiftTarget) want = MathF.Min(want, 2.2f); // mentre cambia corsia va piano
+        if (v.Errand != null) want = 0f; // l'autista è sceso a spostare l'auto che sbarra la strada: si aspetta che torni
         // Ha appena arretrato per lasciar passare: aspetta che l'altra se ne vada (o che passi un po')
         if (v.Hold > 0f)
         {
@@ -653,7 +686,8 @@ public sealed class Traffic : IDisposable
         if (!v.Queued && v.Blocked > LongestBlock) LongestBlock = v.Blocked;
         // In coda per un motivo valido: fermi al semaforo, davanti al treno, dietro a un'auto che è in coda anche lei
         Vehicle? ahead = stuck && hit is { Car: true } hc ? Find(hc.Owner) : null;
-        v.Queued = ((v.AtLight || v.Yield) && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false);
+        v.Queued = ((v.AtLight || v.Yield) && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false)
+                   || v.Errand != null;
         v.HitId = ahead?.Id ?? NoHit;
         // Strada sbarrata: fermi davanti all'auto del giocatore (o a lui) senza poterla aggirare, o in coda dietro a chi lo
         // è. Dopo un po' si torna indietro fino all'incrocio e si prende un'altra strada.
@@ -663,8 +697,15 @@ public sealed class Traffic : IDisposable
         // Dov'è l'ostacolo che sbarra la strada (per chi sorpassa la coda: va superato anche lui)
         if (barred && hit is { } bh) v.BarrierAt = bh.C;
         else if (ahead != null && v.DeadEnd) v.BarrierAt = ahead.BarrierAt;
+        // L'auto del giocatore lasciata in mezzo alla strada: chi è fermo contro di lei e, passati altri 3-7 s, non è
+        // riuscito né a sorpassarla né a tornare indietro (c'è la coda dietro, o la retro non riesce), spazientito scende e
+        // la parcheggia a bordo strada
+        if (barred && hit is { Owner: -1 } bc && v.Errand == null && !v.Turning && !v.Retreat && v.ShiftTarget == 0f
+            && v.Blocked > (Impatient ? v.Patience : RetreatAfter + v.Patience)
+            && OwnedAt(bc.C) is { } blocking)
+            TryErrand(v, blocking);
         // In coda si comincia dall'ultima: si parte solo se dietro non c'è nessuno in coda che possa arretrare prima
-        if (v.DeadEnd && v.Blocked > RetreatAfter && v.RetreatFail <= 0f && !v.Turning && !QueuedBehind(v)) StartRetreat(v);
+        if (v.Errand == null && !(Impatient && barred) && v.DeadEnd && v.Blocked > RetreatAfter && v.RetreatFail <= 0f && !v.Turning && !QueuedBehind(v)) StartRetreat(v);
         // Diretta verso una strada sbarrata: chi deve ancora svoltare cambia uscita; chi è già nella svolta e si è
         // fermato arretra fuori dalla curva e poi ne sceglie un'altra (così la coda non si allunga)
         if (v.Next != null && Barred(v.Next, v.NextDir))
@@ -1977,6 +2018,8 @@ public sealed class Traffic : IDisposable
             Matrix4x4 body = Matrix4x4.CreateTranslation(0f, bounce, 0f) * root;
             v.Model.Collect(items, root, body, v.Spin, v.Steer, night > 0.45f, v.Brake, v.Reversing);
         }
+        foreach (var e in _errands)
+            if (!e.Body.Hidden && visible(new Vector2(e.Body.Position.X, e.Body.Position.Z))) e.Body.Collect(items);
     }
 
     // ------------------------------------------------------------------ furto
@@ -1994,7 +2037,7 @@ public sealed class Traffic : IDisposable
         float bestD = float.MaxValue;
         foreach (var v in _cars)
         {
-            if (v.Speed > maxSpeed || Vector2.DistanceSquared(v.Pos, p) > 9f) continue;
+            if (v.Speed > maxSpeed || v.Errand != null || Vector2.DistanceSquared(v.Pos, p) > 9f) continue;
             float inside = BoxOf(v).CircleDepth(p, 1.0f, out _); // > 0: entro 1 dalla carrozzeria
             if (inside <= 0f) continue;
             float d = Vector2.Distance(v.Pos, p);
@@ -2010,14 +2053,343 @@ public sealed class Traffic : IDisposable
     {
         if (Stealable(p, maxSpeed) is not { } v) return null;
         _cars.Remove(v);
+        var (seat, door) = DriverDoor(v);
+        return new Stolen(new Vector3(v.Pos.X, v.Y, v.Pos.Y), v.Yaw, v.Model.Paint, v.Model.Style, seat, door);
+    }
+
+    /// <summary>Il posto di guida (a sinistra) e il punto in terra accanto alla portiera da cui si scende.</summary>
+    private (Vector3 Seat, Vector3 Door) DriverDoor(Vehicle v)
+    {
         var pos = new Vector3(v.Pos.X, v.Y, v.Pos.Y);
         Vector3 left = new(MathF.Cos(v.Yaw), 0f, -MathF.Sin(v.Yaw)); // +X del modello: la sinistra del guidatore
         Vector3 seat = pos + left * 0.22f + new Vector3(0f, 0.12f, 0f);
         Vector3 door = pos + left * (v.HalfW + 0.35f);
         if (_world != null && !_world.IsWalkable(door, 0.2f)) door = pos - left * (v.HalfW + 0.35f); // dall'altra parte
         if (_world != null) door.Y = _world.GroundHeight(door);
-        return new Stolen(pos, v.Yaw, v.Model.Paint, v.Model.Style, seat, door);
+        return (seat, door);
     }
+
+    // ------------------------------------------------------------------ l'auto lasciata in mezzo alla strada
+
+
+    /// <summary>
+    /// Un autista spazientito: scende, sale sull'auto del giocatore lasciata in mezzo alla strada, la porta a bordo
+    /// strada manovrando (sul marciapiede o sulla banchina, fuori dalle corsie), scende, torna alla sua e riparte.
+    /// </summary>
+    private sealed class Errand
+    {
+        public required Vehicle V;
+        public required Car Car;
+        public required Villager Body;
+        public Phase Step;
+        public float StepTime, Still;
+        public int Side;               // da che parte dell'auto del giocatore si sale (+1: posto di guida)
+        public Vector2 Spot, SpotDir;  // dove metterla: un punto della linea di parcheggio e la sua direzione
+        public Steering Move = new();
+    }
+
+    private enum Phase { Out, ToCar, In, Drive, OutAgain, Back, Home }
+
+    private readonly List<Villager> _drivers = new();
+    private readonly List<Errand> _errands = new();
+    private readonly Dictionary<Car, float> _tried = new(); // quando qualcuno ha provato a spostarla
+    private Car? _driven;
+
+    /// <summary>Quante auto del giocatore sono state spostate da un autista spazientito (prove).</summary>
+    public int Moved { get; private set; }
+
+    /// <summary>Riepilogo delle commissioni in corso (prove).</summary>
+    public string ErrandStatus => string.Join(", ", _errands.Select(e => $"{e.Step} {e.StepTime:F1}s"));
+
+    private void TryErrand(Vehicle v, Car c)
+    {
+        if (_world == null || c == _driven || c.Puppet || c.Velocity.LengthSquared() > 0.09f) return;
+        if (_errands.Any(e => e.Car == c)) return;
+        if (_tried.TryGetValue(c, out float when) && _time - when < 20f && _time >= when) return;
+        var body = _drivers.FirstOrDefault(b => _errands.All(e => e.Body != b));
+        if (body == null) return;
+        _tried[c] = _time;
+        if (!FindSpot(v, c, _world, out var spot, out var dir)) return;
+        if (LogHits || TrackOverlap)
+            Console.WriteLine($"Autista spazientito: sposta l'auto da {c.Position.X:F1},{c.Position.Z:F1} a {spot.X:F1},{spot.Y:F1} "
+                              + $"(direzione {MathF.Atan2(dir.X, dir.Y):F2}, ora {c.Yaw:F2})");
+        var (seat, door) = DriverDoor(v);
+        // Si sale dal posto di guida se lì si può stare, altrimenti dall'altra parte
+        int side = _world.IsWalkable(c.DoorPoint(1f) with { Y = 0f }, 0.2f) ? 1 : -1;
+        Vector3 to = c.DoorPoint(side) - door;
+        body.HopOut(seat, door, MathF.Atan2(to.X, to.Z));
+        var e = new Errand { V = v, Car = c, Body = body, Spot = spot, SpotDir = dir, Side = side };
+        v.Errand = e;
+        _errands.Add(e);
+    }
+
+    /// <summary>
+    /// Dove mettere l'auto: subito fuori dalla carreggiata (sul marciapiede o sulla banchina), parallela alla strada,
+    /// un po' più avanti o accanto a dov'è, prima a destra di chi aspetta e poi a sinistra; dove ci sta, con un po' di
+    /// margine davanti e dietro per finire la manovra.
+    /// </summary>
+    private static bool FindSpot(Vehicle v, Car c, WorldMap world, out Vector2 spot, out Vector2 dir)
+    {
+        spot = dir = default;
+        var cp = new Vector2(c.Position.X, c.Position.Z);
+        // La strada che si sta percorrendo (all'incrocio non quella che la taglia)
+        if (!RoadNetwork.Current.NearestAligned(cp, v.Heading, 8f, out var hit) || !hit.Edge.Paved) return false;
+        var e = hit.Edge;
+        float lo = e.A.TrimFor(e) + 1.5f, hi = e.Length - e.B.TrimFor(e) - 1.5f;
+        if (hi <= lo) return false;
+        Vector2 ch = new(c.Heading.X, c.Heading.Z);
+        float ahead = Vector2.Dot(e.Tangent(hit.S), v.Heading) >= 0f ? 1f : -1f; // verso di chi aspetta
+        foreach (float ds in new[] { 2.5f, 4.5f, 0.5f, 6.5f, -1.5f, 8.5f, -3.5f, 10.5f })
+            foreach (int side in new[] { 1, -1 }) // +1: a destra di chi aspetta
+            {
+                float s = hit.S + ahead * ds;
+                if (s < lo || s > hi) continue;
+                Vector2 t = e.Tangent(s) * ahead;
+                Vector2 p = e.At(s) + RightOf(t) * (side * (e.HalfWidth + c.HalfWidth + 0.3f));
+                Vector2 d = Vector2.Dot(t, ch) >= 0f ? t : -t; // parallela, col muso dalla parte in cui è già girata
+                float yaw = MathF.Atan2(d.X, d.Y);
+                var p3 = new Vector3(p.X, world.GroundHeight(new Vector3(p.X, 0f, p.Y)), p.Y);
+                var d3 = new Vector3(d.X, 0f, d.Y);
+                if (!c.CanStand(world, p3, yaw) || !c.CanStand(world, p3 + d3 * 0.7f, yaw)
+                    || !c.CanStand(world, p3 - d3 * 0.7f, yaw)) continue;
+                spot = p;
+                dir = d;
+                return true;
+            }
+        return false;
+    }
+
+    private void RunErrand(Errand e, float dt, WorldMap world, Particles fx)
+    {
+        var body = e.Body;
+        var c = e.Car;
+        e.StepTime += dt;
+        // L'auto non c'è più (portata via) o ci è salito il giocatore: si lascia perdere
+        bool lost = !_owned.Contains(c) || c == _driven;
+        void Go(Phase p) { e.Step = p; e.StepTime = 0f; e.Still = 0f; }
+        switch (e.Step)
+        {
+            case Phase.Out:
+                body.Update(dt, Vector3.Zero, false, world, fx);
+                if (!body.Busy) Go(lost ? Phase.Back : Phase.ToCar);
+                break;
+            case Phase.ToCar:
+                if (lost || e.StepTime > 12f) { Go(Phase.Back); break; }
+                if (WalkTo(e, c.DoorPoint(e.Side), dt, world, fx))
+                {
+                    body.HopIn(c.SeatPoint(e.Side));
+                    Go(Phase.In);
+                }
+                break;
+            case Phase.In:
+                body.Update(dt, Vector3.Zero, false, world, fx);
+                if (!body.Hidden) break;
+                if (lost) { LeaveCar(e, world); break; }
+                c.Puppet = true;
+                c.EngineOn = true;
+                Go(Phase.Drive);
+                break;
+            case Phase.Drive:
+                if (lost) { LeaveCar(e, world); break; }
+                if (DriveAside(e, dt, world) || e.StepTime > 25f) LeaveCar(e, world);
+                break;
+            case Phase.OutAgain:
+                body.Update(dt, Vector3.Zero, false, world, fx);
+                if (!body.Busy) Go(Phase.Back);
+                break;
+            case Phase.Back:
+            {
+                var (seat, door) = DriverDoor(e.V);
+                if (WalkTo(e, door, dt, world, fx) || e.StepTime > 15f)
+                {
+                    body.HopIn(seat);
+                    Go(Phase.Home);
+                }
+                break;
+            }
+            case Phase.Home:
+                body.Update(dt, Vector3.Zero, false, world, fx);
+                if (body.Hidden) EndErrand(e);
+                break;
+        }
+    }
+
+    /// <summary>Cammina verso il punto (di buon passo: ha fretta). Vero quando è arrivato.</summary>
+    private bool WalkTo(Errand e, Vector3 target, float dt, WorldMap world, Particles fx)
+    {
+        var body = e.Body;
+        Vector3 to = target - body.Position;
+        to.Y = 0f;
+        float d = to.Length();
+        if (d < 0.3f) return true;
+        // Le auto del giocatore sono ostacoli (quelle del traffico lo sono già per il terreno)
+        bool Blocked(Vector3 p, float r)
+        {
+            foreach (var o in _owned)
+                if (!o.Puppet && o.Blocks(p, r)) return true;
+            return false;
+        }
+        body.Update(dt, to / d, d < 1.2f, world, fx, Blocked);
+        // Fermo contro qualcosa: si gira attorno (il personaggio scivola già lungo gli ostacoli)
+        e.Still = body.Velocity.LengthSquared() < 0.04f ? e.Still + dt : 0f;
+        if (e.Still > 2.5f)
+        {
+            body.Appear(target with { Y = world.GroundHeight(target) }, body.Yaw); // (non dovrebbe servire)
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Porta l'auto sulla linea di parcheggio manovrando (avanti, retro, di nuovo avanti...). Vero quando è ferma lì,
+    /// in asse, o comunque fuori dalle corsie e senza più spazio per sistemarla meglio.
+    /// </summary>
+    private bool DriveAside(Errand e, float dt, WorldMap world)
+    {
+        var c = e.Car;
+        Vector2 pos = new(c.Position.X, c.Position.Z);
+        float yaw = c.Yaw;
+        Vector2 rel = pos - e.Spot;
+        float along = Vector2.Dot(rel, e.SpotDir), lat = Vector2.Dot(rel, RightOf(e.SpotDir));
+        float phi = Noise.WrapAngle(yaw - MathF.Atan2(e.SpotDir.X, e.SpotDir.Y));
+        bool aligned = MathF.Abs(lat) < 0.18f && MathF.Abs(phi) < 0.1f;
+        bool misaligned = MathF.Abs(lat) > 0.25f || MathF.Abs(phi) > 0.2f;
+        var box = c.Box;
+        const float aimPark = 1.7f; // parcheggiando si punta più vicino: si sterza più deciso
+        bool Free(Vector2 p, float y)
+        {
+            if (!c.CanStand(world, new Vector3(p.X, c.Position.Y, p.Y), y)) return false;
+            var next = c.BoxAt(new Vector3(p.X, 0f, p.Y), y);
+            foreach (var o in _obstacles)
+                if ((o.Owner == -2 || o.Owner == -3) && next.CircleDepth(o.C, o.R, out _) > 0.002f
+                    && next.CircleDepth(o.C, o.R, out _) >= box.CircleDepth(o.C, o.R, out _)) return false;
+            return true;
+        }
+        if (aligned)
+        {
+            // In asse: si frena e si spegne
+            e.Move.Speed = MoveTowards(e.Move.Speed, 0f, Decel * dt);
+            Vector2 h = new(MathF.Sin(yaw), MathF.Cos(yaw));
+            Vector2 np = pos + h * (e.Move.Gear * e.Move.Speed * dt);
+            if (Free(np, yaw)) pos = np; else e.Move.Speed = 0f;
+            e.Move.Steer = MoveTowards(e.Move.Steer, 0f, 2.5f * dt);
+        }
+        else Steer(ref e.Move, ref pos, ref yaw, e.Spot + e.SpotDir * (along + aimPark), e.Spot + e.SpotDir * (along - aimPark), 1.8f,
+                   misaligned, dt, Free);
+        c.PuppetMove(new Vector3(pos.X, 0f, pos.Y), yaw, e.Move.Gear * e.Move.Speed, e.Move.Steer, dt, world);
+        e.Still = e.Move.Speed < 0.05f ? e.Still + dt : 0f;
+        if (aligned && e.Move.Speed < 0.05f) return true;
+        // Bloccata da un po' ma già fuori dalle corsie: va bene così
+        return e.Still > 3f && MathF.Abs(lat) < 0.3f && MathF.Abs(phi) < 0.25f;
+    }
+
+    /// <summary>Scende dall'auto spostata (o da cui deve andarsene) e torna alla sua.</summary>
+    private void LeaveCar(Errand e, WorldMap world)
+    {
+        var c = e.Car;
+        if (c.Puppet)
+        {
+            c.Puppet = false;
+            c.EngineOn = false;
+            c.Place(c.Position, c.Yaw); // ferma, freno tirato
+            Moved++;
+            if (LogHits || TrackOverlap)
+            {
+                Vector2 rel = new Vector2(c.Position.X, c.Position.Z) - e.Spot;
+                Console.WriteLine($"Auto spostata: scarto laterale {Vector2.Dot(rel, RightOf(e.SpotDir)):F2}, "
+                                  + $"angolo {Noise.WrapAngle(c.Yaw - MathF.Atan2(e.SpotDir.X, e.SpotDir.Y)):F2} in {e.StepTime:F1}s");
+            }
+        }
+        Vector3 door = c.DoorPoint(e.Side);
+        if (!world.IsWalkable(door with { Y = 0f }, 0.2f)) door = c.DoorPoint(-e.Side);
+        door.Y = world.GroundHeight(door);
+        Vector3 home = new(e.V.Pos.X, 0f, e.V.Pos.Y);
+        Vector3 to = home - door;
+        e.Body.HopOut(c.SeatPoint(e.Side), door, MathF.Atan2(to.X, to.Z));
+        e.Step = Phase.OutAgain;
+        e.StepTime = e.Still = 0f;
+    }
+
+    /// <summary>Fine della commissione: l'autista è di nuovo al volante (o l'auto che aspettava non c'è più).</summary>
+    private void EndErrand(Errand e)
+    {
+        if (e.Car.Puppet)
+        {
+            e.Car.Puppet = false;
+            e.Car.Place(e.Car.Position, e.Car.Yaw);
+        }
+        e.Body.Hide();
+        e.V.Errand = null;
+        e.V.Blocked = 0f;
+        _errands.Remove(e);
+    }
+
+    /// <summary>L'auto del giocatore (ferma o parcheggiata) che occupa il punto, se c'è.</summary>
+    private Car? OwnedAt(Vector2 p) =>
+        _owned.MinBy(c => Vector2.DistanceSquared(new Vector2(c.Position.X, c.Position.Z), p)) is { } c
+        && Vector2.Distance(new Vector2(c.Position.X, c.Position.Z), p) < c.HalfLength + 0.5f ? c : null;
+
+    /// <summary>
+    /// Un passo di manovra (modello a bicicletta: si ruota solo muovendosi, di quanto permettono le ruote).
+    /// <paramref name="aim"/> = dove si vuole andare, <paramref name="cap"/> = velocità massima in avanti,
+    /// <paramref name="misaligned"/> = se davanti è chiuso conviene fare retromarcia (altrimenti si aspetta),
+    /// <paramref name="free"/> = la posa è libera?
+    /// </summary>
+    private static void Steer(ref Steering m, ref Vector2 pos, ref float yaw, Vector2 aim, Vector2 aimBack, float cap,
+                              bool misaligned, float dt, Func<Vector2, float, bool> free)
+    {
+        Vector2 to = aim - pos;
+        float alpha = Noise.WrapAngle(MathF.Atan2(to.X, to.Y) - yaw); // > 0: il punto è verso cui lo yaw cresce
+        float kMax = MathF.Tan(SteerMax) / WheelBase;
+        m.GearTime += dt;
+        int gear = m.Gear;
+        if (m.GearTime > 0.5f)
+        {
+            // Il punto è di fianco o dietro: retromarcia con le ruote girate (il muso va verso il punto)
+            if (m.Gear > 0 && MathF.Abs(alpha) > 1.3f) { gear = -1; m.BackFor = 0f; }
+            else if (m.Gear < 0 && ((m.GearDist >= m.BackFor && MathF.Abs(alpha) < 0.9f) || m.GearDist > 3.5f)) gear = 1;
+        }
+        // Avanti: inseguimento del punto (curvatura 2 sin α / distanza); indietro: ruote girate dall'altra parte, tanto
+        // più quanto il muso è lontano dal punto
+        // In retromarcia per riprendere spazio (davanti era chiuso) si insegue invece un punto della linea dietro: la
+        // coda va lì e lo scarto di lato si riduce anche andando indietro
+        Vector2 back = aimBack - pos;
+        float beta = Noise.WrapAngle(MathF.Atan2(back.X, back.Y) - Noise.WrapAngle(yaw + MathF.PI));
+        float k = m.Gear > 0 ? Math.Clamp(2f * MathF.Sin(alpha) / MathF.Max(to.Length(), 1f), -kMax, kMax)
+                : m.BackFor > 0f && MathF.Abs(beta) < 1.2f ? Math.Clamp(2f * MathF.Sin(beta) / MathF.Max(back.Length(), 1f), -kMax, kMax)
+                : MathF.Sign(alpha) * kMax * MathF.Min(1f, MathF.Abs(alpha) / 0.6f);
+        float wheels = MathF.Atan(k * WheelBase) * m.Gear;
+        m.Steer = MoveTowards(m.Steer, wheels, 3f * dt);
+        // Appena cambiata marcia, prima si gira il volante da fermi e poi si parte (come in un parcheggio stretto)
+        bool steering = m.GearTime < 1.5f && m.Speed < 0.3f && MathF.Abs(m.Steer - wheels) > 0.12f;
+        float target = gear != m.Gear || steering ? 0f : m.Gear > 0 ? MathF.Max(0f, cap) : ReverseSpeed;
+        m.Speed = MoveTowards(m.Speed, target, (target > m.Speed ? Accel : Decel) * dt);
+        if (gear != m.Gear && m.Speed < 0.05f)
+        {
+            m.Gear = gear;
+            m.GearTime = m.GearDist = m.Speed = 0f;
+        }
+        float d = m.Speed * dt;
+        if (d <= 0f) return;
+        float ny = Noise.WrapAngle(yaw + m.Gear * d * MathF.Tan(m.Steer) / WheelBase);
+        Vector2 np = pos + new Vector2(MathF.Sin(ny), MathF.Cos(ny)) * (m.Gear * d);
+        if (!free(np, ny))
+        {
+            // Non c'è posto: ci si ferma; se si è di traverso si prova nell'altra marcia
+            m.Speed = 0f;
+            if (m.GearTime > 0.4f && (m.Gear < 0 || misaligned))
+            {
+                m.Gear = -m.Gear;
+                m.GearTime = m.GearDist = 0f;
+                m.BackFor = 2.2f;
+            }
+            return;
+        }
+        pos = np;
+        yaw = ny;
+        m.GearDist += d;
+    }
+
 
     private int _followed = -1;
 
@@ -2031,7 +2403,15 @@ public sealed class Traffic : IDisposable
         return (new Vector3(v.Pos.X, v.Y, v.Pos.Y), v.Yaw);
     }
 
-    /// <summary>Test: l'auto seguita si ferma e resta ferma (bersaglio per le prove d'urto).</summary>
+    /// <summary>Test: l'auto seguita riceve una spinta di lato (verso la sua destra se positiva) e una rotazione.</summary>
+    public void KnockFollowed(float side, float spin)
+    {
+        if (_cars.Find(c => c.Id == _followed) is not { } v) return;
+        v.Knock += RightOf(v.Heading) * side;
+        v.KnockSpin += spin;
+        v.Speed = 0f;
+    }
+
     /// <summary>
     /// Test: un punto sulla traiettoria dell'auto del traffico più vicina, <paramref name="ahead"/> davanti a lei nella
     /// sua corsia (prima dell'incrocio), con la direzione di marcia: lì si mette l'auto del giocatore a sbarrarle la strada.
@@ -2046,6 +2426,7 @@ public sealed class Traffic : IDisposable
         return (new Vector3(p.X, 0f, p.Y), MathF.Atan2(h.X, h.Y));
     }
 
+    /// <summary>Test: l'auto seguita si ferma e resta ferma (bersaglio per le prove d'urto).</summary>
     public void FreezeFollowed()
     {
         if (_cars.Find(c => c.Id == _followed) is { } v) v.Cruise = v.Speed = 0f;
@@ -2065,7 +2446,7 @@ public sealed class Traffic : IDisposable
                + $"ferma dietro al giocatore a {(MinStopGap < 1e9f ? MinStopGap.ToString("F2") : "-")}, "
                + $"distanza minima in fila {(MinFollowGap < 1e9f ? MinFollowGap.ToString("F1") : "-")}, "
                + $"scivolata di lato massima {WorstSlide:F2}/s [{SlideWho}], rotazione da ferma {WorstSpin:F2} rad/s [{SpinWho}], "
-               + $"sovrapposizione massima {WorstOverlap:F3}"
+               + $"sovrapposizione massima {WorstOverlap:F3}; autisti scesi: [{ErrandStatus}], auto spostate {Moved}"
                + (_cars.Find(v => v.Id == _followed) is { } f
                    ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Yield ? ", dà precedenza" : "")}{(f.Queued ? ", in coda" : "")}" : "");
     }
@@ -2074,6 +2455,7 @@ public sealed class Traffic : IDisposable
     {
         foreach (var set in _models.Values)
             foreach (var m in set) m.Dispose();
+        foreach (var d in _drivers) d.Dispose();
         if (Current == this) Current = null;
     }
 }

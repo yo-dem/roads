@@ -155,6 +155,14 @@ public static class Program
                 case "--ruba":
                     d.StealTest = true;
                     break;
+                case "--spingi" when i + 1 < args.Length:
+                    var sv = args[++i].Split(',').Select(x => float.Parse(x, inv)).ToArray();
+                    d.Shove = sv[0];
+                    if (sv.Length > 1) d.ShoveSpin = sv[1];
+                    break;
+                case "--intralcio":
+                    d.Obstruct = true;
+                    break;
                 case "--sperona":
                     d.RamTraffic = true;
                     break;

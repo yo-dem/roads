@@ -44,6 +44,9 @@ public sealed class DebugOptions
     public bool RamTraffic;        // l'auto parte di fianco a un'auto del traffico, puntata contro (test)
     public bool Barricade;         // l'auto del giocatore si ferma davanti a un'auto del traffico, nella sua corsia (test)
     public float BarricadeRoom = 2f; // con --sbarra-rettilineo: strada che deve restare dopo (per provare i sorpassi)
+    public float Shove;            // istante in cui l'auto del traffico seguita riceve una spinta di lato (test)
+    public float ShoveSpin = 2.2f; // e con che rotazione (rad/s)
+    public bool Obstruct;          // l'auto lasciata di traverso davanti a un'auto del traffico, e si scende (test)
     public Roads.Characters.BodyStyle? BodyStyle; // il traffico ha solo questa carrozzeria (test)
     public bool AimPole;           // l'auto parte puntata contro il palo abbattibile più vicino (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
@@ -270,7 +273,7 @@ public sealed partial class Game : IDisposable
         _particles = new Particles(_gl);
         _trains = new Trains(_gl, Railway.Current);
         _traffic = new Traffic(_gl) { OnlyStyle = _debug.BodyStyle, LogHits = _debug.RamTraffic, TrackOverlap = _debug.Shots.Count > 0,
-                                     Reckless = _debug.Reckless };
+                                     Reckless = _debug.Reckless, Impatient = _debug.Obstruct };
         _peds = new Pedestrians(_gl);
         // Lenti accese dei semafori (una mesh per colore), appena davanti a quelle spente del cassonetto
         Vector3[] litColor = [new(1f, 0.16f, 0.1f), new(1f, 0.72f, 0.08f), new(0.2f, 1f, 0.45f)];
@@ -489,6 +492,26 @@ public sealed partial class Game : IDisposable
             _player.Place(barrier.Pos with { Y = _world.GroundHeight(barrier.Pos) }, barrier.Yaw);
         }
 
+        if (_debug.Shove > 0f && _time > _debug.Shove && _traffic != null)
+        {
+            _debug.Shove = 0f;
+            _traffic.KnockFollowed(3.5f, _debug.ShoveSpin);
+            Console.WriteLine("Test: spinta all'auto seguita");
+        }
+
+        if (_debug.Obstruct && _time > 0.3f && !_onFoot && _traffic?.Followed(_player.Position) is { } waiting)
+        {
+            // Test: l'auto messa di traverso sulla strada, 8 unità davanti a un'auto del traffico; poi si scende e ci si
+            // allontana (vedi --wasd)
+            _debug.Obstruct = false;
+            Vector3 fwd = new(MathF.Sin(waiting.Yaw), 0f, MathF.Cos(waiting.Yaw));
+            Vector3 at = waiting.Pos + fwd * 8f;
+            _player.Place(at with { Y = _world.GroundHeight(at) }, waiting.Yaw + MathF.PI * 0.5f);
+            _player.EngineOn = false;
+            _debug.Toggles.Add(_time + 0.2f);
+            Console.WriteLine($"Test: auto di traverso davanti a un'auto del traffico in {at.X:F1}, {at.Z:F1}");
+        }
+
         if (_debug.RamTraffic && _time > 0.3f && !_onFoot && _traffic?.Followed(_player.Position) is { } victim)
         {
             // Test: l'auto a 7 unità di fianco a quella del traffico, puntata contro di lei (anticipandone la marcia)
@@ -536,6 +559,7 @@ public sealed partial class Game : IDisposable
                 _seat = -1;
                 _cabin = new Vector2(0f, Trains.DoorZ - 0.15f);
                 _cabinYaw = _cabinLook = MathF.PI;
+                _cabinTilt = CabinTiltRest;
                 _kid.SizeScale = Trains.InsideScale; // dentro si è più piccoli: la carrozza diventa grande
                 if (_trains != null) _trains.Inside = true;
                 Console.WriteLine("In treno");
@@ -572,8 +596,8 @@ public sealed partial class Game : IDisposable
         _owned.AddRange(_parked);
         // I passanti non attraversano le auto del giocatore; le auto del traffico si fermano per loro
         _peds?.Update(dt, _world, _particles, ActivePos, BlockedByOwnCars, driver: _onFoot ? null : _player, makeWay: _traffic?.MakeWay);
-        _traffic?.Update(dt, _time, _world, _owned, _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos,
-                         _peds?.Positions);
+        _traffic?.Update(dt, _time, _world, _particles, _owned, _onFoot ? null : _player,
+                         _onFoot && !_onTrain && !_kid.Hidden ? _kid.Position : null, ActivePos, _peds?.Positions);
         Mark("traffico+passanti");
         Zone? spawned = _world.Update(dt, ActivePos);
         Mark("territorio");
@@ -1222,11 +1246,14 @@ public sealed partial class Game : IDisposable
         float best = float.MaxValue, bestSide = 1f;
         Car? bestCar = null;
         foreach (var car in _parked.Prepend(_player))
+        {
+            if (car.Puppet) continue; // la sta spostando un autista spazientito: si aspetta che scenda
             foreach (float side in new[] { 1f, -1f })
             {
                 float d = Vector2.Distance(new(_kid.Position.X, _kid.Position.Z), new(car.DoorPoint(side).X, car.DoorPoint(side).Z));
                 if (d < best) { best = d; bestSide = side; bestCar = car; }
             }
+        }
         if (best < 1.3f && bestCar != null)
         {
             if (bestCar != _player)
@@ -1382,10 +1409,16 @@ public sealed partial class Game : IDisposable
         }
         if (_onTrain && _seat >= 0)
         {
-            _lookPan = Math.Clamp(_lookPan - delta.X * MouseYaw, -1.4f, 1.4f);
+            // Come a piedi: mouse a destra, sguardo a destra (il finestrino può stare da una parte o dall'altra)
+            _lookPan = Math.Clamp(_lookPan + delta.X * MouseYaw, -1.4f, 1.4f);
             _lookTilt = Math.Clamp(_lookTilt - delta.Y * MousePitch, -0.6f, 0.5f);
         }
-        else if (_onTrain) _cabinLook -= delta.X * MouseYaw;
+        else if (_onTrain)
+        {
+            // In piedi nella carrozza: come per strada, il mouse gira la visuale attorno al personaggio, anche su e giù
+            _cabinLook -= delta.X * MouseYaw;
+            _cabinTilt = Math.Clamp(_cabinTilt + delta.Y * MousePitch, CabinTiltMin, CabinTiltMax);
+        }
         else
         {
             // A piedi il mouse gira la visuale attorno al personaggio
@@ -1487,6 +1520,8 @@ public sealed partial class Game : IDisposable
 
     private float _cabinLook = MathF.PI; // a bordo, in piedi: dove si guarda nella carrozza (0 = verso la marcia)
     private float _lookTilt;             // seduti: sguardo più su o più giù
+    private float _cabinTilt = CabinTiltRest; // in piedi: quanto la camera sta in alto dietro il personaggio (radianti)
+    private const float CabinTiltRest = 0.28f, CabinTiltMin = -0.45f, CabinTiltMax = 0.85f;
 
 
     /// <summary>
@@ -1530,14 +1565,23 @@ public sealed partial class Game : IDisposable
         _kid.Position = W(_cabin.X, Trains.Floor + _kid.Air, _cabin.Y);
         _kid.Yaw = carYaw + _cabinYaw;
 
-        // Camera dietro e sopra il personaggio rispetto allo sguardo, sotto il soffitto e dentro le pareti; più vicina
-        // se dietro c'è una parete di fondo
-        float dist = 0.95f;
-        Vector2 back = _cabin - look2 * dist;
+        // Camera dietro il personaggio rispetto allo sguardo, che gira attorno a un punto poco davanti alla sua testa
+        // come la camera per strada: alzando il mouse scende e guarda in su (verso il soffitto), abbassandolo sale e
+        // guarda in giù. Sempre sotto il soffitto, sopra il pavimento e dentro le pareti (più vicina se dietro c'è
+        // una parete di fondo)
+        const float arm = 1.45f, ahead = 0.45f, headY = 0.26f;
+        float tilt = _cabinTilt;
+        Vector2 pivot = _cabin + look2 * ahead;
+        Vector2 back = pivot - look2 * (arm * MathF.Cos(tilt));
         back.X = Math.Clamp(back.X, -Trains.WalkX + 0.02f, Trains.WalkX - 0.02f);
         back.Y = Math.Clamp(back.Y, -Trains.CabinEnd, Trains.CabinEnd);
-        Vector3 eyeAt = W(back.X, Trains.Floor + 0.66f, back.Y);
-        Vector3 target = W(_cabin.X + look2.X * 0.45f, Trains.Floor + 0.26f, _cabin.Y + look2.Y * 0.45f);
+        float camY = Math.Clamp(headY + arm * MathF.Sin(tilt), 0.07f, Trains.CeilingHeight - 0.06f);
+        // Guardando in su il punto guardato sale anche lui: si vedono portapacchi e soffitto
+        float targetY = headY + MathF.Max(0f, -tilt) * 1.3f;
+        // Come per strada: guardando in su il personaggio sta davanti alla camera e diventa quasi trasparente
+        _kidAlpha = 1f - 0.88f * Noise.Smooth(0.05f, 0.3f, -tilt);
+        Vector3 eyeAt = W(back.X, Trains.Floor + camY, back.Y);
+        Vector3 target = W(pivot.X, Trains.Floor + targetY, pivot.Y);
         _camera.Fix(eyeAt, target);
     }
 

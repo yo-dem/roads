@@ -395,6 +395,36 @@ public sealed class Car : IDisposable
     /// <summary>Un cerchio di raggio <paramref name="r"/> nel punto tocca la carrozzeria (il rettangolo vero)?</summary>
     public bool Blocks(Vector3 p, float r) => Box.CircleDepth(new Vector2(p.X, p.Z), r, out _) > 0f;
 
+    /// <summary>L'auto ci sta in questa posa? (terreno libero, nessun altro veicolo)</summary>
+    public bool CanStand(WorldMap world, Vector3 p, float yaw) => Fits(world, p, yaw);
+
+    /// <summary>
+    /// Guidata da qualcun altro (un autista del traffico che la sposta): la fisica è ferma e la posa arriva da
+    /// <see cref="PuppetMove"/>.
+    /// </summary>
+    public bool Puppet;
+
+    /// <summary>Guidata da fuori: posa, velocità (negativa in retromarcia: luci bianche) e ruote.</summary>
+    public void PuppetMove(Vector3 position, float yaw, float speed, float steer, float dt, WorldMap world)
+    {
+        Position.X = position.X;
+        Position.Z = position.Z;
+        Position.Y = Noise.Lerp(Position.Y, world.GroundHeight(Position), Noise.Damp(25f, dt));
+        float yawRate = dt > 0f ? Noise.WrapAngle(yaw - Yaw) / dt : 0f;
+        Yaw = _travelYaw = yaw;
+        _accel = dt > 0f ? (speed - _speed) / dt : 0f;
+        _speed = speed;
+        _steer = steer;
+        _knock = Vector3.Zero;
+        _yawRate = Noise.Lerp(_yawRate, yawRate, Noise.Damp(10f, dt));
+        _spin += speed * dt / (WheelRadius * Scale);
+        _brakeGlow = speed < -0.05f || (MathF.Abs(speed) < 0.05f) ? 1f : MathF.Max(0f, _brakeGlow - dt * 4f);
+        float hF = world.GroundHeight(Position + Forward * 0.6f), hB = world.GroundHeight(Position - Forward * 0.6f);
+        _slopePitch = Noise.Lerp(_slopePitch, Math.Clamp(MathF.Atan2(hB - hF, 1.2f), -0.4f, 0.4f), Noise.Damp(12f, dt));
+        float hR = world.GroundHeight(Position + Side * 0.4f), hL = world.GroundHeight(Position - Side * 0.4f);
+        _slopeRoll = Noise.Lerp(_slopeRoll, Math.Clamp(MathF.Atan2(hR - hL, 0.8f), -0.3f, 0.3f), Noise.Damp(12f, dt));
+    }
+
     /// <summary>L'auto (due cerchi, muso e coda) sta tutta su terreno libero in questa posa?</summary>
     private bool Fits(WorldMap world, Vector3 p, float yaw)
     {
@@ -444,6 +474,7 @@ public sealed class Car : IDisposable
     {
         _time += dt;
         _idleShake = Noise.Lerp(_idleShake, EngineOn ? 1f : 0f, Noise.Damp(6f, dt));
+        if (Puppet) return; // la guida qualcun altro (vedi PuppetMove)
         float maxSpeed = slow ? MathF.Min(SlowSpeed, _topSpeed) : _topSpeed;
 
         // --- Comandi: sterzo e gas. Niente aiuti: l'auto va dove la si guida.
