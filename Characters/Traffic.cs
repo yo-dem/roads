@@ -42,6 +42,11 @@ public sealed class Traffic : IDisposable
     private const float JamWait = 1.2f, BackSpeed = 1.4f, BackTime = 2.2f, HoldTime = 3.5f, GhostAfter = 9f;
     // Strada sbarrata dal giocatore: dopo RetreatAfter s si torna indietro e si cambia strada
     private const float RetreatAfter = 4f;
+    // Cambio di corsia e sorpasso: il muso gira al massimo di LaneMaxYaw rispetto alla corsia, e solo avanzando (al
+    // massimo LaneCurv radianti per unità di strada): ci si sposta di lato solo così, mai da fermi
+    private const float LaneMaxYaw = 0.4f, LaneCurv = 0.5f;
+    /// <summary>Strada che serve per spostarsi di lato di <paramref name="shift"/> (la fine è più dolce, quindi un po' di più).</summary>
+    private static float ShiftRoom(float shift) => MathF.Abs(shift) / MathF.Sin(LaneMaxYaw) + 5f;
 
     private static readonly Vector3[] Paints =
     [
@@ -99,6 +104,9 @@ public sealed class Traffic : IDisposable
     public float WorstOverlap { get; private set; }
     /// <summary>Prove: il fermo più lungo senza una buona ragione (non al rosso, non in coda) da inizio partita.</summary>
     public float LongestBlock { get; private set; }
+    /// <summary>Prove: la velocità di lato più alta (rispetto al muso) e la rotazione più rapida da ferme, senza urti in corso.</summary>
+    public float WorstSlide { get; private set; }
+    public float WorstSpin { get; private set; }
     private int Backs, Ghosts, Retreats;
 
     /// <summary>Test: se dato, nascono solo veicoli con questa carrozzeria.</summary>
@@ -221,6 +229,7 @@ public sealed class Traffic : IDisposable
         public float NextLane, TurnSpeed;
         public Curve? Turn;
         public bool Turning;
+        public bool TurnFromEdge = true; // la curva comincia in fondo al tratto (Edge); no dopo un'uscita in retro
         public float TurnD;
         // Andatura
         public float Speed, Cruise, Want;
@@ -234,6 +243,7 @@ public sealed class Traffic : IDisposable
         public float Backing, Hold;    // retromarcia in corso; poi attesa che l'altra passi
         public float BackFail;         // ha appena ceduto (o non può arretrare): al prossimo incastro tocca a un'altra
         public bool Reversing;
+        public float LaneYaw;          // cambiando corsia: quanto il muso è girato rispetto alla corsia (+ a destra)
         // Strada sbarrata: si torna indietro fino all'incrocio, si esce in retro girando e si prende un'altra strada
         public bool DeadEnd, Retreat;
         public Curve? BackCurve;
@@ -315,8 +325,15 @@ public sealed class Traffic : IDisposable
         if (pedestrians != null)
             foreach (var q in pedestrians) _obstacles.Add(new Circle(new Vector2(q.X, q.Z), 0.3f, -3, false, true));
 
-        foreach (var v in _cars) Drive(v, dt, world);
-        Separate();
+        foreach (var v in _cars)
+        {
+            var (pos0, yaw0, placed) = (v.Pos, v.Yaw, v.Placed);
+            bool pushed = v.Knock != Vector2.Zero || v.KnockSpin != 0f;
+            Drive(v, dt, world);
+            if (TrackOverlap && placed && !pushed && dt > 0f && v.Ghost <= 0f) MeasureSlide(v, pos0, yaw0, dt);
+        }
+        // (niente più "separazione" delle auto sovrapposte: le spingeva di lato. Non si sovrappongono: ogni passo che
+        // entrerebbe in un altro veicolo non si fa)
         // Verifica (solo nelle prove): la sovrapposizione più profonda tra veicoli da inizio partita (deve restare ~0)
         if (TrackOverlap)
             foreach (var v in _cars)
@@ -577,9 +594,6 @@ public sealed class Traffic : IDisposable
         float free = FreeDistance(v, look, v.ShiftTarget, out var hit, out bool train);
         want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, free - Margin)));
         if (v.Shift != v.ShiftTarget) want = MathF.Min(want, 2.2f); // mentre cambia corsia va piano
-        // Il cambio di corsia va finito prima dell'incrocio (la curva parte dalla corsia nuova)
-        if (!v.Turning && MathF.Abs(v.Shift - v.ShiftTarget) > 0.05f && v.ShiftTarget == 0f)
-            want = MathF.Min(want, MathF.Sqrt(2f * Decel * MathF.Max(0f, v.Remaining - 0.3f)));
         // Ha appena arretrato per lasciar passare: aspetta che l'altra se ne vada (o che passi un po')
         if (v.Hold > 0f)
         {
@@ -644,13 +658,12 @@ public sealed class Traffic : IDisposable
         if (v.ShiftTarget != 0f)
         {
             bool passed = Vector2.Dot(v.BypassAt - v.Pos, v.Heading) < -2.2f;
-            if (v.Turning || v.Remaining < 4f) v.ShiftTarget = 0f;
+            if (v.Turning || v.Remaining < ShiftRoom(v.Shift)) v.ShiftTarget = 0f; // rientra in tempo per l'incrocio
             else if (passed && FreeDistance(v, 5f, 0f, out _, out _) >= 5f) v.ShiftTarget = 0f;
             else if (v.Blocked > 5f) v.ShiftTarget = 0f; // anche di là non si passa: si torna in corsia ad aspettare
         }
-        v.Shift = MoveTowards(v.Shift, v.ShiftTarget, (v.Speed * 0.45f + 0.35f) * dt);
 
-        // Appena urtato si inchioda; poi si rientra in corsia piano
+        // Appena urtato si inchioda (la spinta dell'urto lo fa scivolare); poi si rientra in corsia piano, sterzando
         if (v.Knocked) want = 0f;
         else if (v.OffTrack) want = MathF.Min(want, 1.2f);
         Recover(v, dt);
@@ -663,6 +676,16 @@ public sealed class Traffic : IDisposable
 
         // Mai dentro un altro veicolo, nel giocatore o in un passante: se il passo ci entrerebbe, ci si ferma a contatto
         float dist = v.Speed * dt;
+        if (v.OffTrack && !v.Knocked)
+        {
+            // Fuori traiettoria dopo un urto: ci si rientra guidando (avanti sterzando, o in retro se si è girati di
+            // traverso), mai scivolando di lato
+            bool moved = dist <= 0f || Realign(v, dist);
+            if (!moved) v.Speed = 0f;
+            v.Touching = !moved || (dist <= 0f && want > 0.3f && v.Touching);
+            Pose(v, world, dt);
+            return;
+        }
         bool touching = StepBlocked(v, dist);
         if (touching)
         {
@@ -672,6 +695,7 @@ public sealed class Traffic : IDisposable
         // A contatto con chi le impedisce di avanzare (anche se davanti la strada sembra libera: di traverso dopo un
         // urto): conta come ferma, per sbloccare l'incastro. Da ferma (velocità azzerata) resta com'era.
         v.Touching = touching || (dist <= 0f && want > 0.3f && v.Touching);
+        LaneSteer(v, dist);
         Advance(v, dist);
         Pose(v, world, dt);
     }
@@ -764,6 +788,26 @@ public sealed class Traffic : IDisposable
         }
         return false;
     }
+
+    /// <summary>
+    /// Prove: lo spostamento di questo fotogramma è da auto? Di lato rispetto al muso (a metà del passo) non ci si deve
+    /// muovere, e da ferma non si deve girare. Si tiene il peggio visto.
+    /// </summary>
+    private void MeasureSlide(Vehicle v, Vector2 pos0, float yaw0, float dt)
+    {
+        Vector2 step = v.Pos - pos0;
+        float mid = yaw0 + 0.5f * Noise.WrapAngle(v.Yaw - yaw0);
+        Vector2 right = new(MathF.Cos(mid), -MathF.Sin(mid));
+        float slide = MathF.Abs(Vector2.Dot(step, right)) / dt;
+        if (slide > WorstSlide) { WorstSlide = slide; SlideWho = $"auto {v.Id} a {v.Pos.X:F0},{v.Pos.Y:F0} ({v.Why}{(v.Retreat ? ", torna indietro" : "")}{(v.Backing > 0f ? ", retro" : "")}{(v.OffTrack ? ", fuori traiettoria" : "")}{(v.Turning ? ", curva" : "")})"; }
+        if (step.Length() < 1e-4f)
+        {
+            float spin = MathF.Abs(Noise.WrapAngle(v.Yaw - yaw0)) / dt;
+            if (spin > WorstSpin) { WorstSpin = spin; SpinWho = $"auto {v.Id} a {v.Pos.X:F0},{v.Pos.Y:F0}"; }
+        }
+    }
+
+    private string SlideWho = "", SpinWho = "";
 
     /// <summary>Prove: l'auto ferma da più tempo senza una buona ragione e cosa la ferma.</summary>
     private string Worst()
@@ -931,6 +975,7 @@ public sealed class Traffic : IDisposable
                 v.Reversing = false;
                 v.DeadEnd = false;
                 v.Turning = true;
+                v.TurnFromEdge = false; // la curva parte dall'incrocio, non dal fondo del tratto
                 v.TurnD = 0f;
             }
         }
@@ -982,9 +1027,10 @@ public sealed class Traffic : IDisposable
     {
         var e = v.Edge;
         var node = v.Dir > 0 ? e.A : e.B;
-        float s0 = StartS(e, v.Dir);
-        Vector2 d = e.Tangent(s0) * v.Dir;                    // muso, verso il tratto (lontano dall'incrocio)
-        Vector2 p0 = LanePoint(e, v.Dir, v.Lane, v.S) ;
+        Vector2 d;                                            // muso, verso il tratto (lontano dall'incrocio)
+        // Dall'auto com'è davvero (anche spostata o girata dopo un urto, o a metà di un cambio di corsia): niente salti
+        Vector2 p0 = v.Pos;
+        d = v.Heading;
         var options = new List<(RoadEdge E, int Dir, Vector2 L)>();
         foreach (var o in node.Edges)
         {
@@ -1012,6 +1058,10 @@ public sealed class Traffic : IDisposable
                 var forward = new Curve(q, l, p3, leave, MathF.Max(0.6f, gap * 0.42f));
                 if (!OnRoad(v, back, true) || !OnRoad(v, forward, false)) continue;
                 v.BackCurve = back;
+                // La curva parte dalla posa vera: scostamenti e cambi di corsia sono ora parte di lei
+                v.Offset = Vector2.Zero;
+                v.YawOffset = v.LaneYaw = 0f;
+                v.Shift = v.ShiftTarget = 0f;
                 v.BackD = 0f;
                 v.Next = o;
                 v.NextDir = od;
@@ -1044,10 +1094,17 @@ public sealed class Traffic : IDisposable
     /// <summary>Arretra di <paramref name="d"/> lungo la traiettoria, se lì c'è posto (altrimenti non si muove).</summary>
     private bool TryRetreat(Vehicle v, float d)
     {
-        var (s, turnD, turning) = (v.S, v.TurnD, v.Turning);
+        if (v.OffTrack) return Realign(v, d, reverse: true); // fuori traiettoria: dritta all'indietro, dove punta
+        var (s, turnD, turning, shift) = (v.S, v.TurnD, v.Turning, v.Shift);
         if (v.Turning)
         {
             v.TurnD -= d;
+            if (v.TurnD < 0f && !v.TurnFromEdge)
+            {
+                // La curva partiva dall'incrocio (dopo un'uscita in retro): più indietro di così non si va
+                v.TurnD = turnD;
+                return false;
+            }
             if (v.TurnD < 0f)
             {
                 // Uscita all'indietro dalla curva: si torna sul tratto d'arrivo
@@ -1057,11 +1114,20 @@ public sealed class Traffic : IDisposable
                 v.S = EndS(v.Edge, v.Dir) - v.Dir * rest;
             }
         }
-        else v.S -= v.Dir * d;
+        else
+        {
+            v.S -= v.Dir * d;
+            v.Shift -= MathF.Sin(v.LaneYaw) * d; // a metà di un cambio di corsia si arretra dove punta il muso
+        }
 
         Vector2 pos, heading;
         if (v.Turning) { pos = v.Turn!.At(v.TurnD); heading = v.Turn.Tangent(v.TurnD); }
-        else { pos = LanePoint(v.Edge, v.Dir, v.Lane + v.Shift, v.S); heading = v.Edge.Tangent(v.S) * v.Dir; }
+        else
+        {
+            pos = LanePoint(v.Edge, v.Dir, v.Lane + v.Shift, v.S);
+            heading = v.Edge.Tangent(v.S) * v.Dir;
+            heading = heading * MathF.Cos(v.LaneYaw) + RightOf(heading) * MathF.Sin(v.LaneYaw);
+        }
         pos += v.Offset;
         float yaw = Noise.WrapAngle(MathF.Atan2(heading.X, heading.Y) + v.YawOffset);
         bool ok = (v.Turning || (v.S - StartS(v.Edge, v.Dir)) * v.Dir > 0.5f) && Free(v, pos, yaw);
@@ -1072,7 +1138,7 @@ public sealed class Traffic : IDisposable
             foreach (var o in _obstacles)
                 if (o.Owner < -1 && box.CircleDepth(o.C, o.R, out _) > 0.002f) { ok = false; break; }
         }
-        if (!ok) (v.S, v.TurnD, v.Turning) = (s, turnD, turning);
+        if (!ok) (v.S, v.TurnD, v.Turning, v.Shift) = (s, turnD, turning, shift);
         return ok;
     }
 
@@ -1087,6 +1153,7 @@ public sealed class Traffic : IDisposable
         float? other = null;
         foreach (float l in lanes) if (MathF.Abs(l - v.Lane) > 0.1f) { other = l; break; }
         if (other is not { } lane) return false;
+        if (v.Remaining < ShiftRoom(lane - v.Lane - v.Shift)) return false; // non c'è strada per spostarsi prima dell'incrocio
         var (oldLane, oldShift) = (v.Lane, v.Shift);
         v.Lane = lane;
         v.Shift = oldLane + oldShift - lane; // stessa posizione di prima: poi Shift torna a zero, verso la corsia nuova
@@ -1103,8 +1170,8 @@ public sealed class Traffic : IDisposable
     }
 
     /// <summary>Si può passare nella corsia a sinistra? Solo sulle strade a doppio senso e sui viali, lontano dagli incroci.</summary>
-    private static bool CanBypass(Vehicle v) =>
-        !v.Turning && v.Remaining > 8f && v.Edge.Layout is RoadLayout.TwoWay or RoadLayout.Avenue;
+    private static bool CanBypass(Vehicle v) => // c'è strada per spostarsi di là e tornare prima dell'incrocio
+        !v.Turning && v.Remaining > 2f * ShiftRoom(2f * v.Edge.LaneHalf) && v.Edge.Layout is RoadLayout.TwoWay or RoadLayout.Avenue;
 
     private void Advance(Vehicle v, float dist)
     {
@@ -1118,8 +1185,9 @@ public sealed class Traffic : IDisposable
                 v.S = EndS(v.Edge, v.Dir);
                 if (v.Next == null || v.Turn == null) { v.Dead = true; return; }
                 v.Turning = true;
+                v.TurnFromEdge = true;
                 v.TurnD = 0f;
-                v.Shift = v.ShiftTarget = 0f;
+                v.Shift = v.ShiftTarget = v.LaneYaw = 0f;
             }
             else
             {
@@ -1161,18 +1229,69 @@ public sealed class Traffic : IDisposable
             else v.KnockSpin = 0f;
             v.KnockSpin = MoveTowards(v.KnockSpin, 0f, SpinFriction * dt);
         }
-        if (!v.Knocked)
+        // Il rientro in traiettoria non è qui: lo fa Realign, guidando (mai scivolando di lato)
+    }
+
+    /// <summary>
+    /// Cambio di corsia avanzando di <paramref name="dist"/>: il muso gira verso la corsia voluta (al massimo LaneMaxYaw,
+    /// e di LaneCurv per unità di strada) e l'auto si sposta di lato solo per questo, poi si raddrizza arrivando.
+    /// </summary>
+    private static void LaneSteer(Vehicle v, float dist)
+    {
+        if (dist <= 0f) return;
+        float side = v.ShiftTarget - v.Shift;
+        if (MathF.Abs(side) < 0.005f && MathF.Abs(v.LaneYaw) < 0.01f)
         {
-            // Rientro: lo scostamento e la rotazione tornano a zero, se lì c'è posto
-            Vector2 back = v.Offset.LengthSquared() > 1e-8f
-                ? -Vector2.Normalize(v.Offset) * MathF.Min(v.Offset.Length(), 0.7f * dt) : Vector2.Zero;
-            float turnBack = MoveTowards(v.YawOffset, 0f, 0.6f * dt) - v.YawOffset;
-            if (Free(v, v.Pos + back, v.Yaw + turnBack))
-            {
-                v.Offset += back;
-                v.YawOffset += turnBack;
-            }
+            v.Shift = v.ShiftTarget;
+            v.LaneYaw = 0f;
+            return;
         }
+        float target = Math.Clamp(side * 0.9f, -LaneMaxYaw, LaneMaxYaw);
+        v.LaneYaw = MoveTowards(v.LaneYaw, target, LaneCurv * dist);
+        v.Shift += MathF.Sin(v.LaneYaw) * dist;
+    }
+
+    /// <summary>Direzione della traiettoria nel punto in cui è l'auto (sul tratto o nella curva dell'incrocio).</summary>
+    private static Vector2 PathHeading(Vehicle v) => v.Turning ? v.Turn!.Tangent(v.TurnD) : v.Edge.Tangent(v.S) * v.Dir;
+
+    /// <summary>
+    /// Rientro in traiettoria dopo un urto, guidando: avanza di <paramref name="dist"/> nella direzione del muso, che
+    /// sterza verso la traiettoria (raggio minimo come un'auto); se è girata troppo di traverso prima fa retro
+    /// raddrizzandosi. Con <paramref name="reverse"/> arretra dritta (per lasciar passare). False se lì non c'è posto.
+    /// </summary>
+    private bool Realign(Vehicle v, float dist, bool reverse = false)
+    {
+        const float curv = 0.6f; // rad per unità di strada: circa il raggio minimo di sterzata
+        if (v.LaneYaw != 0f)
+        {
+            // Urtata a metà di un cambio di corsia: il muso girato diventa parte della rotazione da recuperare
+            v.YawOffset += v.LaneYaw;
+            v.LaneYaw = 0f;
+            v.ShiftTarget = v.Shift;
+        }
+        Vector2 path = PathHeading(v);
+        float pathYaw = MathF.Atan2(path.X, path.Y);
+        float lat = Vector2.Dot(v.Offset, RightOf(path));
+        bool back = reverse || MathF.Abs(v.YawOffset) > 1.2f;
+        float target = reverse ? v.YawOffset : back ? 0f : Math.Clamp(lat * 0.8f, -0.5f, 0.5f);
+        float newOff = MoveTowards(v.YawOffset, target, curv * dist);
+        float mid = pathYaw + 0.5f * (v.YawOffset + newOff);
+        Vector2 step = new Vector2(MathF.Sin(mid), MathF.Cos(mid)) * (back ? -dist : dist);
+        Vector2 pos = v.Pos + step;
+        float yaw = pathYaw + newOff;
+        if (!Free(v, pos, yaw) || PedestrianIn(BoxOf(v, pos, yaw))) return false;
+        v.YawOffset = newOff;
+        // Lungo la traiettoria si avanza su di lei; il resto (di lato) resta nello scostamento
+        float along = Vector2.Dot(step, path);
+        v.Offset += step - path * along;
+        if (along > 0f) Advance(v, along);
+        else { v.Offset += path * along; AbsorbAlong(v); }
+        if (v.Offset.LengthSquared() < 0.02f * 0.02f && MathF.Abs(v.YawOffset) < 0.02f)
+        {
+            v.Offset = Vector2.Zero;
+            v.YawOffset = 0f;
+        }
+        return true;
     }
 
     /// <summary>Sposta nella traiettoria (S sul tratto, o la distanza nella curva) la parte dello scostamento lungo la marcia.</summary>
@@ -1247,11 +1366,13 @@ public sealed class Traffic : IDisposable
     private bool StepBlocked(Vehicle v, float dist)
     {
         if (dist <= 0f) return false;
-        Vector2 a = PathPoint(v, dist - 0.3f, v.Shift), b = PathPoint(v, dist + 0.3f, v.Shift);
+        // Dove sarà davvero: anche lo spostamento di lato e il muso girato di un cambio di corsia in corso
+        float shift = v.Turning ? v.Shift : v.Shift + MathF.Sin(v.LaneYaw) * dist, laneYaw = v.Turning ? 0f : v.LaneYaw;
+        Vector2 a = PathPoint(v, dist - 0.3f, shift), b = PathPoint(v, dist + 0.3f, shift);
         Vector2 heading = b - a;
         heading = heading.LengthSquared() > 1e-6f ? Vector2.Normalize(heading) : v.Heading;
-        float yaw = Noise.WrapAngle(MathF.Atan2(heading.X, heading.Y) + v.YawOffset);
-        Vector2 pos = PathPoint(v, dist, v.Shift) + v.Offset;
+        float yaw = Noise.WrapAngle(MathF.Atan2(heading.X, heading.Y) - laneYaw + v.YawOffset); // muso a destra = yaw minore
+        Vector2 pos = PathPoint(v, dist, shift) + v.Offset;
         var now = BoxOf(v);
         var next = BoxOf(v, pos, yaw);
         // Chi si sblocca passando attraverso (incastro senza uscita) ignora le altre auto del traffico, non il giocatore
@@ -1416,10 +1537,9 @@ public sealed class Traffic : IDisposable
         {
             pos = LanePoint(v.Edge, v.Dir, v.Lane + v.Shift, v.S);
             heading = v.Edge.Tangent(v.S) * v.Dir;
-            // Cambiando corsia il muso punta un po' verso dove va
-            float side = v.ShiftTarget - v.Shift;
-            if (MathF.Abs(side) > 0.02f && v.Speed > 0.1f)
-                heading = Vector2.Normalize(heading + RightOf(heading) * MathF.Sign(side) * 0.35f);
+            // Cambiando corsia il muso è girato verso dove va (è lui che fa spostare l'auto di lato)
+            if (v.LaneYaw != 0f)
+                heading = heading * MathF.Cos(v.LaneYaw) + RightOf(heading) * MathF.Sin(v.LaneYaw);
         }
         // Dopo un urto: spostato e ruotato rispetto alla traiettoria
         pos += v.Offset;
@@ -1561,6 +1681,7 @@ public sealed class Traffic : IDisposable
                + $"{turning} negli incroci, "
                + $"{bypass} aggirano, {_cars.Count(v => v.Backing > 0f)} in retro per sbloccarsi, {ghost} passano attraverso, "
                + $"{Backs} retro, {Retreats} cambi di strada e {Ghosts} attraversamenti finora, ferma da più tempo {Worst()}, record {LongestBlock:F1} s, "
+               + $"scivolata di lato massima {WorstSlide:F2}/s [{SlideWho}], rotazione da ferma {WorstSpin:F2} rad/s [{SpinWho}], "
                + $"sovrapposizione massima {WorstOverlap:F3}"
                + (_cars.Find(v => v.Id == _followed) is { } f
                    ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Yield ? ", dà precedenza" : "")}{(f.Queued ? ", in coda" : "")}" : "");
