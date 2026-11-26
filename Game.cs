@@ -43,6 +43,7 @@ public sealed class DebugOptions
     public bool StealTest;         // scende e ruba un'auto del traffico (test)
     public bool RamTraffic;        // l'auto parte di fianco a un'auto del traffico, puntata contro (test)
     public bool Barricade;         // l'auto del giocatore si ferma davanti a un'auto del traffico, nella sua corsia (test)
+    public float BarricadeRoom = 2f; // con --sbarra-rettilineo: strada che deve restare dopo (per provare i sorpassi)
     public Roads.Characters.BodyStyle? BodyStyle; // il traffico ha solo questa carrozzeria (test)
     public bool AimPole;           // l'auto parte puntata contro il palo abbattibile più vicino (test)
     public bool Platform;          // appena a piedi, il personaggio va sulla banchina dove è fermo il treno (test)
@@ -482,7 +483,7 @@ public sealed partial class Game : IDisposable
             }
         }
 
-        if (_debug.Barricade && _time > 0.3f && !_onFoot && _traffic?.BarrierSpot(_player.Position, 7f) is { } barrier)
+        if (_debug.Barricade && _time > 0.3f && !_onFoot && _traffic?.BarrierSpot(_player.Position, 7f, _debug.BarricadeRoom) is { } barrier)
         {
             _debug.Barricade = false;
             _player.Place(barrier.Pos with { Y = _world.GroundHeight(barrier.Pos) }, barrier.Yaw);
