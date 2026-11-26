@@ -40,6 +40,8 @@ public sealed class Traffic : IDisposable
     // HoldTime s che l'altra passi; se nessuna può arretrare, dopo GhostAfter s una passa attraverso
     private const int NoHit = int.MinValue;
     private const float JamWait = 1.2f, BackSpeed = 1.4f, BackTime = 2.2f, HoldTime = 3.5f, GhostAfter = 9f;
+    // Strada sbarrata dal giocatore: dopo RetreatAfter s si torna indietro e si cambia strada
+    private const float RetreatAfter = 4f;
 
     private static readonly Vector3[] Paints =
     [
@@ -97,7 +99,7 @@ public sealed class Traffic : IDisposable
     public float WorstOverlap { get; private set; }
     /// <summary>Prove: il fermo più lungo senza una buona ragione (non al rosso, non in coda) da inizio partita.</summary>
     public float LongestBlock { get; private set; }
-    private int Backs, Ghosts;
+    private int Backs, Ghosts, Retreats;
 
     /// <summary>Test: se dato, nascono solo veicoli con questa carrozzeria.</summary>
     public BodyStyle? OnlyStyle { get; init; }
@@ -232,6 +234,10 @@ public sealed class Traffic : IDisposable
         public float Backing, Hold;    // retromarcia in corso; poi attesa che l'altra passi
         public float BackFail;         // ha appena ceduto (o non può arretrare): al prossimo incastro tocca a un'altra
         public bool Reversing;
+        // Strada sbarrata: si torna indietro fino all'incrocio, si esce in retro girando e si prende un'altra strada
+        public bool DeadEnd, Retreat;
+        public Curve? BackCurve;
+        public float BackD, RetreatFail, RetreatTime;
         public string Why = ""; // prove: cosa la ferma
         public bool Touching;          // un passo avanti la farebbe entrare in un altro veicolo (TouchId)
         public int TouchId = NoHit;
@@ -528,6 +534,8 @@ public sealed class Traffic : IDisposable
     {
         v.Ghost = MathF.Max(0f, v.Ghost - dt);
         v.BackFail = MathF.Max(0f, v.BackFail - dt);
+        v.RetreatFail = MathF.Max(0f, v.RetreatFail - dt);
+        if (v.Retreat) { RetreatStep(v, dt, world); return; }
         if (v.Backing > 0f) { Reverse(v, dt, world); return; }
         v.Reversing = false;
 
@@ -598,6 +606,11 @@ public sealed class Traffic : IDisposable
         Vehicle? ahead = stuck && hit is { Car: true } hc ? Find(hc.Owner) : null;
         v.Queued = ((v.AtLight || v.Yield) && v.Speed < 0.5f) || (stuck && train) || (ahead?.Queued ?? false);
         v.HitId = ahead?.Id ?? NoHit;
+        // Strada sbarrata: fermi davanti all'auto del giocatore (o a lui) senza poterla aggirare, o in coda dietro a chi lo
+        // è. Dopo un po' si torna indietro fino all'incrocio e si prende un'altra strada.
+        bool barred = stuck && !train && (hit is { Car: false, Owner: -1 or -2, Moving: false } || (v.Touching && v.TouchId == NoHit && hit == null));
+        v.DeadEnd = barred || (ahead != null && (ahead.DeadEnd || ahead.Retreat));
+        if (v.DeadEnd && v.Blocked > RetreatAfter && v.RetreatFail <= 0f && !v.Turning) StartRetreat(v);
         // Incastrate a vicenda: una arretra e lascia passare (tocca a lei se è la scelta del giro)
         if (ahead != null && !v.Queued && v.Blocked > JamWait && v.Hold <= 0f && Jam(v) is { } turn)
         {
@@ -856,6 +869,178 @@ public sealed class Traffic : IDisposable
         if (moved) v.Spin -= d / (CarModel.WheelRadius * Scale);
     }
 
+    private void StartRetreat(Vehicle v)
+    {
+        v.Retreat = true;
+        v.RetreatTime = 0f;
+        v.BackCurve = null;
+        v.Backing = v.Hold = 0f;
+        v.ShiftTarget = 0f;
+        v.Blocked = 0f;
+        Retreats++;
+    }
+
+    /// <summary>
+    /// Strada sbarrata: retromarcia lungo il tratto fino all'incrocio da cui si era entrati, poi uscita all'indietro
+    /// girando (il muso si volta verso la strada scelta) e di lì avanti nella strada nuova, come la curva di un incrocio.
+    /// Ci si ferma (e si riprova) se dietro c'è qualcosa; se all'incrocio non c'è un'altra strada possibile si rinuncia.
+    /// </summary>
+    private void RetreatStep(Vehicle v, float dt, WorldMap world)
+    {
+        v.RetreatTime += dt;
+        v.Ghost = MathF.Max(0f, v.Ghost - dt);
+        v.Reversing = true;
+        v.Speed = 0f;
+        v.Want = 0f;
+        v.Brake = 0f;
+        v.Touching = false;
+        v.Queued = v.Yield = v.AtLight = false;
+        v.DeadEnd = true; // chi è in coda dietro fa lo stesso (e si sposta per primo)
+        v.Why = "torna indietro";
+        v.BackFail = MathF.Max(v.BackFail, 1f); // negli incastri arretra l'altra: lei sta già facendo manovra
+        float d = BackSpeed * dt;
+        bool moved = false;
+
+        if (v.BackCurve == null)
+        {
+            float fromStart = (v.S - StartS(v.Edge, v.Dir)) * v.Dir;
+            if (fromStart > 0.6f) moved = TryRetreat(v, MathF.Min(d, fromStart - 0.55f));
+            else if (!PlanBackOut(v)) GiveUpRetreat(v); // all'incrocio non c'è dove andare: si aspetta e basta
+        }
+        else
+        {
+            float to = MathF.Min(v.BackD + d, v.BackCurve.Length);
+            Vector2 pos = v.BackCurve.At(to), h = -v.BackCurve.Tangent(to);
+            float yaw = Noise.WrapAngle(MathF.Atan2(h.X, h.Y) + v.YawOffset);
+            // Ferma da troppo nell'incrocio (chi le sta dietro non si sposta): ultima risorsa, passa attraverso le auto
+            // del traffico (mai attraverso il giocatore o i passanti)
+            if (v.Blocked > GhostAfter) { v.Ghost = 4f; Ghosts++; v.Blocked = 0f; }
+            bool through = v.Ghost > 0f;
+            var box = BoxOf(v, pos + v.Offset, yaw);
+            bool free = through ? DepthAgainst(box, v, null, traffic: false) <= 0.002f : Free(v, pos + v.Offset, yaw);
+            if (free && !PedestrianIn(box))
+            {
+                moved = true;
+                v.BackD = to;
+            }
+            if (v.BackD >= v.BackCurve.Length - 1e-3f)
+            {
+                // Girata: avanti nella strada nuova (la curva è già pronta in v.Turn)
+                v.BackCurve = null;
+                v.Retreat = false;
+                v.Reversing = false;
+                v.DeadEnd = false;
+                v.Turning = true;
+                v.TurnD = 0f;
+            }
+        }
+        // Bloccata a lungo dietro (altre auto che non si spostano): si rinuncia e si aspetta davanti
+        if (v.Retreat && v.BackCurve == null && v.RetreatTime > 20f) GiveUpRetreat(v);
+        // Ferma in retro: conta come bloccata da chi ha dietro, così un incastro con lei si scioglie (arretra l'altra)
+        if (moved || !v.Retreat) { v.Blocked = 0f; v.HitId = NoHit; }
+        else
+        {
+            v.Blocked += dt;
+            v.HitId = BlockerOf(BoxOf(v, v.Pos - v.Heading * 0.35f, v.Yaw), v);
+        }
+        Pose(v, world, dt);
+        if (moved) v.Spin -= d / (CarModel.WheelRadius * Scale);
+    }
+
+    private void GiveUpRetreat(Vehicle v)
+    {
+        v.Retreat = false;
+        v.Reversing = false;
+        v.BackCurve = null;
+        v.RetreatFail = 10f;
+    }
+
+    /// <summary>L'auto del traffico in cui il rettangolo entra di più (NoHit se nessuna).</summary>
+    private int BlockerOf(in VehicleBox box, Vehicle self)
+    {
+        int id = NoHit;
+        float most = 0.002f;
+        foreach (var o in _cars)
+            if (o != self && !o.Dead && VehicleBox.Overlap(box, BoxOf(o), out _, out float d) && d > most) { most = d; id = o.Id; }
+        return id;
+    }
+
+    private bool PedestrianIn(in VehicleBox box)
+    {
+        foreach (var o in _obstacles)
+            if (o.Owner < -1 && box.CircleDepth(o.C, o.R, out _) > 0.002f) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// All'inizio del tratto, davanti all'incrocio da cui si era entrati: sceglie un'altra strada che parte da lì (di
+    /// lato, non quella dritta di fronte né questa) e prepara l'uscita in retro (v.BackCurve: la coda va dalla parte
+    /// opposta alla strada scelta, così il muso le si volta contro) e la curva in avanti per entrarci (v.Turn).
+    /// Tutto dev'essere su strada. False se non c'è una strada possibile.
+    /// </summary>
+    private bool PlanBackOut(Vehicle v)
+    {
+        var e = v.Edge;
+        var node = v.Dir > 0 ? e.A : e.B;
+        float s0 = StartS(e, v.Dir);
+        Vector2 d = e.Tangent(s0) * v.Dir;                    // muso, verso il tratto (lontano dall'incrocio)
+        Vector2 p0 = LanePoint(e, v.Dir, v.Lane, v.S) ;
+        var options = new List<(RoadEdge E, int Dir, Vector2 L)>();
+        foreach (var o in node.Edges)
+        {
+            if (o == e) continue;
+            int od = o.A == node ? 1 : -1;
+            if (!Allows(o, od)) continue;
+            Vector2 l = o.LeaveDir(node);
+            if (Vector2.Dot(l, d) < -0.5f) continue;         // di fronte: bisognerebbe girarsi del tutto
+            options.Add((o, od, l));
+        }
+        // A caso, ma la prima che si riesce davvero a fare
+        for (int i = options.Count - 1; i > 0; i--) { int j = _rng.Next(i + 1); (options[i], options[j]) = (options[j], options[i]); }
+        foreach (var (o, od, l) in options)
+        {
+            var lanes = o.TravelLanes(od);
+            float lane = lanes.Length == 1 ? lanes[0] : lanes.Max(); // corsia esterna
+            float startS = StartS(o, od);
+            Vector2 p3 = LanePoint(o, od, lane, startS), leave = o.Tangent(startS) * od;
+            foreach (float r in new[] { 1.6f, 0.9f, 0.3f })
+            {
+                // Dove finisce la retro: dalla parte opposta alla strada scelta, col muso già verso di lei
+                Vector2 q = node.Pos - l * r;
+                var back = new Curve(p0, -d, q, -l, MathF.Max(0.8f, Vector2.Distance(p0, q) * 0.5f));
+                float gap = Vector2.Distance(q, p3);
+                var forward = new Curve(q, l, p3, leave, MathF.Max(0.6f, gap * 0.42f));
+                if (!OnRoad(v, back, true) || !OnRoad(v, forward, false)) continue;
+                v.BackCurve = back;
+                v.BackD = 0f;
+                v.Next = o;
+                v.NextDir = od;
+                v.NextLane = lane;
+                v.Turn = forward;
+                v.TurnNode = node;
+                float angle = MathF.Acos(Math.Clamp(Vector2.Dot(l, leave), -1f, 1f));
+                v.Kind = TurnKind.Straight;
+                v.TurnSpeed = Noise.Lerp(MathF.Min(v.Cruise, Limit(o)) * 0.9f, 3f, Noise.Smooth(0.25f, 1.5f, angle + 0.5f));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>L'auto resta sulla strada (o nello slargo) per tutta la curva? (all'indietro: col muso al contrario)</summary>
+    private bool OnRoad(Vehicle v, Curve c, bool reverse)
+    {
+        if (_world == null) return true;
+        for (float s = 0f; s <= c.Length + 0.01f; s += 0.4f)
+        {
+            Vector2 p = c.At(MathF.Min(s, c.Length)), h = c.Tangent(MathF.Min(s, c.Length)) * (reverse ? -1f : 1f);
+            Vector2 f = h * v.HullOffset;
+            if (!_world.IsRoad(new Vector3(p.X + f.X, 0f, p.Y + f.Y)) || !_world.IsRoad(new Vector3(p.X - f.X, 0f, p.Y - f.Y)))
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>Arretra di <paramref name="d"/> lungo la traiettoria, se lì c'è posto (altrimenti non si muove).</summary>
     private bool TryRetreat(Vehicle v, float d)
     {
@@ -1074,11 +1259,7 @@ public sealed class Traffic : IDisposable
         if (after > 0.002f && after >= before - 1e-4f)
         {
             // Contro chi si urterebbe: l'auto del traffico più dentro (NoHit se è un'auto del giocatore)
-            v.TouchId = NoHit;
-            float most = 0.002f;
-            if (v.Ghost <= 0f)
-                foreach (var o in _cars)
-                    if (o != v && !o.Dead && VehicleBox.Overlap(next, BoxOf(o), out _, out float d) && d > most) { most = d; v.TouchId = o.Id; }
+            v.TouchId = v.Ghost <= 0f ? BlockerOf(next, v) : NoHit;
             return true;
         }
         // Passanti e personaggio: cerchi
@@ -1220,7 +1401,13 @@ public sealed class Traffic : IDisposable
     private static void Pose(Vehicle v, WorldMap world, float dt)
     {
         Vector2 pos, heading;
-        if (v.Turning)
+        if (v.BackCurve != null)
+        {
+            // Uscita in retromarcia nell'incrocio: si va lungo la curva, col muso dalla parte opposta
+            pos = v.BackCurve.At(v.BackD);
+            heading = -v.BackCurve.Tangent(v.BackD);
+        }
+        else if (v.Turning)
         {
             pos = v.Turn!.At(v.TurnD);
             heading = v.Turn.Tangent(v.TurnD);
@@ -1344,6 +1531,20 @@ public sealed class Traffic : IDisposable
     }
 
     /// <summary>Test: l'auto seguita si ferma e resta ferma (bersaglio per le prove d'urto).</summary>
+    /// <summary>
+    /// Test: un punto sulla traiettoria dell'auto del traffico più vicina, <paramref name="ahead"/> davanti a lei nella
+    /// sua corsia (prima dell'incrocio), con la direzione di marcia: lì si mette l'auto del giocatore a sbarrarle la strada.
+    /// </summary>
+    public (Vector3 Pos, float Yaw)? BarrierSpot(Vector3 near, float ahead)
+    {
+        var v = _cars.Where(c => !c.Turning && c.Remaining > ahead + 2f)
+                     .MinBy(c => Vector2.DistanceSquared(c.Pos, new Vector2(near.X, near.Z)));
+        if (v == null) return null;
+        Vector2 p = PathPoint(v, ahead, 0f), h = PathPoint(v, ahead + 0.3f, 0f) - PathPoint(v, ahead - 0.3f, 0f);
+        Console.WriteLine($"Test: strada sbarrata all'auto {v.Id} ({v.Edge.Layout}, a {v.Remaining - ahead:F1} dall'incrocio)");
+        return (new Vector3(p.X, 0f, p.Y), MathF.Atan2(h.X, h.Y));
+    }
+
     public void FreezeFollowed()
     {
         if (_cars.Find(c => c.Id == _followed) is { } v) v.Cruise = v.Speed = 0f;
@@ -1359,7 +1560,7 @@ public sealed class Traffic : IDisposable
         return $"traffico: {_cars.Count} auto, {stopped} ferme ({light} al rosso, {yields} danno precedenza, {queued} in coda), "
                + $"{turning} negli incroci, "
                + $"{bypass} aggirano, {_cars.Count(v => v.Backing > 0f)} in retro per sbloccarsi, {ghost} passano attraverso, "
-               + $"{Backs} retro e {Ghosts} attraversamenti finora, ferma da più tempo {Worst()}, record {LongestBlock:F1} s, "
+               + $"{Backs} retro, {Retreats} cambi di strada e {Ghosts} attraversamenti finora, ferma da più tempo {Worst()}, record {LongestBlock:F1} s, "
                + $"sovrapposizione massima {WorstOverlap:F3}"
                + (_cars.Find(v => v.Id == _followed) is { } f
                    ? $"; seguita: {f.Speed:F1} u/s{(f.AtLight ? ", ferma al semaforo" : "")}{(f.Yield ? ", dà precedenza" : "")}{(f.Queued ? ", in coda" : "")}" : "");

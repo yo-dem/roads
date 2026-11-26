@@ -161,6 +161,9 @@ public static class Program
                 case "--carrozzeria" when i + 1 < args.Length:
                     d.BodyStyle = Enum.Parse<Roads.Characters.BodyStyle>(args[++i], ignoreCase: true);
                     break;
+                case "--sbarra":
+                    d.Barricade = true;
+                    break;
                 case "--senza-precedenze":
                     d.Reckless = true;
                     break;
